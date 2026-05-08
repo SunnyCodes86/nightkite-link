@@ -2,6 +2,9 @@
 #include <SD.h>
 #include <SPI.h>
 #include "M5Cardputer.h"
+#if NIGHTKITE_USB_HOST
+#include <USBHostSerial.h>
+#endif
 
 namespace {
 
@@ -26,6 +29,7 @@ constexpr int FOOTER_H = 13;
 constexpr int CONTENT_Y = STATUS_H + TAB_H;
 constexpr int CONTENT_H = SCREEN_H - STATUS_H - TAB_H - FOOTER_H;
 constexpr int MAX_TERMINAL_LINES = 8;
+constexpr unsigned long CARDPUTER_BATTERY_POLL_MS = 3000;
 
 constexpr int SD_SPI_SCK_PIN = 40;
 constexpr int SD_SPI_MISO_PIN = 39;
@@ -71,6 +75,9 @@ struct NightKiteState {
   String mpuConnected = "--";
   String dmpReady = "--";
   String fps = "--";
+  String cardBatteryLevel = "--";
+  String cardBatteryVoltage = "--";
+  bool cardCharging = false;
   String lastError = "";
   String lastOk = "";
   String sdStatus = "SD: --";
@@ -144,6 +151,7 @@ int terminalLineCount = 0;
 String inputLine;
 String rxLine;
 unsigned long lastPollMs = 0;
+unsigned long lastCardBatteryPollMs = 0;
 
 int brightnessLevels[] = {95, 127, 159, 191, 223, 255};
 constexpr size_t BRIGHTNESS_LEVEL_COUNT = sizeof(brightnessLevels) / sizeof(brightnessLevels[0]);
@@ -195,7 +203,68 @@ private:
   String buffer;
 };
 
+#if NIGHTKITE_USB_HOST
+class UsbHostSerialTransport : public NightKiteTransport {
+public:
+  UsbHostSerialTransport() : hostSerial(0x2E8A, CDC_HOST_ANY_PID)
+  {
+  }
+
+  void begin()
+  {
+    if (started) {
+      return;
+    }
+    started = hostSerial.begin(SERIAL_BAUD, 0, 0, 8);
+  }
+
+  bool connected() override
+  {
+    begin();
+    return static_cast<bool>(hostSerial);
+  }
+
+  void sendLine(const String& line) override
+  {
+    begin();
+    if (!connected()) {
+      return;
+    }
+    hostSerial.write(reinterpret_cast<const uint8_t*>(line.c_str()), line.length());
+    hostSerial.write(static_cast<uint8_t>('\n'));
+  }
+
+  bool readLine(String& line) override
+  {
+    begin();
+    while (hostSerial.available() > 0) {
+      char c = static_cast<char>(hostSerial.read());
+      if (c == '\r') {
+        continue;
+      }
+      if (c == '\n') {
+        line = buffer;
+        buffer = "";
+        line.trim();
+        return line.length() > 0;
+      }
+      if (buffer.length() < 180) {
+        buffer += c;
+      }
+    }
+    return false;
+  }
+
+private:
+  USBHostSerial hostSerial;
+  bool started = false;
+  String buffer;
+};
+
+UsbHostSerialTransport transport;
+#else
 DebugSerialTransport transport;
+#endif
 
 String profilePath(int slot)
 {
@@ -589,6 +658,33 @@ String showInt(int value)
   return value >= 0 ? String(value) : "--";
 }
 
+String voltageTextFromMv(int mv)
+{
+  if (mv <= 0) {
+    return "--";
+  }
+  char buffer[12];
+  snprintf(buffer, sizeof(buffer), "%.2fV", mv / 1000.0f);
+  return String(buffer);
+}
+
+void updateCardputerBattery(bool force = false)
+{
+  if (!force && millis() - lastCardBatteryPollMs < CARDPUTER_BATTERY_POLL_MS) {
+    return;
+  }
+  lastCardBatteryPollMs = millis();
+
+  int level = M5.Power.getBatteryLevel();
+  int voltageMv = M5.Power.getBatteryVoltage();
+  auto charging = M5.Power.isCharging();
+
+  nk.cardBatteryLevel = level >= 0 ? String(level) + "%" : "--";
+  nk.cardBatteryVoltage = voltageTextFromMv(voltageMv);
+  nk.cardCharging = charging == m5::Power_Class::is_charging_t::is_charging;
+  needsRender = true;
+}
+
 uint16_t terminalColor(const String& line)
 {
   if (line.startsWith(">")) {
@@ -620,7 +716,7 @@ String footerText()
     case View::Status:
       return "Enter refresh   1 show 2 batt 3 sensor";
     case View::Patterns:
-      return "W/S select   Enter run   ! confirm";
+      return "Arrows select   Enter run   ! confirm";
     case View::Config:
       return "Brightness, autoplay, save/load";
     case View::Profiles:
@@ -630,7 +726,7 @@ String footerText()
     case View::Terminal:
       return "Type command   Enter send   Back delete";
   }
-  return "Tab view   W/S select   Enter run";
+  return "Tab view   Arrows select   Enter run";
 }
 
 void drawStatusBadge(int x, int y, const String& label, uint16_t color)
@@ -658,8 +754,10 @@ void drawChrome()
   drawStatusBadge(83, 3, nk.errorSeen ? "NK ERR" : (nk.linkSeen ? "NK OK" : "NK --"),
                   nk.errorSeen ? COLOR_ERR : statusColor(nk.linkSeen));
   drawStatusBadge(136, 3, nk.sdReady ? "SD OK" : "SD --", statusColor(nk.sdReady));
+  drawStatusBadge(181, 3, (nk.cardCharging ? "+" : "") + nk.cardBatteryLevel,
+                  nk.cardCharging ? COLOR_OK : COLOR_ACCENT);
   if (nk.unsavedHint) {
-    drawStatusBadge(190, 3, "SAVE!", COLOR_WARN);
+    drawStatusBadge(214, 3, "!", COLOR_WARN);
   }
 
   d.fillRect(0, STATUS_H, SCREEN_W, TAB_H, COLOR_BG);
@@ -708,15 +806,16 @@ void drawStatusView()
   drawMetric(4, CONTENT_Y + 3, "Pattern", showInt(nk.pattern), COLOR_ACCENT);
   drawMetric(64, CONTENT_Y + 3, "Bright", showInt(nk.brightness), COLOR_TEXT);
   drawMetric(124, CONTENT_Y + 3, "Autoplay", nk.autoplay, nk.autoplay == "on" ? COLOR_OK : COLOR_MUTED);
-  drawMetric(184, CONTENT_Y + 3, "Kite V", nk.kiteBatteryVoltage, COLOR_TEXT);
+  drawMetric(184, CONTENT_Y + 3, "Link V", nk.kiteBatteryVoltage, COLOR_TEXT);
 
   drawMetric(4, CONTENT_Y + 35, "Strip", showInt(nk.stripLength));
   drawMetric(64, CONTENT_Y + 35, "DMP", nk.dmpReady == "1" ? "OK" : nk.dmpReady, nk.dmpReady == "1" ? COLOR_OK : COLOR_WARN);
   drawMetric(124, CONTENT_Y + 35, "MPU", nk.mpuConnected == "1" ? "OK" : nk.mpuConnected, nk.mpuConnected == "1" ? COLOR_OK : COLOR_WARN);
-  drawMetric(184, CONTENT_Y + 35, "FPS", nk.fps);
+  drawMetric(184, CONTENT_Y + 35, "Card", nk.cardBatteryLevel, nk.cardCharging ? COLOR_OK : COLOR_ACCENT);
 
   drawBar(64, CONTENT_Y + 66, 55, 5, nk.brightness, 95, 255, COLOR_ACCENT);
-  drawTextFit(nk.sdStatus, 4, CONTENT_Y + 75, 110, nk.sdReady ? COLOR_OK : COLOR_MUTED);
+  drawTextFit("Card " + nk.cardBatteryVoltage, 4, CONTENT_Y + 75, 70, nk.cardCharging ? COLOR_OK : COLOR_MUTED);
+  drawTextFit(nk.sdStatus, 77, CONTENT_Y + 75, 38, nk.sdReady ? COLOR_OK : COLOR_MUTED);
   drawTextFit(nk.errorSeen ? nk.lastError : nk.lastOk, 118, CONTENT_Y + 75, 118, nk.errorSeen ? COLOR_ERR : COLOR_MUTED);
 }
 
@@ -856,6 +955,26 @@ void changeView(int delta)
   needsRender = true;
 }
 
+void moveSelection(int delta)
+{
+  size_t count = menuCountForCurrentView();
+  if (count == 0) {
+    return;
+  }
+
+  int next = selectedIndex + delta;
+  if (next < 0) {
+    next = 0;
+  }
+  if (next >= static_cast<int>(count)) {
+    next = static_cast<int>(count) - 1;
+  }
+  if (next != selectedIndex) {
+    selectedIndex = next;
+    needsRender = true;
+  }
+}
+
 void runSelected()
 {
   switch (currentView) {
@@ -926,28 +1045,28 @@ void handleWordChar(char c)
   switch (c) {
     case 'a':
     case 'A':
+    case ',':
+    case '<':
       changeView(-1);
       break;
     case 'd':
     case 'D':
+    case '/':
+    case '?':
       changeView(1);
       break;
     case 'w':
     case 'W':
-      if (selectedIndex > 0) {
-        --selectedIndex;
-        needsRender = true;
-      }
+    case ';':
+    case ':':
+      moveSelection(-1);
       break;
     case 's':
-    case 'S': {
-      size_t count = menuCountForCurrentView();
-      if (count > 0 && selectedIndex < static_cast<int>(count - 1)) {
-        ++selectedIndex;
-        needsRender = true;
-      }
+    case 'S':
+    case '.':
+    case '>':
+      moveSelection(1);
       break;
-    }
     default:
       if (c >= '1' && c <= '9') {
         quickCommand(c);
@@ -1038,6 +1157,7 @@ void setup()
   M5Cardputer.Display.setFont(&fonts::Font0);
   M5Cardputer.Display.setTextDatum(top_left);
 
+  updateCardputerBattery(true);
   addTerminalLine("NightKite Link boot");
   addTerminalLine("Debug transport on USB Serial");
   sendCommand("show");
@@ -1046,6 +1166,7 @@ void setup()
 void loop()
 {
   M5Cardputer.update();
+  updateCardputerBattery();
   handleKeyboard();
   pollTransport();
   render();
