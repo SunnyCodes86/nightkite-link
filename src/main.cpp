@@ -1,4 +1,6 @@
 #include <Arduino.h>
+#include <SD.h>
+#include <SPI.h>
 #include "M5Cardputer.h"
 
 namespace {
@@ -22,13 +24,22 @@ constexpr int CONTENT_Y = STATUS_H + TAB_H;
 constexpr int CONTENT_H = SCREEN_H - STATUS_H - TAB_H - FOOTER_H;
 constexpr int MAX_TERMINAL_LINES = 8;
 
-const char* const VIEW_NAMES[] = {"Status", "Patterns", "Config", "Service", "Terminal"};
+constexpr int SD_SPI_SCK_PIN = 40;
+constexpr int SD_SPI_MISO_PIN = 39;
+constexpr int SD_SPI_MOSI_PIN = 14;
+constexpr int SD_SPI_CS_PIN = 12;
+constexpr uint32_t ALL_PATTERN_MASK = (1UL << 22) - 1UL;
+
+const char* const ALL_PATTERN_LIST = "1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22";
+
+const char* const VIEW_NAMES[] = {"Status", "Patt", "Cfg", "Prof", "Svc", "Term"};
 constexpr size_t VIEW_COUNT = sizeof(VIEW_NAMES) / sizeof(VIEW_NAMES[0]);
 
 enum class View : uint8_t {
   Status,
   Patterns,
   Config,
+  Profiles,
   Service,
   Terminal,
 };
@@ -37,6 +48,7 @@ struct NightKiteState {
   bool linkSeen = false;
   bool errorSeen = false;
   bool unsavedHint = false;
+  bool sdReady = false;
   unsigned long lastRxMs = 0;
   unsigned long lastTxMs = 0;
 
@@ -58,6 +70,7 @@ struct NightKiteState {
   String fps = "--";
   String lastError = "";
   String lastOk = "";
+  String sdStatus = "SD: --";
 };
 
 struct MenuItem {
@@ -68,13 +81,19 @@ struct MenuItem {
 
 const MenuItem PATTERN_MENU[] = {
     {"Refresh patterns", "patterns", false},
+    {"Pattern +", nullptr, false},
+    {"Pattern -", nullptr, false},
+    {"Enable current", nullptr, false},
+    {"Disable current", nullptr, true},
+    {"Invert current", nullptr, false},
+    {"Normal current", nullptr, false},
+    {"Enable all", "enable_pattern 1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22", false},
+    {"Normal all", "normal_pattern 1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22", false},
     {"Pattern 1", "set pattern 1", false},
     {"Pattern 2", "set pattern 2", false},
     {"Pattern 3", "set pattern 3", false},
     {"Pattern 4", "set pattern 4", false},
     {"Pattern 5", "set pattern 5", false},
-    {"Pattern +", nullptr, false},
-    {"Pattern -", nullptr, false},
 };
 
 const MenuItem CONFIG_MENU[] = {
@@ -86,6 +105,17 @@ const MenuItem CONFIG_MENU[] = {
     {"Autoplay 20s", "set autoplay_interval 20", false},
     {"Save", "save", false},
     {"Load", "load", true},
+};
+
+const MenuItem PROFILE_MENU[] = {
+    {"Init SD", nullptr, false},
+    {"Refresh config", "show", false},
+    {"Save slot 1", nullptr, true},
+    {"Save slot 2", nullptr, true},
+    {"Save slot 3", nullptr, true},
+    {"Load slot 1", nullptr, true},
+    {"Load slot 2", nullptr, true},
+    {"Load slot 3", nullptr, true},
 };
 
 const MenuItem SERVICE_MENU[] = {
@@ -114,6 +144,9 @@ unsigned long lastPollMs = 0;
 
 int brightnessLevels[] = {95, 127, 159, 191, 223, 255};
 constexpr size_t BRIGHTNESS_LEVEL_COUNT = sizeof(brightnessLevels) / sizeof(brightnessLevels[0]);
+
+void addTerminalLine(const String& line);
+void sendCommand(const String& command);
 
 class NightKiteTransport {
 public:
@@ -160,6 +193,185 @@ private:
 };
 
 DebugSerialTransport transport;
+
+String profilePath(int slot)
+{
+  return "/nightkite/profiles/slot" + String(slot) + ".nkc";
+}
+
+bool ensureSdReady()
+{
+  if (nk.sdReady) {
+    return true;
+  }
+
+  SPI.begin(SD_SPI_SCK_PIN, SD_SPI_MISO_PIN, SD_SPI_MOSI_PIN, SD_SPI_CS_PIN);
+  if (!SD.begin(SD_SPI_CS_PIN, SPI, 25000000)) {
+    nk.sdStatus = "SD init failed";
+    addTerminalLine("ERR " + nk.sdStatus);
+    return false;
+  }
+
+  if (SD.cardType() == CARD_NONE) {
+    nk.sdStatus = "No SD card";
+    addTerminalLine("ERR " + nk.sdStatus);
+    return false;
+  }
+
+  SD.mkdir("/nightkite");
+  SD.mkdir("/nightkite/profiles");
+  nk.sdReady = true;
+  nk.sdStatus = "SD ready";
+  addTerminalLine("OK " + nk.sdStatus);
+  return true;
+}
+
+bool validField(const String& value)
+{
+  return value.length() > 0 && value != "--";
+}
+
+uint32_t patternMaskFromList(String list)
+{
+  uint32_t mask = 0;
+  list.trim();
+  int start = 0;
+  while (start < list.length()) {
+    int comma = list.indexOf(',', start);
+    String token = comma >= 0 ? list.substring(start, comma) : list.substring(start);
+    token.trim();
+    int id = token.toInt();
+    if (id >= 1 && id <= 22) {
+      mask |= (1UL << (id - 1));
+    }
+    if (comma < 0) {
+      break;
+    }
+    start = comma + 1;
+  }
+  return mask;
+}
+
+String patternListFromMask(uint32_t mask)
+{
+  String list;
+  for (int id = 1; id <= 22; ++id) {
+    if ((mask & (1UL << (id - 1))) == 0) {
+      continue;
+    }
+    if (list.length() > 0) {
+      list += ',';
+    }
+    list += String(id);
+  }
+  return list;
+}
+
+void writeCommandIfInt(File& file, const char* key, int value)
+{
+  if (value >= 0) {
+    file.print("set ");
+    file.print(key);
+    file.print(' ');
+    file.println(value);
+  }
+}
+
+void writeCommandIfString(File& file, const char* key, const String& value)
+{
+  if (validField(value)) {
+    file.print("set ");
+    file.print(key);
+    file.print(' ');
+    file.println(value);
+  }
+}
+
+bool saveProfileSlot(int slot)
+{
+  if (!ensureSdReady()) {
+    return false;
+  }
+
+  String path = profilePath(slot);
+  SD.remove(path);
+  File file = SD.open(path, FILE_WRITE);
+  if (!file) {
+    nk.sdStatus = "Profile open failed";
+    addTerminalLine("ERR " + nk.sdStatus);
+    return false;
+  }
+
+  file.println("# NightKite Link profile");
+  file.println("# CLI command file for NightKite Multi");
+  writeCommandIfInt(file, "pattern", nk.pattern);
+  writeCommandIfInt(file, "brightness", nk.brightness);
+  writeCommandIfInt(file, "strip_length", nk.stripLength);
+  writeCommandIfInt(file, "smoothing", nk.smoothing);
+  writeCommandIfInt(file, "accel_range", nk.accelRange);
+  writeCommandIfInt(file, "gyro_range", nk.gyroRange);
+  writeCommandIfString(file, "boot_calibration", nk.bootCalibration);
+  writeCommandIfString(file, "autoplay", nk.autoplay);
+  writeCommandIfInt(file, "autoplay_interval", nk.autoplayInterval);
+
+  if (validField(nk.enabledPatterns)) {
+    uint32_t enabledMask = patternMaskFromList(nk.enabledPatterns);
+    uint32_t disabledMask = ALL_PATTERN_MASK & ~enabledMask;
+    String disabledPatterns = patternListFromMask(disabledMask);
+    file.print("enable_pattern ");
+    file.println(ALL_PATTERN_LIST);
+    if (disabledPatterns.length() > 0 && disabledPatterns != ALL_PATTERN_LIST) {
+      file.print("disable_pattern ");
+      file.println(disabledPatterns);
+    }
+  }
+
+  file.print("normal_pattern ");
+  file.println(ALL_PATTERN_LIST);
+  if (validField(nk.invertedPatterns)) {
+    file.print("invert_pattern ");
+    file.println(nk.invertedPatterns);
+  }
+
+  file.println("save");
+  file.close();
+
+  nk.sdStatus = "Saved slot " + String(slot);
+  addTerminalLine("OK " + nk.sdStatus);
+  return true;
+}
+
+bool loadProfileSlot(int slot)
+{
+  if (!ensureSdReady()) {
+    return false;
+  }
+
+  String path = profilePath(slot);
+  File file = SD.open(path, FILE_READ);
+  if (!file) {
+    nk.sdStatus = "Profile missing " + String(slot);
+    addTerminalLine("ERR " + nk.sdStatus);
+    return false;
+  }
+
+  int sent = 0;
+  while (file.available()) {
+    String command = file.readStringUntil('\n');
+    command.trim();
+    if (command.length() == 0 || command.startsWith("#")) {
+      continue;
+    }
+    sendCommand(command);
+    ++sent;
+    delay(20);
+  }
+  file.close();
+
+  nk.sdStatus = "Loaded slot " + String(slot) + " cmds=" + String(sent);
+  addTerminalLine("OK " + nk.sdStatus);
+  return sent > 0;
+}
 
 void addTerminalLine(const String& line)
 {
@@ -258,6 +470,27 @@ void sendCommand(const String& command)
   addTerminalLine("> " + command);
 }
 
+void runActionCommand(const String& command)
+{
+  if (command == "@sd:init") {
+    ensureSdReady();
+  } else if (command == "@profile:save:1") {
+    saveProfileSlot(1);
+  } else if (command == "@profile:save:2") {
+    saveProfileSlot(2);
+  } else if (command == "@profile:save:3") {
+    saveProfileSlot(3);
+  } else if (command == "@profile:load:1") {
+    loadProfileSlot(1);
+  } else if (command == "@profile:load:2") {
+    loadProfileSlot(2);
+  } else if (command == "@profile:load:3") {
+    loadProfileSlot(3);
+  } else {
+    sendCommand(command);
+  }
+}
+
 void executeMenuItem(const MenuItem& item)
 {
   String command = item.command == nullptr ? "" : String(item.command);
@@ -267,6 +500,28 @@ void executeMenuItem(const MenuItem& item)
       command = "set pattern " + String(min(22, nk.pattern + 1));
     } else if (String(item.label) == "Pattern -" && nk.pattern > 0) {
       command = "set pattern " + String(max(1, nk.pattern - 1));
+    } else if (String(item.label) == "Enable current" && nk.pattern > 0) {
+      command = "enable_pattern " + String(nk.pattern);
+    } else if (String(item.label) == "Disable current" && nk.pattern > 0) {
+      command = "disable_pattern " + String(nk.pattern);
+    } else if (String(item.label) == "Invert current" && nk.pattern > 0) {
+      command = "invert_pattern " + String(nk.pattern);
+    } else if (String(item.label) == "Normal current" && nk.pattern > 0) {
+      command = "normal_pattern " + String(nk.pattern);
+    } else if (String(item.label) == "Init SD") {
+      command = "@sd:init";
+    } else if (String(item.label) == "Save slot 1") {
+      command = "@profile:save:1";
+    } else if (String(item.label) == "Save slot 2") {
+      command = "@profile:save:2";
+    } else if (String(item.label) == "Save slot 3") {
+      command = "@profile:save:3";
+    } else if (String(item.label) == "Load slot 1") {
+      command = "@profile:load:1";
+    } else if (String(item.label) == "Load slot 2") {
+      command = "@profile:load:2";
+    } else if (String(item.label) == "Load slot 3") {
+      command = "@profile:load:3";
     } else if (String(item.label) == "Brightness +") {
       int current = nk.brightness > 0 ? nk.brightness : brightnessLevels[0];
       int next = brightnessLevels[BRIGHTNESS_LEVEL_COUNT - 1];
@@ -298,7 +553,7 @@ void executeMenuItem(const MenuItem& item)
     return;
   }
 
-  sendCommand(command);
+  runActionCommand(command);
 }
 
 void drawTextFit(const String& text, int x, int y, int w, uint16_t color)
@@ -373,7 +628,8 @@ void drawStatusView()
   drawMetric(124, CONTENT_Y + 33, "MPU", nk.mpuConnected == "1" ? "OK" : nk.mpuConnected, nk.mpuConnected == "1" ? COLOR_OK : COLOR_WARN);
   drawMetric(184, CONTENT_Y + 33, "FPS", nk.fps);
 
-  drawTextFit(nk.errorSeen ? nk.lastError : nk.lastOk, 4, CONTENT_Y + 66, 232, nk.errorSeen ? COLOR_ERR : COLOR_MUTED);
+  drawTextFit(nk.sdStatus, 4, CONTENT_Y + 62, 232, nk.sdReady ? COLOR_OK : COLOR_MUTED);
+  drawTextFit(nk.errorSeen ? nk.lastError : nk.lastOk, 4, CONTENT_Y + 74, 232, nk.errorSeen ? COLOR_ERR : COLOR_MUTED);
 }
 
 void drawMenu(const MenuItem* items, size_t count)
@@ -440,6 +696,9 @@ void render()
     case View::Config:
       drawMenu(CONFIG_MENU, sizeof(CONFIG_MENU) / sizeof(CONFIG_MENU[0]));
       break;
+    case View::Profiles:
+      drawMenu(PROFILE_MENU, sizeof(PROFILE_MENU) / sizeof(PROFILE_MENU[0]));
+      break;
     case View::Service:
       drawMenu(SERVICE_MENU, sizeof(SERVICE_MENU) / sizeof(SERVICE_MENU[0]));
       break;
@@ -460,6 +719,8 @@ size_t menuCountForCurrentView()
       return sizeof(PATTERN_MENU) / sizeof(PATTERN_MENU[0]);
     case View::Config:
       return sizeof(CONFIG_MENU) / sizeof(CONFIG_MENU[0]);
+    case View::Profiles:
+      return sizeof(PROFILE_MENU) / sizeof(PROFILE_MENU[0]);
     case View::Service:
       return sizeof(SERVICE_MENU) / sizeof(SERVICE_MENU[0]);
     default:
@@ -495,6 +756,9 @@ void runSelected()
       break;
     case View::Config:
       executeMenuItem(CONFIG_MENU[selectedIndex]);
+      break;
+    case View::Profiles:
+      executeMenuItem(PROFILE_MENU[selectedIndex]);
       break;
     case View::Service:
       executeMenuItem(SERVICE_MENU[selectedIndex]);
@@ -594,7 +858,7 @@ void handleKeyboard()
 
   if (confirmPending) {
     if (status.enter) {
-      sendCommand(pendingCommand);
+      runActionCommand(pendingCommand);
       confirmPending = false;
       pendingCommand = "";
       pendingLabel = "";
