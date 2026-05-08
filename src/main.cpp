@@ -8,9 +8,12 @@ namespace {
 constexpr uint32_t SERIAL_BAUD = 115200;
 constexpr uint16_t COLOR_BG = TFT_BLACK;
 constexpr uint16_t COLOR_PANEL = 0x1082;
+constexpr uint16_t COLOR_PANEL_DARK = 0x0841;
+constexpr uint16_t COLOR_PANEL_LIGHT = 0x2124;
 constexpr uint16_t COLOR_TEXT = TFT_WHITE;
 constexpr uint16_t COLOR_MUTED = 0x9CF3;
 constexpr uint16_t COLOR_ACCENT = 0x07FF;
+constexpr uint16_t COLOR_ACCENT_DARK = 0x0451;
 constexpr uint16_t COLOR_OK = 0x07E0;
 constexpr uint16_t COLOR_WARN = 0xFFE0;
 constexpr uint16_t COLOR_ERR = 0xF800;
@@ -563,7 +566,7 @@ void drawTextFit(const String& text, int x, int y, int w, uint16_t color)
   if (static_cast<int>(out.length()) > maxChars) {
     out = out.substring(0, maxChars - 1) + "~";
   }
-  M5Cardputer.Display.setTextColor(color, COLOR_BG);
+  M5Cardputer.Display.setTextColor(color);
   M5Cardputer.Display.drawString(out, x, y);
 }
 
@@ -572,84 +575,171 @@ String showInt(int value)
   return value >= 0 ? String(value) : "--";
 }
 
+uint16_t terminalColor(const String& line)
+{
+  if (line.startsWith(">")) {
+    return COLOR_ACCENT;
+  }
+  if (line.startsWith("OK")) {
+    return COLOR_OK;
+  }
+  if (line.startsWith("ERR")) {
+    return COLOR_ERR;
+  }
+  if (line.startsWith("INFO")) {
+    return COLOR_MUTED;
+  }
+  return COLOR_TEXT;
+}
+
+uint16_t statusColor(bool ok, bool warn = false)
+{
+  if (ok) {
+    return COLOR_OK;
+  }
+  return warn ? COLOR_WARN : COLOR_MUTED;
+}
+
+String footerText()
+{
+  switch (currentView) {
+    case View::Status:
+      return "Enter refresh   1 show 2 batt 3 sensor";
+    case View::Patterns:
+      return "W/S select   Enter run   ! confirm";
+    case View::Config:
+      return "Brightness, autoplay, save/load";
+    case View::Profiles:
+      return "SD profile slots   refresh before save";
+    case View::Service:
+      return "Diagnostics and calibration tools";
+    case View::Terminal:
+      return "Type command   Enter send   Back delete";
+  }
+  return "Tab view   W/S select   Enter run";
+}
+
+void drawStatusBadge(int x, int y, const String& label, uint16_t color)
+{
+  auto& d = M5Cardputer.Display;
+  int w = 24 + min(42, static_cast<int>(label.length()) * 5);
+  d.fillRoundRect(x, y, w, 10, 2, COLOR_PANEL_DARK);
+  d.drawFastVLine(x, y + 1, 8, color);
+  d.setTextColor(color, COLOR_PANEL_DARK);
+  d.drawString(label, x + 5, y + 3);
+}
+
 void drawChrome()
 {
   auto& d = M5Cardputer.Display;
   d.fillScreen(COLOR_BG);
-  d.fillRect(0, 0, SCREEN_W, STATUS_H, COLOR_PANEL);
+  d.fillRect(0, 0, SCREEN_W, STATUS_H, COLOR_PANEL_DARK);
   d.setTextSize(1);
   d.setFont(&fonts::Font0);
   d.setTextDatum(top_left);
 
-  String link = nk.linkSeen ? "NK:OK" : "NK:--";
-  if (nk.errorSeen) {
-    link = "NK:ERR";
-  }
-  String title = "NightKite Link  " + link;
+  d.setTextColor(COLOR_TEXT, COLOR_PANEL_DARK);
+  d.drawString("NightKite Link", 3, 4);
+
+  drawStatusBadge(83, 3, nk.errorSeen ? "NK ERR" : (nk.linkSeen ? "NK OK" : "NK --"),
+                  nk.errorSeen ? COLOR_ERR : statusColor(nk.linkSeen));
+  drawStatusBadge(136, 3, nk.sdReady ? "SD OK" : "SD --", statusColor(nk.sdReady));
   if (nk.unsavedHint) {
-    title += " *";
+    drawStatusBadge(190, 3, "SAVE!", COLOR_WARN);
   }
-  d.setTextColor(nk.errorSeen ? COLOR_ERR : COLOR_TEXT, COLOR_PANEL);
-  d.drawString(title, 3, 4);
 
   d.fillRect(0, STATUS_H, SCREEN_W, TAB_H, COLOR_BG);
   int tabW = SCREEN_W / VIEW_COUNT;
   for (size_t i = 0; i < VIEW_COUNT; ++i) {
     bool active = i == static_cast<size_t>(currentView);
     int x = i * tabW;
-    d.fillRect(x, STATUS_H, tabW - 1, TAB_H, active ? COLOR_ACCENT : COLOR_PANEL);
-    d.setTextColor(active ? TFT_BLACK : COLOR_MUTED, active ? COLOR_ACCENT : COLOR_PANEL);
+    d.fillRect(x, STATUS_H, tabW - 1, TAB_H, active ? COLOR_ACCENT_DARK : COLOR_PANEL);
+    if (active) {
+      d.drawFastHLine(x + 2, STATUS_H + TAB_H - 2, tabW - 5, COLOR_ACCENT);
+    }
+    d.setTextColor(active ? COLOR_TEXT : COLOR_MUTED, active ? COLOR_ACCENT_DARK : COLOR_PANEL);
     d.drawString(VIEW_NAMES[i], x + 2, STATUS_H + 4);
   }
 
   d.fillRect(0, SCREEN_H - FOOTER_H, SCREEN_W, FOOTER_H, COLOR_PANEL);
   d.setTextColor(COLOR_MUTED, COLOR_PANEL);
-  d.drawString("Tab view  W/S select  Enter run  1-4 quick", 3, SCREEN_H - 9);
+  d.drawString(footerText(), 3, SCREEN_H - 9);
 }
 
 void drawMetric(int x, int y, const char* label, const String& value, uint16_t color = COLOR_TEXT)
 {
   auto& d = M5Cardputer.Display;
-  d.setTextColor(COLOR_MUTED, COLOR_BG);
-  d.drawString(label, x, y);
-  d.setTextColor(color, COLOR_BG);
-  d.drawString(value, x, y + 10);
+  d.fillRoundRect(x, y, 55, 28, 3, COLOR_PANEL_DARK);
+  d.drawFastHLine(x + 2, y + 1, 51, COLOR_PANEL_LIGHT);
+  d.setTextColor(COLOR_MUTED, COLOR_PANEL_DARK);
+  d.drawString(label, x + 4, y + 5);
+  d.setTextColor(color, COLOR_PANEL_DARK);
+  d.drawString(value, x + 4, y + 17);
+}
+
+void drawBar(int x, int y, int w, int h, int value, int minValue, int maxValue, uint16_t color)
+{
+  auto& d = M5Cardputer.Display;
+  d.fillRoundRect(x, y, w, h, 2, COLOR_PANEL_DARK);
+  if (value < minValue || maxValue <= minValue) {
+    return;
+  }
+  int clamped = constrain(value, minValue, maxValue);
+  int fillW = map(clamped, minValue, maxValue, 0, w - 2);
+  d.fillRoundRect(x + 1, y + 1, fillW, h - 2, 1, color);
 }
 
 void drawStatusView()
 {
-  drawMetric(4, CONTENT_Y + 4, "Pattern", showInt(nk.pattern));
-  drawMetric(64, CONTENT_Y + 4, "Bright", showInt(nk.brightness));
-  drawMetric(124, CONTENT_Y + 4, "Autoplay", nk.autoplay);
-  drawMetric(184, CONTENT_Y + 4, "Kite V", nk.kiteBatteryVoltage);
+  drawMetric(4, CONTENT_Y + 3, "Pattern", showInt(nk.pattern), COLOR_ACCENT);
+  drawMetric(64, CONTENT_Y + 3, "Bright", showInt(nk.brightness), COLOR_TEXT);
+  drawMetric(124, CONTENT_Y + 3, "Autoplay", nk.autoplay, nk.autoplay == "on" ? COLOR_OK : COLOR_MUTED);
+  drawMetric(184, CONTENT_Y + 3, "Kite V", nk.kiteBatteryVoltage, COLOR_TEXT);
 
-  drawMetric(4, CONTENT_Y + 33, "Strip", showInt(nk.stripLength));
-  drawMetric(64, CONTENT_Y + 33, "DMP", nk.dmpReady == "1" ? "OK" : nk.dmpReady, nk.dmpReady == "1" ? COLOR_OK : COLOR_WARN);
-  drawMetric(124, CONTENT_Y + 33, "MPU", nk.mpuConnected == "1" ? "OK" : nk.mpuConnected, nk.mpuConnected == "1" ? COLOR_OK : COLOR_WARN);
-  drawMetric(184, CONTENT_Y + 33, "FPS", nk.fps);
+  drawMetric(4, CONTENT_Y + 35, "Strip", showInt(nk.stripLength));
+  drawMetric(64, CONTENT_Y + 35, "DMP", nk.dmpReady == "1" ? "OK" : nk.dmpReady, nk.dmpReady == "1" ? COLOR_OK : COLOR_WARN);
+  drawMetric(124, CONTENT_Y + 35, "MPU", nk.mpuConnected == "1" ? "OK" : nk.mpuConnected, nk.mpuConnected == "1" ? COLOR_OK : COLOR_WARN);
+  drawMetric(184, CONTENT_Y + 35, "FPS", nk.fps);
 
-  drawTextFit(nk.sdStatus, 4, CONTENT_Y + 62, 232, nk.sdReady ? COLOR_OK : COLOR_MUTED);
-  drawTextFit(nk.errorSeen ? nk.lastError : nk.lastOk, 4, CONTENT_Y + 74, 232, nk.errorSeen ? COLOR_ERR : COLOR_MUTED);
+  drawBar(64, CONTENT_Y + 66, 55, 5, nk.brightness, 95, 255, COLOR_ACCENT);
+  drawTextFit(nk.sdStatus, 4, CONTENT_Y + 75, 110, nk.sdReady ? COLOR_OK : COLOR_MUTED);
+  drawTextFit(nk.errorSeen ? nk.lastError : nk.lastOk, 118, CONTENT_Y + 75, 118, nk.errorSeen ? COLOR_ERR : COLOR_MUTED);
 }
 
 void drawMenu(const MenuItem* items, size_t count)
 {
   auto& d = M5Cardputer.Display;
-  int visibleRows = CONTENT_H / 12;
+  int rowH = 12;
+  int visibleRows = CONTENT_H / rowH;
   int start = 0;
   if (selectedIndex >= visibleRows) {
     start = selectedIndex - visibleRows + 1;
   }
+  if (start > 0) {
+    d.setTextColor(COLOR_MUTED, COLOR_BG);
+    d.drawString("^", 230, CONTENT_Y + 2);
+  }
   for (int row = 0; row < visibleRows && (start + row) < static_cast<int>(count); ++row) {
     int idx = start + row;
-    int y = CONTENT_Y + row * 12;
+    int y = CONTENT_Y + row * rowH;
     bool active = idx == selectedIndex;
-    d.fillRect(0, y, SCREEN_W, 12, active ? COLOR_ACCENT : COLOR_BG);
-    d.setTextColor(active ? TFT_BLACK : COLOR_TEXT, active ? COLOR_ACCENT : COLOR_BG);
-    d.drawString(items[idx].label, 4, y + 3);
+    uint16_t bg = active ? COLOR_ACCENT_DARK : (row % 2 == 0 ? COLOR_BG : COLOR_PANEL_DARK);
+    d.fillRect(2, y, SCREEN_W - 4, rowH - 1, bg);
+    if (active) {
+      d.drawFastVLine(3, y + 1, rowH - 3, COLOR_ACCENT);
+    }
+    d.setTextColor(active ? COLOR_TEXT : COLOR_MUTED, bg);
+    d.drawString(active ? ">" : " ", 7, y + 3);
+    d.setTextColor(active ? COLOR_TEXT : COLOR_TEXT, bg);
+    d.drawString(items[idx].label, 17, y + 3);
     if (items[idx].confirm) {
+      d.setTextColor(COLOR_WARN, bg);
       d.drawString("!", 226, y + 3);
     }
+  }
+  if (start + visibleRows < static_cast<int>(count)) {
+    d.setTextColor(COLOR_MUTED, COLOR_BG);
+    d.drawString("v", 230, SCREEN_H - FOOTER_H - 10);
   }
 }
 
@@ -658,26 +748,30 @@ void drawTerminalView()
   auto& d = M5Cardputer.Display;
   int y = CONTENT_Y + 2;
   for (int i = 0; i < terminalLineCount; ++i) {
-    uint16_t color = terminalLines[i].startsWith("ERR") ? COLOR_ERR : COLOR_TEXT;
+    uint16_t color = terminalColor(terminalLines[i]);
     drawTextFit(terminalLines[i], 3, y, 234, color);
     y += 10;
   }
-  d.fillRect(0, SCREEN_H - FOOTER_H - 14, SCREEN_W, 14, COLOR_BG);
+  d.fillRect(0, SCREEN_H - FOOTER_H - 15, SCREEN_W, 15, COLOR_PANEL_DARK);
+  d.drawFastHLine(0, SCREEN_H - FOOTER_H - 15, SCREEN_W, COLOR_PANEL_LIGHT);
   d.setTextColor(COLOR_ACCENT, COLOR_BG);
-  drawTextFit("> " + inputLine, 3, SCREEN_H - FOOTER_H - 11, 234, COLOR_ACCENT);
+  d.setTextColor(COLOR_ACCENT, COLOR_PANEL_DARK);
+  d.drawString("> ", 3, SCREEN_H - FOOTER_H - 10);
+  drawTextFit(inputLine, 15, SCREEN_H - FOOTER_H - 10, 220, COLOR_ACCENT);
 }
 
 void drawConfirmDialog()
 {
   auto& d = M5Cardputer.Display;
-  d.fillRect(18, 42, 204, 52, COLOR_PANEL);
-  d.drawRect(18, 42, 204, 52, COLOR_WARN);
+  d.fillRoundRect(16, 39, 208, 58, 4, COLOR_PANEL);
+  d.drawRoundRect(16, 39, 208, 58, 4, COLOR_WARN);
+  d.fillRect(16, 39, 208, 14, COLOR_PANEL_DARK);
   d.setTextColor(COLOR_WARN, COLOR_PANEL);
-  d.drawString("Confirm", 28, 51);
+  d.drawString("Confirm action", 26, 44);
   d.setTextColor(COLOR_TEXT, COLOR_PANEL);
-  drawTextFit(pendingLabel, 28, 64, 184, COLOR_TEXT);
+  drawTextFit(pendingLabel, 26, 61, 188, COLOR_TEXT);
   d.setTextColor(COLOR_MUTED, COLOR_PANEL);
-  d.drawString("Enter=yes  Back=no", 28, 80);
+  d.drawString("Enter yes   Back no", 26, 80);
 }
 
 void render()
