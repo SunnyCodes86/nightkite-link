@@ -416,48 +416,62 @@ void parseIntField(const String& line, const char* key, int& target)
 
 void parseStringField(const String& line, const char* key, String& target)
 {
-  String value = valueForKey(line, key);
-  if (value.length() > 0) {
-    target = value;
+  String token = String(key) + "=";
+  if (line.indexOf(token) < 0) {
+    return;
   }
+  String value = valueForKey(line, key);
+  target = value;
+}
+
+String stripCliPrompt(String line)
+{
+  line.trim();
+  while (line.startsWith("nk>")) {
+    line = line.substring(3);
+    line.trim();
+  }
+  return line;
 }
 
 void parseNightKiteLine(const String& line)
 {
-  if (line.startsWith("OK ")) {
+  String parsedLine = stripCliPrompt(line);
+
+  if (parsedLine.startsWith("OK ")) {
     nk.linkSeen = true;
     nk.errorSeen = false;
     nk.lastRxMs = millis();
-    nk.lastOk = line.substring(3);
+    nk.lastOk = parsedLine.substring(3);
 
-    parseIntField(line, "pattern", nk.pattern);
-    parseIntField(line, "brightness", nk.brightness);
-    parseIntField(line, "strip_length", nk.stripLength);
-    parseIntField(line, "smoothing", nk.smoothing);
-    parseIntField(line, "accel_range", nk.accelRange);
-    parseIntField(line, "gyro_range", nk.gyroRange);
-    parseIntField(line, "autoplay_interval", nk.autoplayInterval);
-    parseStringField(line, "boot_calibration", nk.bootCalibration);
-    parseStringField(line, "autoplay", nk.autoplay);
-    parseStringField(line, "enabled_patterns", nk.enabledPatterns);
-    parseStringField(line, "inverted_patterns", nk.invertedPatterns);
-    parseStringField(line, "battery_voltage", nk.kiteBatteryVoltage);
-    parseStringField(line, "mpu_connected", nk.mpuConnected);
-    parseStringField(line, "dmp_ready", nk.dmpReady);
-    parseStringField(line, "fps", nk.fps);
+    parseIntField(parsedLine, "pattern", nk.pattern);
+    parseIntField(parsedLine, "brightness", nk.brightness);
+    parseIntField(parsedLine, "strip_length", nk.stripLength);
+    parseIntField(parsedLine, "smoothing", nk.smoothing);
+    parseIntField(parsedLine, "accel_range", nk.accelRange);
+    parseIntField(parsedLine, "gyro_range", nk.gyroRange);
+    parseIntField(parsedLine, "autoplay_interval", nk.autoplayInterval);
+    parseStringField(parsedLine, "boot_calibration", nk.bootCalibration);
+    parseStringField(parsedLine, "autoplay", nk.autoplay);
+    parseStringField(parsedLine, "enabled_patterns", nk.enabledPatterns);
+    parseStringField(parsedLine, "inverted_patterns", nk.invertedPatterns);
+    parseStringField(parsedLine, "battery_voltage", nk.kiteBatteryVoltage);
+    parseStringField(parsedLine, "mpu_connected", nk.mpuConnected);
+    parseStringField(parsedLine, "dmp_ready", nk.dmpReady);
+    parseStringField(parsedLine, "fps", nk.fps);
 
-    if (line.indexOf("saved=1") >= 0 || line.indexOf("loaded=1") >= 0) {
+    if (parsedLine.indexOf("saved=1") >= 0 || parsedLine.indexOf("loaded=1") >= 0) {
       nk.unsavedHint = false;
     }
-    if (line.indexOf("defaults=1") >= 0 || line.indexOf("applies after reboot") >= 0) {
+    if (parsedLine.indexOf("defaults=1") >= 0 || parsedLine.indexOf("applies after reboot") >= 0) {
       nk.unsavedHint = true;
     }
-  } else if (line.startsWith("ERR")) {
+  } else if (parsedLine.startsWith("ERR")) {
     nk.linkSeen = true;
     nk.errorSeen = true;
     nk.lastRxMs = millis();
-    nk.lastError = line;
-  } else if (line.startsWith("INFO") || line.startsWith("[NightKite CLI]")) {
+    nk.lastError = parsedLine;
+  } else if (parsedLine.startsWith("INFO") || parsedLine.startsWith("[NightKite CLI]")) {
     nk.linkSeen = true;
     nk.lastRxMs = millis();
   }
