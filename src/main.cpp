@@ -4,6 +4,8 @@
 #include <math.h>
 #include <vector>
 #include "M5Cardputer.h"
+#include "Uf2Validator.h"
+#include "UsbMscUf2Flasher.h"
 #if NIGHTKITE_USB_HOST
 #include <USBHostSerial.h>
 #endif
@@ -125,6 +127,37 @@ enum class Mode : uint8_t {
   ConfirmProfileDelete,
 };
 
+enum class FlashUiState : uint8_t {
+  Idle,
+  Confirm,
+  WaitingForBootsel,
+  WaitingForMassStorage,
+  MassStorageConnected,
+  CopyingUf2,
+  CopyComplete,
+  WaitingForReboot,
+  Success,
+  Error,
+};
+
+struct FlashUiStatus {
+  FlashUiState state = FlashUiState::Idle;
+  String filename;
+  String fullPath;
+  String target;
+  String message;
+  String errorMessage;
+  size_t totalBytes = 0;
+  size_t copiedBytes = 0;
+  int percent = 0;
+  bool massStorageConnected = false;
+  bool success = false;
+  bool busy = false;
+  unsigned long stateStartedMs = 0;
+  unsigned long lastAnimationMs = 0;
+  uint8_t spinner = 0;
+};
+
 struct AppState {
   bool usbConnected = false;
   bool controllerConnected = false;
@@ -146,6 +179,7 @@ struct AppState {
   int selectedFirmwareTarget = 0;
   int selectedFirmwareFileIndex = 0;
   bool patternEditsPending = false;
+  FlashUiStatus flash;
   std::vector<String> profileFiles;
   std::vector<String> firmwareFiles;
   String lastCommand;
@@ -177,22 +211,6 @@ int draftAccelRange = -1;
 int draftGyroRange = -1;
 bool draftAutoplayEnabled = false;
 int draftAutoplayIntervalSeconds = -1;
-
-class UsbMscUf2Flasher {
-public:
-  bool available() const
-  {
-    return false;
-  }
-
-  bool flashUf2(const String& uf2Path, const String& targetName, String& message)
-  {
-    (void)uf2Path;
-    (void)targetName;
-    message = "USB MSC host not linked";
-    return false;
-  }
-};
 
 UsbMscUf2Flasher uf2Flasher;
 
@@ -919,6 +937,118 @@ void drawFirmwareCard()
   drawFooter("W/S file  C target  R scan  ENTER flash");
 }
 
+bool flashWorkflowActive()
+{
+  return app.flash.state != FlashUiState::Idle;
+}
+
+bool flashWorkflowBusy()
+{
+  return app.flash.busy || uf2Flasher.isRunning();
+}
+
+void setFlashState(FlashUiState state, const String& message = "")
+{
+  app.flash.state = state;
+  app.flash.message = message;
+  app.flash.stateStartedMs = millis();
+  app.flash.lastAnimationMs = 0;
+  app.dirty = true;
+}
+
+String selectedFirmwareName()
+{
+  if (app.selectedFirmwareFileIndex < 0 || app.selectedFirmwareFileIndex >= static_cast<int>(app.firmwareFiles.size())) {
+    return "";
+  }
+  return app.firmwareFiles[app.selectedFirmwareFileIndex];
+}
+
+String bytesKb(size_t bytes)
+{
+  return String(static_cast<unsigned>((bytes + 1023) / 1024));
+}
+
+void drawSpinner(int x, int y, uint16_t color)
+{
+  const char frames[] = {'|', '/', '-', '\\'};
+  uiCanvas.setTextColor(color, COLOR_BG);
+  uiCanvas.drawChar(frames[app.flash.spinner % 4], x, y);
+}
+
+void drawProgressBar(int x, int y, int w, int h, int percent)
+{
+  uiCanvas.fillRoundRect(x, y, w, h, 2, COLOR_PANEL_DARK);
+  uiCanvas.drawRoundRect(x, y, w, h, 2, COLOR_PANEL_LIGHT);
+  int fillW = map(constrain(percent, 0, 100), 0, 100, 0, w - 2);
+  uiCanvas.fillRoundRect(x + 1, y + 1, fillW, h - 2, 1, COLOR_OK);
+}
+
+void drawFlashWorkflow()
+{
+  drawTextFit("NightKite Link", 8, CONTENT_Y + 5, 150, COLOR_MUTED);
+  switch (app.flash.state) {
+    case FlashUiState::Idle:
+      return;
+    case FlashUiState::Confirm:
+      drawTextFit("Flash firmware?", 16, CONTENT_Y + 28, 180, COLOR_WARN);
+      drawTextFit(shortText(app.flash.filename, 30), 16, CONTENT_Y + 50, 210, COLOR_TEXT);
+      drawTextFit(String("Target: ") + app.flash.target, 16, CONTENT_Y + 67, 150, COLOR_ACCENT);
+      drawFooter("ENTER start  ESC cancel");
+      break;
+    case FlashUiState::WaitingForBootsel:
+      drawTextFit("Firmware Update", 12, CONTENT_Y + 21, 180, COLOR_ACCENT);
+      drawTextFit("Put controller into", 12, CONTENT_Y + 41, 190, COLOR_TEXT);
+      drawTextFit("BOOTSEL mode", 12, CONTENT_Y + 56, 190, COLOR_TEXT);
+      drawTextFit("Hold BOOTSEL, reconnect USB", 12, CONTENT_Y + 76, 215, COLOR_MUTED);
+      drawFooter("ENTER continue  ESC cancel");
+      break;
+    case FlashUiState::WaitingForMassStorage:
+      drawTextFit("Waiting for", 20, CONTENT_Y + 32, 160, COLOR_TEXT);
+      drawTextFit(app.flash.target + " drive...", 20, CONTENT_Y + 49, 180, COLOR_ACCENT);
+      drawSpinner(112, CONTENT_Y + 76, COLOR_WARN);
+      drawFooter("ESC cancel");
+      break;
+    case FlashUiState::MassStorageConnected:
+      drawTextFit(app.flash.target + " detected", 18, CONTENT_Y + 34, 190, COLOR_OK);
+      drawTextFit("Mass Storage ready", 18, CONTENT_Y + 54, 190, COLOR_TEXT);
+      drawTextFit("Preparing flash...", 18, CONTENT_Y + 74, 190, COLOR_MUTED);
+      drawFooter("Do not unplug");
+      break;
+    case FlashUiState::CopyingUf2:
+      drawTextFit("Copying firmware", 12, CONTENT_Y + 21, 180, COLOR_TEXT);
+      drawProgressBar(12, CONTENT_Y + 43, 160, 13, app.flash.percent);
+      drawTextFit(String(app.flash.percent) + "%", 183, CONTENT_Y + 46, 45, COLOR_OK);
+      drawTextFit(bytesKb(app.flash.copiedBytes) + " / " + bytesKb(app.flash.totalBytes) + " KB", 12, CONTENT_Y + 65, 150,
+                  COLOR_MUTED);
+      drawTextFit(shortText(app.flash.filename, 32), 12, CONTENT_Y + 80, 210, COLOR_TEXT);
+      drawFooter("Do not unplug");
+      break;
+    case FlashUiState::CopyComplete:
+      drawTextFit("Firmware copied", 18, CONTENT_Y + 36, 180, COLOR_OK);
+      drawTextFit("Closing drive...", 18, CONTENT_Y + 59, 180, COLOR_MUTED);
+      drawFooter("Please wait");
+      break;
+    case FlashUiState::WaitingForReboot:
+      drawTextFit("Firmware copied", 18, CONTENT_Y + 28, 180, COLOR_OK);
+      drawTextFit("Controller is", 18, CONTENT_Y + 49, 180, COLOR_TEXT);
+      drawTextFit("flashing/rebooting", 18, CONTENT_Y + 64, 180, COLOR_TEXT);
+      drawSpinner(190, CONTENT_Y + 64, COLOR_WARN);
+      drawFooter("Please wait...");
+      break;
+    case FlashUiState::Success:
+      drawTextFit("Flash complete", 22, CONTENT_Y + 38, 190, COLOR_OK);
+      drawTextFit("Controller restarted", 22, CONTENT_Y + 60, 190, COLOR_TEXT);
+      drawFooter("ENTER continue");
+      break;
+    case FlashUiState::Error:
+      drawTextFit("Flash failed", 18, CONTENT_Y + 31, 180, COLOR_ERR);
+      drawTextFit(shortText(app.flash.errorMessage, 32), 18, CONTENT_Y + 54, 205, COLOR_TEXT);
+      drawFooter("ENTER retry  ESC back");
+      break;
+  }
+}
+
 const char* const PROFILE_ACTIONS[] = {"Init SD", "Save new", "Apply loaded"};
 constexpr int PROFILE_ACTION_COUNT = sizeof(PROFILE_ACTIONS) / sizeof(PROFILE_ACTIONS[0]);
 
@@ -993,7 +1123,9 @@ void render()
   d.setTextDatum(top_left);
   drawStatusBar();
 
-  if (mode == Mode::PatternDetail) {
+  if (flashWorkflowActive()) {
+    drawFlashWorkflow();
+  } else if (mode == Mode::PatternDetail) {
     drawPatternDetail();
   } else if (mode == Mode::ConfirmBulk) {
     drawConfirmBulk();
@@ -1788,19 +1920,108 @@ void saveAllPatternStates()
 void startFirmwareFlash()
 {
   if (!ensureSdReady()) {
+    app.flash.errorMessage = "No SD card";
+    setFlashState(FlashUiState::Error);
     return;
   }
   String path = selectedFirmwarePath();
+  String name = selectedFirmwareName();
   if (path.length() == 0 || !SD.exists(path)) {
-    setStatus("Select UF2 first", COLOR_WARN);
+    app.flash.errorMessage = "No UF2 selected";
+    setFlashState(FlashUiState::Error);
     return;
   }
 
-  String message;
-  if (uf2Flasher.flashUf2(path, FIRMWARE_TARGETS[app.selectedFirmwareTarget], message)) {
-    setStatus("Flash done", COLOR_OK);
-  } else {
-    setStatus(message, COLOR_WARN);
+  Serial.print("[UF2] validating: ");
+  Serial.println(path);
+  Uf2ValidationInfo validation = Uf2Validator::validate(path);
+  Serial.print("[UF2] validation: ");
+  Serial.println(Uf2Validator::message(validation.result));
+  if (validation.result != Uf2ValidationResult::Ok) {
+    app.flash.errorMessage = Uf2Validator::message(validation.result);
+    setFlashState(FlashUiState::Error);
+    return;
+  }
+
+  app.flash = FlashUiStatus{};
+  app.flash.filename = name;
+  app.flash.fullPath = path;
+  app.flash.target = FIRMWARE_TARGETS[app.selectedFirmwareTarget];
+  app.flash.totalBytes = validation.fileSize;
+  setStatus("Flash confirm", COLOR_WARN);
+  setFlashState(FlashUiState::Confirm);
+}
+
+void beginFirmwareFlashAfterBootsel()
+{
+  if (app.flash.fullPath.length() == 0) {
+    app.flash.errorMessage = "No UF2 selected";
+    setFlashState(FlashUiState::Error);
+    return;
+  }
+  commandQueue.clear();
+  patternSyncInProgress = false;
+  app.flash.busy = true;
+  setStatus("Flash mode", COLOR_WARN);
+  setFlashState(FlashUiState::WaitingForMassStorage);
+  if (!uf2Flasher.startFlash(app.flash.fullPath, app.flash.filename)) {
+    app.flash.busy = false;
+    app.flash.errorMessage = uf2Flasher.resultMessage();
+    setFlashState(FlashUiState::Error);
+  }
+}
+
+void updateFlashWorkflow()
+{
+  if (!flashWorkflowActive()) {
+    return;
+  }
+  if (millis() - app.flash.lastAnimationMs > 220) {
+    app.flash.lastAnimationMs = millis();
+    app.flash.spinner = (app.flash.spinner + 1) % 4;
+    if (app.flash.state == FlashUiState::WaitingForMassStorage || app.flash.state == FlashUiState::WaitingForReboot) {
+      app.dirty = true;
+    }
+  }
+
+  if (app.flash.busy || uf2Flasher.isRunning()) {
+    uf2Flasher.poll();
+    const FlashProgress& progress = uf2Flasher.progress();
+    app.flash.totalBytes = progress.totalBytes;
+    app.flash.copiedBytes = progress.copiedBytes;
+    app.flash.percent = progress.percent;
+    app.flash.massStorageConnected = progress.massStorageConnected;
+    app.flash.message = progress.message;
+
+    if (progress.massStorageConnected && app.flash.state == FlashUiState::WaitingForMassStorage) {
+      setFlashState(FlashUiState::MassStorageConnected, "Mass Storage ready");
+    }
+    if (app.flash.state == FlashUiState::MassStorageConnected && millis() - app.flash.stateStartedMs > 650) {
+      setFlashState(FlashUiState::CopyingUf2, "Copying firmware");
+    }
+    if (progress.copiedBytes > 0 && progress.copiedBytes < progress.totalBytes &&
+        app.flash.state != FlashUiState::CopyingUf2) {
+      setFlashState(FlashUiState::CopyingUf2, "Copying firmware");
+    }
+    if (progress.totalBytes > 0 && progress.copiedBytes >= progress.totalBytes &&
+        (app.flash.state == FlashUiState::CopyingUf2 || app.flash.state == FlashUiState::MassStorageConnected)) {
+      setFlashState(FlashUiState::CopyComplete, "Firmware copied");
+    }
+    if (app.flash.state == FlashUiState::CopyComplete && millis() - app.flash.stateStartedMs > 650) {
+      setFlashState(FlashUiState::WaitingForReboot, "Waiting for reboot");
+    }
+    if (progress.done) {
+      app.flash.busy = false;
+      if (progress.success) {
+        setStatus("Flash complete", COLOR_OK);
+        setFlashState(FlashUiState::Success, "Flash complete");
+      } else {
+        app.flash.errorMessage = progress.message.length() > 0 ? progress.message : uf2Flasher.resultMessage();
+        setStatus(app.flash.errorMessage, COLOR_ERR);
+        setFlashState(FlashUiState::Error);
+      }
+    }
+    app.dirty = true;
   }
 }
 
@@ -1870,6 +2091,10 @@ void runBulkAction()
 
 void handleWordChar(char c)
 {
+  if (flashWorkflowActive()) {
+    return;
+  }
+
   if (mode == Mode::PatternDetail) {
     if (c == 'c' || c == 'C') {
       detailCycle = !detailCycle;
@@ -1962,6 +2187,36 @@ void handleKeyboard()
 
   auto& status = M5Cardputer.Keyboard.keysState();
 
+  if (flashWorkflowActive()) {
+    if (status.enter) {
+      if (app.flash.state == FlashUiState::Confirm) {
+        setFlashState(FlashUiState::WaitingForBootsel);
+      } else if (app.flash.state == FlashUiState::WaitingForBootsel) {
+        beginFirmwareFlashAfterBootsel();
+      } else if (app.flash.state == FlashUiState::Success) {
+        app.flash = FlashUiStatus{};
+        setStatus("Ready", COLOR_MUTED);
+      } else if (app.flash.state == FlashUiState::Error) {
+        setFlashState(FlashUiState::WaitingForBootsel);
+      }
+      app.dirty = true;
+      return;
+    }
+    if (status.del) {
+      if (app.flash.state == FlashUiState::Confirm || app.flash.state == FlashUiState::WaitingForBootsel ||
+          app.flash.state == FlashUiState::WaitingForMassStorage || app.flash.state == FlashUiState::Error ||
+          app.flash.state == FlashUiState::Success) {
+        if (app.flash.state == FlashUiState::WaitingForMassStorage) {
+          uf2Flasher.cancel();
+        }
+        app.flash = FlashUiStatus{};
+        setStatus("Flash cancelled", COLOR_WARN);
+      }
+      return;
+    }
+    return;
+  }
+
   if (status.enter) {
     if (mode == Mode::PatternDetail) {
       applyPatternDetail();
@@ -2026,8 +2281,11 @@ void loop()
   M5Cardputer.update();
   updateCardputerBattery();
   handleKeyboard();
-  pollTransport();
-  pollCommandQueue();
+  updateFlashWorkflow();
+  if (!flashWorkflowBusy()) {
+    pollTransport();
+    pollCommandQueue();
+  }
   render();
   delay(2);
 }
