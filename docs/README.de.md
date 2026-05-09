@@ -1,20 +1,20 @@
 # NightKite Link Dokumentation
 
-## Projektuebersicht
+## Projektübersicht
 
 NightKite Link ist ein kompaktes Handheld zum Konfigurieren und Warten von
-NightKite-Multi-Controllern. Das Projekt ist fuer den M5Stack Cardputer-Adv /
+NightKite-Multi-Controllern. Das Projekt ist für den M5Stack Cardputer-Adv /
 StampS3 ausgelegt und kommuniziert per USB-Host-Modus mit dem Controller.
 
 Ziel ist, einen NightKite-Controller ohne Laptop konfigurieren und warten zu
-koennen. NightKite Link nutzt dafuer soweit moeglich die vorhandene
-NightKite-USB-CLI. Fuer den normalen Konfigurationsablauf sind keine Aenderungen
+können. NightKite Link nutzt dafür soweit möglich die vorhandene
+NightKite-USB-CLI. Für den normalen Konfigurationsablauf sind keine Änderungen
 an der NightKite-Multi-Firmware erforderlich, solange die erwarteten CLI-Befehle
 vorhanden sind.
 
-Die Oberflaeche ist kartenbasiert, weil das Display des Cardputer-Adv sehr klein
+Die Oberfläche ist kartenbasiert, weil das Display des Cardputer-Adv sehr klein
 ist. Eine Card zeigt jeweils eine Hauptfunktion oder eine kleine Gruppe
-zusammenhaengender Einstellungen.
+zusammenhängender Einstellungen.
 
 ## Funktionen
 
@@ -23,30 +23,30 @@ Im aktuellen Code vorhanden:
 - Cardputer-Akkuanzeige inklusive Ladestatus
 - USB-Verbindungsstatus
 - Controller-/CLI-Verbindungsstatus mit Timeout-Erkennung
-- Helligkeit anzeigen und direkt beim Aendern senden
+- Helligkeit anzeigen und direkt beim Ändern senden
 - Striplänge anzeigen und als Entwurfswert konfigurieren
-- Aktives Pattern anzeigen und direkt beim Aendern senden
+- Aktives Pattern anzeigen und direkt beim Ändern senden
 - Smoothing anzeigen und als Entwurfswert konfigurieren
 - Accelerometer- und Gyro-Range konfigurieren
 - Motion-Service-Card mit FPS-Anzeige und Kalibrieraktionen
 - Autoplay-Status und Autoplay-Intervall konfigurieren
 - Pattern-Liste mit Cycle- und Invert-Status
 - Pattern-Detailansicht mit Cycle- und Invert-Toggles
-- Bulk-Aktionen fuer Patterns:
-  - aktuelle Pattern-Zustaende speichern
-  - alle Patterns fuer Cycle aktivieren
-  - alle Patterns fuer Cycle deaktivieren
+- Bulk-Aktionen für Patterns:
+  - aktuelle Pattern-Zustände speichern
+  - alle Patterns für Cycle aktivieren
+  - alle Patterns für Cycle deaktivieren
   - alle Patterns invertieren
   - alle Patterns auf normal setzen
 - Profile auf SD-Karte:
   - aktuelle Controller-Settings speichern
   - JSON-Profile auflisten
-  - ausgewaehltes Profil laden
+  - ausgewähltes Profil laden
   - geladenes Profil auf den Controller anwenden
-  - ausgewaehlte Profile loeschen
+  - ausgewählte Profile löschen
 - Firmware-Bereich:
   - scannt `.uf2`-Dateien aus `/firmware/`
-  - Zielauswahl fuer `RP2040` und `RP2350`
+  - Zielauswahl für `RP2040` und `RP2350`
   - eigener grafischer Flash-Workflow
   - UF2-Validierung vor dem Flashen
   - Fortschrittsanzeige beim Kopieren auf USB Mass Storage
@@ -62,9 +62,9 @@ CLI-Befehl.
 - USB-C-Kabel und passendes USB-OTG-Setup
 - NightKite-Multi-Controller, zum Beispiel auf Basis eines Pimoroni Pico LiPo 2 /
   RP2350
-- UF2-Firmwaredateien fuer den Firmware-Flasher
+- UF2-Firmwaredateien für den Firmware-Flasher
 
-Fuer UF2-Flashing muss der Controller manuell in den BOOTSEL- /
+Für UF2-Flashing muss der Controller manuell in den BOOTSEL- /
 USB-Mass-Storage-Modus gebracht werden. Der aktuelle Code setzt keinen
 automatischen `reboot_bootsel`-Befehl voraus.
 
@@ -73,10 +73,10 @@ automatischen `reboot_bootsel`-Befehl voraus.
 - PlatformIO
 - VS Code mit PlatformIO-Erweiterung oder PlatformIO CLI
 - Git
-- USB-Treiber, falls das Betriebssystem sie benoetigt
+- USB-Treiber, falls das Betriebssystem sie benötigt
 
-Die normale CLI-Konfiguration nutzt die vorhandene NightKite-USB-CLI. Dafuer
-sind keine Aenderungen an der NightKite-Multi-Firmware noetig, sofern die
+Die normale CLI-Konfiguration nutzt die vorhandene NightKite-USB-CLI. Dafür
+sind keine Änderungen an der NightKite-Multi-Firmware nötig, sofern die
 erwarteten CLI-Befehle bereitstehen.
 
 ## Bauen und Flashen von NightKite Link
@@ -88,10 +88,10 @@ git clone https://github.com/SunnyCodes86/nightkite-link.git
 cd nightkite-link
 ```
 
-Danach den Ordner in VS Code / PlatformIO oeffnen oder direkt die PlatformIO CLI
+Danach den Ordner in VS Code / PlatformIO öffnen oder direkt die PlatformIO CLI
 verwenden.
 
-Das konfigurierte PlatformIO-Environment heisst `cardputer`.
+Das konfigurierte PlatformIO-Environment heißt `cardputer`.
 
 Build:
 
@@ -135,8 +135,8 @@ erfolgreicher SD-Initialisierung angelegt:
 Firmwaredateien:
 
 - liegen unter `/firmware/`
-- muessen die Endung `.uf2` haben
-- werden auf der Firmware-Card ausgewaehlt
+- müssen die Endung `.uf2` haben
+- werden auf der Firmware-Card ausgewählt
 
 Profile:
 
@@ -147,7 +147,7 @@ Profile:
 ## Profilformat
 
 Profile werden als JSON geschrieben, aber ohne ArduinoJson verarbeitet. Das
-Laden ist bewusst einfach gehalten und liest die Schluessel, die der aktuelle
+Laden ist bewusst einfach gehalten und liest die Schlüssel, die der aktuelle
 Code nutzt.
 
 Aktuell gespeicherte Struktur:
@@ -192,38 +192,38 @@ Die aktuelle Tastaturbehandlung verarbeitet diese Eingaben:
 
 | Taste | Aktion |
 | --- | --- |
-| `A` / `D` | Vorherige / naechste Card |
-| `W` / `S` | Wert aendern oder Auswahl bewegen |
-| `Enter` | Anwenden, oeffnen, bestaetigen oder im Flash-Workflow fortfahren |
-| `Backspace` / `DEL` | Zurueck oder abbrechen, wo unterstuetzt |
-| `Tab` | Naechste Card |
+| `A` / `D` | Vorherige / nächste Card |
+| `W` / `S` | Wert ändern oder Auswahl bewegen |
+| `Enter` | Anwenden, öffnen, bestätigen oder im Flash-Workflow fortfahren |
+| `Backspace` / `DEL` | Zurück oder abbrechen, wo unterstützt |
+| `Tab` | Nächste Card |
 | `R` | Aktuelle Card bzw. Controllerdaten neu lesen, wo implementiert |
-| `C` | Config-Feld waehlen, Firmware-Ziel umschalten oder Pattern-Cycle toggeln |
-| `I` | Pattern-Invert toggeln oder ausgewaehltes Profil auf der Profiles-Card loeschen |
+| `C` | Config-Feld wählen, Firmware-Ziel umschalten oder Pattern-Cycle toggeln |
+| `I` | Pattern-Invert toggeln oder ausgewähltes Profil auf der Profiles-Card löschen |
 | `,` / `<` | Vorherige Card |
-| `/` / `?` | Naechste Card |
+| `/` / `?` | Nächste Card |
 | `;` / `:` | Gleiche Richtung wie `W` |
 | `.` / `>` | Gleiche Richtung wie `S` |
 
-Waehrend kritischer Firmware-Kopierzustände ist die normale Card-Navigation
-gesperrt. Abbrechen ist nur in sicheren Flash-Zustaenden moeglich.
+Während kritischer Firmware-Kopierzustände ist die normale Card-Navigation
+gesperrt. Abbrechen ist nur in sicheren Flash-Zuständen möglich.
 
 ## UI-Konzept
 
-NightKite Link nutzt ein Card-based Interface statt eines grossen klassischen
-Menues, weil das Display nur 240 x 135 px gross ist. Jede Card steht fuer eine
+NightKite Link nutzt ein Card-based Interface statt eines großen klassischen
+Menüs, weil das Display nur 240 x 135 px groß ist. Jede Card steht für eine
 Hauptaufgabe: Status, Brightness, Config, Calibration, Active Pattern,
 Pattern-Liste, Bulk-Aktionen, Firmware oder Profiles.
 
 Die Statusleiste oben zeigt USB-Status, Controller-Status, Command-Queue,
 Seitennummer und Cardputer-Akku. Der Firmware-Flasher verwendet eigene
-Workflow-Screens fuer Bestaetigung, BOOTSEL-Anweisung, Warten, Fortschritt,
+Workflow-Screens für Bestätigung, BOOTSEL-Anweisung, Warten, Fortschritt,
 Reboot und Fehler.
 
 ## Controller-Kommunikation
 
 NightKite Link nutzt `USBHostSerial` im USB-Host-Modus, wenn
-`NIGHTKITE_USB_HOST=1` aktiviert ist. Fuer Builds ohne USB-Host existiert ein
+`NIGHTKITE_USB_HOST=1` aktiviert ist. Für Builds ohne USB-Host existiert ein
 Debug-Serial-Transport.
 
 Der Parser verarbeitet:
@@ -233,7 +233,7 @@ Der Parser verarbeitet:
 - `INFO ...`
 - `[NightKite CLI] ...`
 
-Der Code aktualisiert Controllerdaten aus Schluesseln wie:
+Der Code aktualisiert Controllerdaten aus Schlüsseln wie:
 
 - `pattern`
 - `brightness`
@@ -272,10 +272,10 @@ Vom Code aktuell gesendete Befehle:
 - `set boot_calibration quick|off`
 - `save`
 
-Bulk-Invert wird aktuell ueber kommaseparierte `invert_pattern`- bzw.
-`normal_pattern`-Befehle umgesetzt. Im Code ist ein zukuenftiger dedizierter
+Bulk-Invert wird aktuell über kommaseparierte `invert_pattern`- bzw.
+`normal_pattern`-Befehle umgesetzt. Im Code ist ein zukünftiger dedizierter
 Befehl im Stil von `set all_patterns_invert` als TODO markiert, falls die
-Controller-Firmware so etwas spaeter anbietet.
+Controller-Firmware so etwas später anbietet.
 
 ## Firmware-Flasher
 
@@ -285,13 +285,13 @@ USB-Mass-Storage-Modus des RP2040/RP2350-Controllers.
 Aktueller Ablauf:
 
 1. Eine `.uf2`-Firmwaredatei nach `/firmware/` auf der SD-Karte kopieren.
-2. Firmware-Card oeffnen.
-3. UF2-Datei mit `W` / `S` auswaehlen.
-4. Ziellabel mit `C` waehlen (`RP2040` oder `RP2350`).
-5. `Enter` druecken.
-6. Ausgewaehlte Datei bestaetigen.
+2. Firmware-Card öffnen.
+3. UF2-Datei mit `W` / `S` auswählen.
+4. Ziellabel mit `C` wählen (`RP2040` oder `RP2350`).
+5. `Enter` drücken.
+6. Ausgewählte Datei bestätigen.
 7. Controller manuell in BOOTSEL bringen.
-8. USB neu verbinden, sodass der Controller als USB-Mass-Storage-Geraet
+8. USB neu verbinden, sodass der Controller als USB-Mass-Storage-Gerät
    erscheint.
 9. Mit `Enter` fortfahren.
 10. NightKite Link wartet auf Mass Storage, mountet es unter `/usb` und kopiert
@@ -303,16 +303,16 @@ Aktueller Ablauf:
 UF2-Validierung:
 
 - Datei existiert
-- Dateigroesse ist groesser als null
-- Dateigroesse ist durch 512 teilbar
-- Magic-Werte im ersten UF2-Block sind gueltig
+- Dateigröße ist größer als null
+- Dateigröße ist durch 512 teilbar
+- Magic-Werte im ersten UF2-Block sind gültig
 
 Family-ID-Erkennung ist vorhanden, aber eine harte zielabhängige
-Family-ID-Pruefung ist im Code als TODO markiert.
+Family-ID-Prüfung ist im Code als TODO markiert.
 
 Warnungen:
 
-- Waehrend des Kopierens nicht trennen.
+- Während des Kopierens nicht trennen.
 - Nur UF2-Dateien verwenden, die zum Controller passen.
 - Der Flasher ist experimental / work in progress.
 - Der Flasher ist ein Service-/Recovery-Workflow und kein normaler
@@ -322,13 +322,13 @@ Warnungen:
 
 ### Cardputer wird nicht geflasht
 
-- Pruefen, ob der richtige USB-Port in PlatformIO gewaehlt ist.
+- Prüfen, ob der richtige USB-Port in PlatformIO gewählt ist.
 - `pio run -t upload` verwenden.
-- Falls der Upload fehlschlaegt, den Cardputer-Adv neu verbinden.
+- Falls der Upload fehlschlägt, den Cardputer-Adv neu verbinden.
 
 ### Controller wird nicht erkannt
 
-- USB-OTG-Kabel und Stromversorgung pruefen.
+- USB-OTG-Kabel und Stromversorgung prüfen.
 - Die Statusleiste zeigt den USB-Verbindungsstatus.
 - Auf passenden Cards mit `R` neu lesen.
 
@@ -336,7 +336,7 @@ Warnungen:
 
 - Der USB-Host-Transport hat den Controller verloren.
 - Controller neu verbinden.
-- Ausstehende Kommandos werden vom Code geloescht.
+- Ausstehende Kommandos werden vom Code gelöscht.
 
 ### `Controller timeout`
 
@@ -346,9 +346,9 @@ Warnungen:
 
 ### SD card not ready
 
-- Pruefen, ob die microSD-Karte steckt und mit einem von der Arduino-SD-Library
-  unterstuetzten Dateisystem formatiert ist.
-- Die App legt `/profiles/` und `/firmware/` an, wenn moeglich.
+- Prüfen, ob die microSD-Karte steckt und mit einem von der Arduino-SD-Library
+  unterstützten Dateisystem formatiert ist.
+- Die App legt `/profiles/` und `/firmware/` an, wenn möglich.
 
 ### No UF2 file found
 
@@ -357,65 +357,65 @@ Warnungen:
 
 ### Invalid UF2
 
-- Die ausgewaehlte Datei hat die grundlegende UF2-Validierung nicht bestanden.
-- Pruefen, ob es eine echte UF2-Datei ist und keine umbenannte Binary.
+- Die ausgewählte Datei hat die grundlegende UF2-Validierung nicht bestanden.
+- Prüfen, ob es eine echte UF2-Datei ist und keine umbenannte Binary.
 
 ### Mass Storage timeout
 
-- Der Controller ist nicht rechtzeitig als USB-Mass-Storage-Geraet erschienen.
+- Der Controller ist nicht rechtzeitig als USB-Mass-Storage-Gerät erschienen.
 - RP2040/RP2350 manuell in BOOTSEL bringen und USB neu verbinden.
 
 ### Mount failed
 
-- Das Geraet wurde erkannt, aber FAT/VFS-Mount ist fehlgeschlagen.
+- Das Gerät wurde erkannt, aber FAT/VFS-Mount ist fehlgeschlagen.
 - Controller erneut in BOOTSEL verbinden und noch einmal versuchen.
 
 ### Write failed
 
 - Das Kopieren der UF2-Datei ist fehlgeschlagen.
-- Waehrend des Kopierens nicht trennen. Mit bekannter guter UF2-Datei und Kabel
+- Während des Kopierens nicht trennen. Mit bekannter guter UF2-Datei und Kabel
   erneut versuchen.
 
 ### Nach dem Firmware-Flash
 
 - Controller rebooten lassen.
-- Danach wieder normal verbinden, damit die NightKite-USB-CLI verfuegbar ist.
+- Danach wieder normal verbinden, damit die NightKite-USB-CLI verfügbar ist.
 
 ## Entwicklungsnotizen
 
 - Das Projekt ist bewusst kompakt und auf ein kleines Handheld-Display
   zugeschnitten.
-- Die UI soll nicht blockieren; `M5Cardputer.update()` muss regelmaessig laufen.
+- Die UI soll nicht blockieren; `M5Cardputer.update()` muss regelmäßig laufen.
 - USB-CLI-Kommunikation und UF2-Mass-Storage-Flasher sollen klar getrennt
   bleiben.
 - Die aktuelle Command-Queue sendet CLI-Befehle mit kurzem Abstand.
 - Der Firmware-Flasher pausiert normales CLI-Polling, solange er aktiv ist.
 - `scripts/patch_m5cardputer.py` patcht beim Build bei Bedarf die
-  M5Cardputer-Abhaengigkeit und fuegt dort einen fehlenden GPIO-Include hinzu.
+  M5Cardputer-Abhängigkeit und fügt dort einen fehlenden GPIO-Include hinzu.
 
-Moegliche spaetere Erweiterungen:
+Mögliche spätere Erweiterungen:
 
-- Robusteres Verhalten des UF2-Flashers in Randfaellen
-- Optionales `reboot_bootsel`, falls NightKite Multi das spaeter anbietet
-- Optional spaeter BIN/ELF/Picoboot; aktuell kein Kernziel
+- Robusteres Verhalten des UF2-Flashers in Randfällen
+- Optionales `reboot_bootsel`, falls NightKite Multi das später anbietet
+- Optional später BIN/ELF/Picoboot; aktuell kein Kernziel
 - Bessere Profilvalidierung und robusteres Profilparsing
 - Release-Workflow mit fertigen Firmware-Binaries
 
 ## Roadmap
 
-- UI-Polish fuer bessere Lesbarkeit auf dem kleinen Display
+- UI-Polish für bessere Lesbarkeit auf dem kleinen Display
 - Robustere Profilverwaltung
 - Firmware-Flasher auf echten RP2040/RP2350-Boards weiter stabilisieren
-- NightKite-CLI-Kompatibilitaet formaler dokumentieren
+- NightKite-CLI-Kompatibilität formaler dokumentieren
 - Release-Workflow mit fertigen Builds
 - Optional automatische Firmware-Versionserkennung
 - Optional weitere Controller-Ziele
 
 ## Lizenz
 
-Es wurde noch keine Lizenzdatei hinzugefuegt.
+Es wurde noch keine Lizenzdatei hinzugefügt.
 
-Die vendored Espressif-Komponente `usb_host_msc` enthaelt ihre eigene Lizenzdatei
+Die vendored Espressif-Komponente `usb_host_msc` enthält ihre eigene Lizenzdatei
 unter `lib/usb_host_msc/LICENCE`.
 
 ## Ressourcen

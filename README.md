@@ -9,12 +9,12 @@ the small 240 x 135 px display.
 Full English documentation: [docs/README.en.md](docs/README.en.md)
 
 NightKite Link ist ein Open-Source-Handheld zum Konfigurieren und Warten von
-[NightKite Multi](https://github.com/SunnyCodes86/nightkite-multi). Es laeuft auf
+[NightKite Multi](https://github.com/SunnyCodes86/nightkite-multi). Es läuft auf
 einem M5Stack Cardputer-Adv / StampS3 und nutzt USB-Host-Kommunikation zur
-vorhandenen NightKite-USB-CLI. Die aktuelle Oberflaeche ist kartenbasiert und auf
+vorhandenen NightKite-USB-CLI. Die aktuelle Oberfläche ist kartenbasiert und auf
 das kleine 240 x 135 px Display ausgelegt.
 
-Ausfuehrliche deutsche Dokumentation: [docs/README.de.md](docs/README.de.md)
+Ausführliche deutsche Dokumentation: [docs/README.de.md](docs/README.de.md)
 
 ## Features
 
