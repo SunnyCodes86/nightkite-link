@@ -125,6 +125,9 @@ enum class Mode : uint8_t {
   PatternDetail,
   ConfirmBulk,
   ConfirmProfileDelete,
+  ProfileNameInput,
+  ConfirmProfileOverwrite,
+  ConfirmProfileApply,
 };
 
 enum class FlashUiState : uint8_t {
@@ -169,6 +172,11 @@ struct AppState {
   ControllerSettings settings;
   ControllerSettings loadedProfile;
   bool hasLoadedProfile = false;
+  String loadedProfileName;
+  String loadedProfilePath;
+  String profileNameInput;
+  String pendingProfileName;
+  String pendingProfilePath;
   int selectedCard = 0;
   int selectedPatternIndex = 0;
   int selectedProfileAction = 0;
@@ -1049,8 +1057,21 @@ void drawFlashWorkflow()
   }
 }
 
-const char* const PROFILE_ACTIONS[] = {"Init SD", "Save new", "Apply loaded"};
+const char* const PROFILE_ACTIONS[] = {"Init SD", "Save current", "Apply loaded"};
 constexpr int PROFILE_ACTION_COUNT = sizeof(PROFILE_ACTIONS) / sizeof(PROFILE_ACTIONS[0]);
+
+String profileDisplayName(const String& fileName)
+{
+  String name = fileName;
+  int slash = name.lastIndexOf('/');
+  if (slash >= 0) {
+    name = name.substring(slash + 1);
+  }
+  if (name.endsWith(".json")) {
+    name = name.substring(0, name.length() - 5);
+  }
+  return name;
+}
 
 void drawProfilesCard()
 {
@@ -1058,26 +1079,60 @@ void drawProfilesCard()
   uiCanvas.fillRoundRect(174, CONTENT_Y + 3, 58, 13, 2, app.sdReady ? COLOR_PANEL_DARK : COLOR_PANEL);
   drawTextFit(app.sdReady ? "SD OK" : "SD --", 179, CONTENT_Y + 7, 48, app.sdReady ? COLOR_OK : COLOR_WARN,
               app.sdReady ? COLOR_PANEL_DARK : COLOR_PANEL);
+  drawTextFit(String("Loaded: ") + (app.hasLoadedProfile ? shortText(app.loadedProfileName, 20) : "none"), 8,
+              CONTENT_Y + 20, 220, app.hasLoadedProfile ? COLOR_ACCENT : COLOR_MUTED);
   int total = PROFILE_ACTION_COUNT + static_cast<int>(app.profileFiles.size());
-  int visible = 4;
+  int visible = 3;
   int start = 0;
   if (app.selectedProfileAction >= visible) {
     start = app.selectedProfileAction - visible + 1;
   }
   for (int row = 0; row < visible && start + row < total; ++row) {
     int i = start + row;
-    int y = CONTENT_Y + 23 + row * 20;
+    int y = CONTENT_Y + 40 + row * 20;
     bool active = i == app.selectedProfileAction;
     uint16_t bg = active ? COLOR_ACCENT_DARK : COLOR_PANEL_DARK;
     uiCanvas.fillRoundRect(8, y, 224, 18, 3, bg);
     bool action = i < PROFILE_ACTION_COUNT;
-    String label = action ? String(PROFILE_ACTIONS[i]) : shortText(app.profileFiles[i - PROFILE_ACTION_COUNT], 25);
-    drawTextFit(String(active ? "> " : "  ") + label, 14, y + 6, action ? 120 : 168, active ? COLOR_TEXT : COLOR_MUTED, bg);
+    String label = action ? String(PROFILE_ACTIONS[i]) : shortText(app.profileFiles[i - PROFILE_ACTION_COUNT], 22);
+    String prefix = active ? "> " : "  ";
+    if (!action) {
+      String path = "/profiles/" + app.profileFiles[i - PROFILE_ACTION_COUNT];
+      if (app.hasLoadedProfile && app.loadedProfilePath == path) {
+        prefix = active ? ">*" : " *";
+      }
+    }
+    drawTextFit(prefix + label, 14, y + 6, action ? 132 : 168, active ? COLOR_TEXT : COLOR_MUTED, bg);
     if (!action) {
       drawTextFit("ENT load", 177, y + 6, 50, COLOR_ACCENT, bg);
     }
   }
-  drawFooter("W/S select  ENTER run/load  I delete");
+  drawFooter("W/S select  ENTER  I delete");
+}
+
+void drawProfileNameInput()
+{
+  drawTextFit("Save Profile", 10, CONTENT_Y + 12, 160, COLOR_MUTED);
+  drawTextFit("Name:", 12, CONTENT_Y + 34, 70, COLOR_TEXT);
+  uiCanvas.fillRoundRect(12, CONTENT_Y + 51, 216, 21, 3, COLOR_PANEL_DARK);
+  drawTextFit(shortText(app.profileNameInput + "_", 32), 18, CONTENT_Y + 58, 204, COLOR_ACCENT, COLOR_PANEL_DARK);
+  drawFooter("Type name  ENTER save  DEL delete");
+}
+
+void drawConfirmProfileOverwrite()
+{
+  drawTextFit("Profile exists", 14, CONTENT_Y + 25, 180, COLOR_WARN);
+  drawTextFit(shortText(profileDisplayName(app.pendingProfileName), 28), 14, CONTENT_Y + 47, 210, COLOR_TEXT);
+  drawTextFit("Overwrite?", 14, CONTENT_Y + 68, 140, COLOR_WARN);
+  drawFooter("ENTER yes  ESC no");
+}
+
+void drawConfirmProfileApply()
+{
+  drawTextFit("Apply profile?", 14, CONTENT_Y + 28, 170, COLOR_WARN);
+  drawTextFit(shortText(app.loadedProfileName, 30), 14, CONTENT_Y + 51, 210, COLOR_TEXT);
+  drawTextFit("Send to controller", 14, CONTENT_Y + 72, 170, COLOR_MUTED);
+  drawFooter("ENTER apply  ESC cancel");
 }
 
 void drawPatternDetail()
@@ -1110,6 +1165,12 @@ void drawConfirmProfileDelete()
   drawFooter("Confirm delete");
 }
 
+bool profileModalActive()
+{
+  return mode == Mode::ProfileNameInput || mode == Mode::ConfirmProfileOverwrite ||
+         mode == Mode::ConfirmProfileApply;
+}
+
 void render()
 {
   if (!app.dirty) {
@@ -1131,6 +1192,12 @@ void render()
     drawConfirmBulk();
   } else if (mode == Mode::ConfirmProfileDelete) {
     drawConfirmProfileDelete();
+  } else if (mode == Mode::ProfileNameInput) {
+    drawProfileNameInput();
+  } else if (mode == Mode::ConfirmProfileOverwrite) {
+    drawConfirmProfileOverwrite();
+  } else if (mode == Mode::ConfirmProfileApply) {
+    drawConfirmProfileApply();
   } else {
     switch (static_cast<Card>(app.selectedCard)) {
       case Card::Status:
@@ -1224,19 +1291,40 @@ void refreshProfileList()
   app.dirty = true;
 }
 
-String profilePath()
+String sanitizeProfileBaseName(String name)
 {
-  if (!ensureSdReady()) {
-    return "";
-  }
-  for (int i = 1; i < 1000; ++i) {
-    char path[32];
-    snprintf(path, sizeof(path), "/profiles/profile_%03d.json", i);
-    if (!SD.exists(path)) {
-      return String(path);
+  name.trim();
+  String out;
+  for (size_t i = 0; i < name.length() && out.length() < 40; ++i) {
+    char c = name[i];
+    if (c == ' ') {
+      out += '_';
+    } else if (isalnum(static_cast<unsigned char>(c)) || c == '_' || c == '-' || c == '.') {
+      out += c;
+    } else if (c == '/' || c == '\\' || c == ':' || c == '*' || c == '?' || c == '"' || c == '<' || c == '>' ||
+               c == '|') {
+      out += '_';
     }
   }
-  return "/profiles/profile_999.json";
+  while (out.startsWith("_") || out.startsWith(".")) {
+    out = out.substring(1);
+  }
+  while (out.endsWith("_") || out.endsWith(".")) {
+    out = out.substring(0, out.length() - 1);
+  }
+  return out;
+}
+
+String profilePathForName(const String& name)
+{
+  String base = sanitizeProfileBaseName(name);
+  if (base.length() == 0) {
+    return "";
+  }
+  if (!base.endsWith(".json")) {
+    base += ".json";
+  }
+  return "/profiles/" + base;
 }
 
 void writeJsonString(File& file, const String& value)
@@ -1252,12 +1340,26 @@ void writeJsonString(File& file, const String& value)
   file.print('"');
 }
 
-bool saveCurrentProfile()
+bool saveCurrentProfileToPath(const String& path, const String& displayName, bool overwrite)
 {
-  String path = profilePath();
   if (path.length() == 0) {
+    setStatus("Invalid name", COLOR_ERR);
     return false;
   }
+  if (!ensureSdReady()) {
+    return false;
+  }
+  if (SD.exists(path)) {
+    if (!overwrite) {
+      setStatus("Profile exists", COLOR_WARN);
+      return false;
+    }
+    if (!SD.remove(path)) {
+      setStatus("Overwrite failed", COLOR_ERR);
+      return false;
+    }
+  }
+  setStatus("Saving profile...", COLOR_ACCENT);
   File file = SD.open(path, FILE_WRITE);
   if (!file) {
     setStatus("Profile open failed", COLOR_ERR);
@@ -1300,7 +1402,11 @@ bool saveCurrentProfile()
   file.println("  }");
   file.println("}");
   file.close();
-  setStatus("Saved " + path, COLOR_OK);
+  app.loadedProfile = app.settings;
+  app.hasLoadedProfile = true;
+  app.loadedProfileName = displayName.length() > 0 ? displayName : profileDisplayName(path);
+  app.loadedProfilePath = path;
+  setStatus("Profile saved", COLOR_OK);
   refreshProfileList();
   return true;
 }
@@ -1422,7 +1528,9 @@ bool loadNewestProfile()
   }
   app.loadedProfile = loaded;
   app.hasLoadedProfile = true;
-  setStatus("Loaded " + path, COLOR_OK);
+  app.loadedProfilePath = path;
+  app.loadedProfileName = profileDisplayName(path);
+  setStatus("Profile loaded", COLOR_OK);
   return true;
 }
 
@@ -1469,7 +1577,9 @@ bool loadProfileFile(const String& fileName)
   }
   app.loadedProfile = loaded;
   app.hasLoadedProfile = true;
-  setStatus("Loaded " + fileName, COLOR_OK);
+  app.loadedProfilePath = path;
+  app.loadedProfileName = profileDisplayName(fileName);
+  setStatus("Profile loaded", COLOR_OK);
   return true;
 }
 
@@ -1479,6 +1589,7 @@ void applyLoadedProfile()
     setStatus("No profile loaded", COLOR_WARN);
     return;
   }
+  setStatus("Applying profile...", COLOR_ACCENT);
   sendCommand(NightKiteCommands::setBrightness(app.loadedProfile.brightness));
   sendCommand(NightKiteCommands::setStripLength(app.loadedProfile.stripLength));
   sendCommand(NightKiteCommands::setPattern(app.loadedProfile.activePattern));
@@ -1501,6 +1612,68 @@ void applyLoadedProfile()
     sendCommand(String("invert_pattern ") + invertedList);
   }
   setStatus("Profile applied", COLOR_OK);
+}
+
+void startProfileNameInput()
+{
+  if (!ensureSdReady()) {
+    return;
+  }
+  app.profileNameInput = app.hasLoadedProfile ? app.loadedProfileName : "";
+  app.pendingProfileName = "";
+  app.pendingProfilePath = "";
+  mode = Mode::ProfileNameInput;
+  app.dirty = true;
+}
+
+void submitProfileNameInput()
+{
+  String base = sanitizeProfileBaseName(app.profileNameInput);
+  if (base.length() == 0) {
+    setStatus("Name required", COLOR_WARN);
+    app.dirty = true;
+    return;
+  }
+  String path = profilePathForName(base);
+  if (path.length() == 0) {
+    setStatus("Invalid name", COLOR_ERR);
+    app.dirty = true;
+    return;
+  }
+  app.pendingProfileName = profileDisplayName(base);
+  app.pendingProfilePath = path;
+  if (SD.exists(path)) {
+    setStatus("Profile exists", COLOR_WARN);
+    mode = Mode::ConfirmProfileOverwrite;
+    app.dirty = true;
+    return;
+  }
+  saveCurrentProfileToPath(path, app.pendingProfileName, false);
+  mode = Mode::Cards;
+  app.dirty = true;
+}
+
+void confirmProfileOverwrite()
+{
+  if (app.pendingProfilePath.length() == 0 || app.pendingProfileName.length() == 0) {
+    setStatus("Invalid name", COLOR_ERR);
+    mode = Mode::ProfileNameInput;
+    app.dirty = true;
+    return;
+  }
+  saveCurrentProfileToPath(app.pendingProfilePath, app.pendingProfileName, true);
+  mode = Mode::Cards;
+  app.dirty = true;
+}
+
+void startApplyLoadedProfile()
+{
+  if (!app.hasLoadedProfile) {
+    setStatus("No profile loaded", COLOR_WARN);
+    return;
+  }
+  mode = Mode::ConfirmProfileApply;
+  app.dirty = true;
 }
 
 void parsePatternStates(const String& line)
@@ -1892,9 +2065,9 @@ void applyCurrentCard()
         ensureSdReady();
         refreshProfileList();
       } else if (app.selectedProfileAction == 1) {
-        saveCurrentProfile();
+        startProfileNameInput();
       } else if (app.selectedProfileAction == 2) {
-        applyLoadedProfile();
+        startApplyLoadedProfile();
       } else {
         int profileIndex = app.selectedProfileAction - PROFILE_ACTION_COUNT;
         if (profileIndex >= 0 && profileIndex < static_cast<int>(app.profileFiles.size())) {
@@ -2055,6 +2228,11 @@ void deleteSelectedProfile()
     return;
   }
   if (SD.remove(path)) {
+    if (app.hasLoadedProfile && app.loadedProfilePath == path) {
+      app.hasLoadedProfile = false;
+      app.loadedProfileName = "";
+      app.loadedProfilePath = "";
+    }
     setStatus("Deleted " + fileName, COLOR_OK);
     refreshProfileList();
   } else {
@@ -2092,6 +2270,14 @@ void runBulkAction()
 void handleWordChar(char c)
 {
   if (flashWorkflowActive()) {
+    return;
+  }
+
+  if (mode == Mode::ProfileNameInput) {
+    if (app.profileNameInput.length() < 40 && c >= 32 && c <= 126) {
+      app.profileNameInput += c;
+      app.dirty = true;
+    }
     return;
   }
 
@@ -2225,14 +2411,31 @@ void handleKeyboard()
     } else if (mode == Mode::ConfirmProfileDelete) {
       deleteSelectedProfile();
       mode = Mode::Cards;
+    } else if (mode == Mode::ProfileNameInput) {
+      submitProfileNameInput();
+    } else if (mode == Mode::ConfirmProfileOverwrite) {
+      confirmProfileOverwrite();
+    } else if (mode == Mode::ConfirmProfileApply) {
+      applyLoadedProfile();
+      mode = Mode::Cards;
+      app.dirty = true;
     } else {
       applyCurrentCard();
     }
     return;
   }
 
-  if (status.del) {
-    if (mode == Mode::PatternDetail || mode == Mode::ConfirmBulk || mode == Mode::ConfirmProfileDelete) {
+  if (status.del || (status.opt && profileModalActive())) {
+    if (mode == Mode::ProfileNameInput && status.del && app.profileNameInput.length() > 0) {
+      app.profileNameInput.remove(app.profileNameInput.length() - 1);
+    } else if (mode == Mode::PatternDetail || mode == Mode::ConfirmBulk || mode == Mode::ConfirmProfileDelete ||
+               mode == Mode::ProfileNameInput || mode == Mode::ConfirmProfileOverwrite ||
+               mode == Mode::ConfirmProfileApply) {
+      if (mode == Mode::ProfileNameInput || mode == Mode::ConfirmProfileOverwrite) {
+        setStatus("Save cancelled", COLOR_WARN);
+      } else if (mode == Mode::ConfirmProfileApply) {
+        setStatus("Apply cancelled", COLOR_WARN);
+      }
       mode = Mode::Cards;
     } else if (app.selectedCard != 0) {
       app.selectedCard = 0;
