@@ -21,6 +21,7 @@ zusammenhängender Einstellungen.
 Im aktuellen Code vorhanden:
 
 - Cardputer-Akkuanzeige inklusive Ladestatus
+- PCM-basierte Startup-, Tasten-, Navigations-, Confirm-, Cancel-, Success- und Error-Sounds
 - USB-Verbindungsstatus
 - Controller-/CLI-Verbindungsstatus mit Timeout-Erkennung
 - Helligkeit anzeigen und direkt beim Ändern senden
@@ -54,6 +55,9 @@ Im aktuellen Code vorhanden:
 Der UF2-Mass-Storage-Flasher ist aktuell **experimental / work in progress**.
 Er ist als Service- oder Recovery-Workflow gedacht, nicht als normaler
 CLI-Befehl.
+
+UI-Sounds sind im Code standardmäßig aktiviert und nutzen eingebettete bzw.
+generierte PCM-Daten. Es werden keine Sounddateien auf der SD-Karte benötigt.
 
 ## Hardware-Anforderungen
 

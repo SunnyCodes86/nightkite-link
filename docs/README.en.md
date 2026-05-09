@@ -19,6 +19,7 @@ contains one primary function or a small group of related settings.
 Implemented or present in the current code:
 
 - Cardputer battery display, including charge state
+- PCM-based startup, key, navigation, confirm, cancel, success and error sounds
 - USB connection status
 - Controller/CLI connection status and timeout handling
 - Brightness display and immediate change/send behavior
@@ -51,6 +52,9 @@ Implemented or present in the current code:
 
 The UF2 Mass Storage flasher is currently **experimental / work in progress**.
 It is intended as a service or recovery workflow, not as a normal CLI command.
+
+UI sounds are enabled by default in code and use embedded/generated PCM data, so
+no SD sound files are required.
 
 ## Hardware Requirements
 

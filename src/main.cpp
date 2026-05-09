@@ -4,6 +4,7 @@
 #include <math.h>
 #include <vector>
 #include "M5Cardputer.h"
+#include "SoundManager.h"
 #include "Uf2Validator.h"
 #include "UsbMscUf2Flasher.h"
 #if NIGHTKITE_USB_HOST
@@ -35,6 +36,8 @@ constexpr int MAX_CLI_LINE_CHARS = 512;
 constexpr unsigned long CARDPUTER_BATTERY_POLL_MS = 3000;
 constexpr unsigned long LINK_STALE_MS = 9000;
 constexpr unsigned long COMMAND_SEND_INTERVAL_MS = 160;
+constexpr unsigned long SPLASH_DURATION_MS = 1500;
+constexpr unsigned long STARTUP_SOUND_DELAY_MS = 180;
 
 constexpr int SD_SPI_SCK_PIN = 40;
 constexpr int SD_SPI_MISO_PIN = 39;
@@ -207,8 +210,13 @@ bool lastUsbConnected = false;
 String rxLine;
 std::vector<String> commandQueue;
 bool patternSyncInProgress = false;
+bool transferCompleteSoundPending = false;
 bool canvasReady = false;
 M5Canvas uiCanvas(&M5Cardputer.Display);
+SoundManager soundManager;
+bool splashActive = true;
+bool startupSoundPlayed = false;
+unsigned long splashStartMs = 0;
 String editValue;
 bool editBool = false;
 bool detailCycle = false;
@@ -223,6 +231,29 @@ int draftAutoplayIntervalSeconds = -1;
 UsbMscUf2Flasher uf2Flasher;
 
 bool ensureSdReady();
+
+bool flashCopyAudioQuiet()
+{
+  if (splashActive) {
+    return true;
+  }
+  return app.flash.state == FlashUiState::MassStorageConnected || app.flash.state == FlashUiState::CopyingUf2 ||
+         app.flash.state == FlashUiState::CopyComplete || app.flash.state == FlashUiState::WaitingForReboot;
+}
+
+void playStatusSound(const String& text, uint16_t color)
+{
+  if (flashCopyAudioQuiet()) {
+    return;
+  }
+  if (color == COLOR_ERR) {
+    soundManager.playError();
+  } else if (color == COLOR_OK && !text.startsWith("OK") && !text.startsWith("USB connected") &&
+             !text.startsWith("Profiles:") && !text.startsWith("UF2 files:") && text != "SD ready" &&
+             text != "Transfer complete" && text != "Pattern states sent") {
+    soundManager.playSuccess();
+  }
+}
 
 class NightKiteTransport {
 public:
@@ -333,6 +364,7 @@ DebugSerialTransport transport;
 
 void setStatus(const String& text, uint16_t color = COLOR_MUTED)
 {
+  playStatusSound(text, color);
   app.statusMessage = text;
   app.statusColor = color;
   app.dirty = true;
@@ -565,13 +597,30 @@ void sendCommand(const String& command)
   }
 }
 
+void markTransferCompleteSoundPending()
+{
+  transferCompleteSoundPending = true;
+}
+
+void playTransferCompleteIfPending(const String& statusText)
+{
+  if (!transferCompleteSoundPending) {
+    return;
+  }
+  transferCompleteSoundPending = false;
+  setStatus(statusText, COLOR_OK);
+  soundManager.playTransferComplete();
+}
+
 void pollCommandQueue()
 {
   if (commandQueue.empty()) {
     if (patternSyncInProgress) {
       patternSyncInProgress = false;
       app.patternEditsPending = false;
-      setStatus("Pattern states sent", COLOR_OK);
+      playTransferCompleteIfPending("Pattern states sent");
+    } else {
+      playTransferCompleteIfPending("Transfer complete");
     }
     return;
   }
@@ -582,6 +631,7 @@ void pollCommandQueue()
     setStatus("USB disconnected", COLOR_ERR);
     commandQueue.clear();
     patternSyncInProgress = false;
+    transferCompleteSoundPending = false;
     app.dirty = true;
     return;
   }
@@ -1135,6 +1185,26 @@ void drawConfirmProfileApply()
   drawFooter("ENTER apply  ESC cancel");
 }
 
+void drawSplashScreen()
+{
+  auto& d = uiCanvas;
+  d.fillScreen(COLOR_BG);
+  d.setTextDatum(top_center);
+  d.setFont(&fonts::Font4);
+  d.setTextColor(COLOR_ACCENT, COLOR_BG);
+  d.drawString("NightKite", SCREEN_W / 2, 20);
+  d.setFont(&fonts::Font2);
+  d.setTextColor(COLOR_TEXT, COLOR_BG);
+  d.drawString("Link", SCREEN_W / 2, 52);
+  d.setFont(&fonts::Font0);
+  d.setTextColor(COLOR_MUTED, COLOR_BG);
+  d.drawString("Cardputer-Adv", SCREEN_W / 2, 78);
+  d.drawString("USB Configurator", SCREEN_W / 2, 93);
+  d.setTextColor(COLOR_ACCENT, COLOR_BG);
+  d.drawString("Loading...", SCREEN_W / 2, 112);
+  d.setTextDatum(top_left);
+}
+
 void drawPatternDetail()
 {
   ensurePatternModel();
@@ -1178,6 +1248,15 @@ void render()
   }
 
   auto& d = uiCanvas;
+  if (splashActive) {
+    drawSplashScreen();
+    if (canvasReady) {
+      uiCanvas.pushSprite(0, 0);
+    }
+    app.dirty = false;
+    return;
+  }
+
   d.fillScreen(COLOR_BG);
   d.setTextSize(1);
   d.setFont(&fonts::Font0);
@@ -1590,6 +1669,7 @@ void applyLoadedProfile()
     return;
   }
   setStatus("Applying profile...", COLOR_ACCENT);
+  markTransferCompleteSoundPending();
   sendCommand(NightKiteCommands::setBrightness(app.loadedProfile.brightness));
   sendCommand(NightKiteCommands::setStripLength(app.loadedProfile.stripLength));
   sendCommand(NightKiteCommands::setPattern(app.loadedProfile.activePattern));
@@ -1611,7 +1691,7 @@ void applyLoadedProfile()
   if (invertedList.length() > 0) {
     sendCommand(String("invert_pattern ") + invertedList);
   }
-  setStatus("Profile applied", COLOR_OK);
+  setStatus("Profile queued", COLOR_ACCENT);
 }
 
 void startProfileNameInput()
@@ -1807,6 +1887,7 @@ void pollTransport()
       app.controllerConnected = false;
       app.controllerError = true;
       commandQueue.clear();
+      transferCompleteSoundPending = false;
       setStatus("USB disconnected", COLOR_ERR);
     } else {
       app.controllerError = false;
@@ -2081,6 +2162,7 @@ void applyCurrentCard()
 void saveAllPatternStates()
 {
   ensurePatternModel();
+  markTransferCompleteSoundPending();
   for (const auto& pattern : app.settings.patterns) {
     sendCommand(NightKiteCommands::setPatternCycle(pattern.id, pattern.cycleEnabled));
     sendCommand(NightKiteCommands::setPatternInvert(pattern.id, pattern.inverted));
@@ -2134,6 +2216,7 @@ void beginFirmwareFlashAfterBootsel()
   }
   commandQueue.clear();
   patternSyncInProgress = false;
+  transferCompleteSoundPending = false;
   app.flash.busy = true;
   setStatus("Flash mode", COLOR_WARN);
   setFlashState(FlashUiState::WaitingForMassStorage);
@@ -2186,10 +2269,12 @@ void updateFlashWorkflow()
     if (progress.done) {
       app.flash.busy = false;
       if (progress.success) {
+        soundManager.playSuccess();
         setStatus("Flash complete", COLOR_OK);
         setFlashState(FlashUiState::Success, "Flash complete");
       } else {
         app.flash.errorMessage = progress.message.length() > 0 ? progress.message : uf2Flasher.resultMessage();
+        soundManager.playError();
         setStatus(app.flash.errorMessage, COLOR_ERR);
         setFlashState(FlashUiState::Error);
       }
@@ -2247,18 +2332,22 @@ void runBulkAction()
       saveAllPatternStates();
       break;
     case 1:
+      markTransferCompleteSoundPending();
       sendCommand(NightKiteCommands::setAllCycle(true));
       applyPatternMasks(ALL_PATTERN_MASK, 0, true, false);
       break;
     case 2:
+      markTransferCompleteSoundPending();
       sendCommand(NightKiteCommands::setAllCycle(false));
       applyPatternMasks(0, 0, true, false);
       break;
     case 3:
+      markTransferCompleteSoundPending();
       sendCommand(NightKiteCommands::setAllInvert(true));
       applyPatternMasks(0, ALL_PATTERN_MASK, false, true);
       break;
     case 4:
+      markTransferCompleteSoundPending();
       sendCommand(NightKiteCommands::setAllInvert(false));
       applyPatternMasks(0, 0, false, true);
       break;
@@ -2365,6 +2454,83 @@ void handleWordChar(char c)
   }
 }
 
+bool textInputActive()
+{
+  return mode == Mode::ProfileNameInput;
+}
+
+bool isPageChangeChar(char c)
+{
+  switch (c) {
+    case 'a':
+    case 'A':
+    case 'd':
+    case 'D':
+    case ',':
+    case '<':
+    case '/':
+    case '?':
+      return true;
+    default:
+      return false;
+  }
+}
+
+bool isLocalNavigationChar(char c)
+{
+  switch (c) {
+    case 'w':
+    case 'W':
+    case 's':
+    case 'S':
+    case '.':
+    case '>':
+    case ';':
+    case ':':
+      return true;
+    default:
+      return false;
+  }
+}
+
+void playKeyboardSound(const Keyboard_Class::KeysState& status)
+{
+  if (flashCopyAudioQuiet()) {
+    return;
+  }
+  if (status.enter) {
+    soundManager.playConfirm();
+    return;
+  }
+  if (status.del || status.opt) {
+    soundManager.playCancel();
+    return;
+  }
+  if (textInputActive()) {
+    if (!status.word.empty() || status.space) {
+      soundManager.playTextKey();
+    }
+    return;
+  }
+  if (status.tab) {
+    soundManager.playPageChange();
+    return;
+  }
+  for (char c : status.word) {
+    if (isPageChangeChar(c)) {
+      soundManager.playPageChange();
+      return;
+    }
+    if (isLocalNavigationChar(c)) {
+      soundManager.playNavigate();
+      return;
+    }
+  }
+  if (!status.word.empty() || status.space) {
+    soundManager.playTextKey();
+  }
+}
+
 void handleKeyboard()
 {
   if (!M5Cardputer.Keyboard.isChange() || !M5Cardputer.Keyboard.isPressed()) {
@@ -2372,6 +2538,7 @@ void handleKeyboard()
   }
 
   auto& status = M5Cardputer.Keyboard.keysState();
+  playKeyboardSound(status);
 
   if (flashWorkflowActive()) {
     if (status.enter) {
@@ -2463,6 +2630,7 @@ void setup()
 
   auto cfg = M5.config();
   M5Cardputer.begin(cfg, true);
+  soundManager.begin();
   M5Cardputer.Display.setRotation(1);
   M5Cardputer.Display.setBrightness(96);
   uiCanvas.setColorDepth(16);
@@ -2476,12 +2644,36 @@ void setup()
   updateCardputerBattery(true);
   syncEditFromCard();
   setStatus("NightKite Link boot", COLOR_MUTED);
-  sendCommand(NightKiteCommands::refreshAll());
+  splashStartMs = millis();
+  splashActive = true;
+  startupSoundPlayed = false;
+  app.dirty = true;
+  Serial.println("startup: splash");
 }
 
 void loop()
 {
   M5Cardputer.update();
+  soundManager.update();
+
+  if (splashActive) {
+    unsigned long elapsed = millis() - splashStartMs;
+    if (!startupSoundPlayed && elapsed >= STARTUP_SOUND_DELAY_MS) {
+      Serial.println("sound: startup");
+      soundManager.playStartup();
+      startupSoundPlayed = true;
+    }
+    if (elapsed >= SPLASH_DURATION_MS) {
+      splashActive = false;
+      Serial.println("startup: done");
+      sendCommand(NightKiteCommands::refreshAll());
+      app.dirty = true;
+    }
+    render();
+    delay(2);
+    return;
+  }
+
   updateCardputerBattery();
   handleKeyboard();
   updateFlashWorkflow();

@@ -19,6 +19,7 @@ Ausführliche deutsche Dokumentation: [docs/README.de.md](docs/README.de.md)
 ## Features
 
 - Card-based UI with compact status bar
+- WAV/PCM-style startup and UI key sounds
 - Cardputer battery, USB and controller/CLI status display
 - Brightness, strip length, active pattern, smoothing and autoplay settings
 - Pattern list with cycle and invert state
