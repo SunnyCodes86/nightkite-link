@@ -34,7 +34,6 @@ constexpr int CONTENT_Y = STATUS_H;
 constexpr int CONTENT_H = SCREEN_H - STATUS_H - FOOTER_H;
 constexpr int MAX_CLI_LINE_CHARS = 512;
 constexpr unsigned long CARDPUTER_BATTERY_POLL_MS = 3000;
-constexpr unsigned long CONTROLLER_BATTERY_POLL_MS = 60000;
 constexpr unsigned long LINK_STALE_MS = 9000;
 constexpr unsigned long COMMAND_SEND_INTERVAL_MS = 160;
 constexpr unsigned long SPLASH_DURATION_MS = 1500;
@@ -105,7 +104,6 @@ struct ControllerSettings {
   int autoplayIntervalSeconds = -1;
   int controllerBatteryPercent = -1;
   float controllerBatteryVoltage = NAN;
-  bool hasControllerBattery = false;
   uint32_t enabledPatternMask = 0;
   uint32_t invertedPatternMask = 0;
   std::vector<PatternConfig> patterns;
@@ -208,7 +206,6 @@ unsigned long lastCardBatteryPollMs = 0;
 unsigned long lastPollMs = 0;
 unsigned long lastRxMs = 0;
 unsigned long lastCommandSendMs = 0;
-unsigned long lastControllerBatteryReadMs = 0;
 bool lastUsbConnected = false;
 String rxLine;
 std::vector<String> commandQueue;
@@ -408,116 +405,9 @@ void parseIntField(const String& line, const char* key, int& target)
   }
 }
 
-bool parseFloatField(const String& line, const char* key, float& target)
-{
-  String value = valueForKey(line, key);
-  if (value.length() == 0) {
-    return false;
-  }
-  target = value.toFloat();
-  return true;
-}
-
 bool parseBoolText(const String& value)
 {
   return value == "on" || value == "1" || value == "true" || value == "yes";
-}
-
-bool parsePercentNearToken(const String& line, int& percent)
-{
-  int percentPos = line.indexOf('%');
-  if (percentPos < 0) {
-    return false;
-  }
-  int start = percentPos - 1;
-  while (start >= 0 && isDigit(static_cast<unsigned char>(line[start]))) {
-    --start;
-  }
-  if (start == percentPos - 1) {
-    return false;
-  }
-  int value = line.substring(start + 1, percentPos).toInt();
-  if (value < 0 || value > 100) {
-    return false;
-  }
-  percent = value;
-  return true;
-}
-
-void parseControllerBattery(const String& line)
-{
-  int percent = -1;
-  const char* percentKeys[] = {"battery_percent", "battery_pct", "controller_battery", "percent", "battery"};
-  for (const char* key : percentKeys) {
-    String value = valueForKey(line, key);
-    if (value.length() == 0) {
-      continue;
-    }
-    if (strcmp(key, "battery") == 0 && value.indexOf('.') >= 0) {
-      continue;
-    }
-    int parsed = value.toInt();
-    if (parsed >= 0 && parsed <= 100) {
-      percent = parsed;
-      break;
-    }
-  }
-  if (percent < 0) {
-    parsePercentNearToken(line, percent);
-  }
-
-  float voltage = NAN;
-  bool voltageParsed = parseFloatField(line, "battery_voltage", voltage) || parseFloatField(line, "voltage", voltage) ||
-                       parseFloatField(line, "battery_v", voltage);
-  String mv = valueForKey(line, "battery_mv");
-  if (mv.length() > 0) {
-    voltage = mv.toFloat() / 1000.0f;
-    voltageParsed = true;
-  }
-
-  bool batteryLine = line.indexOf("battery") >= 0 || line.indexOf("Battery") >= 0 || line.indexOf("BATTERY") >= 0;
-  if (batteryLine && (percent < 0 || !voltageParsed)) {
-    int start = -1;
-    for (int i = 0; i <= line.length(); ++i) {
-      bool numeric = i < line.length() && (isDigit(static_cast<unsigned char>(line[i])) || line[i] == '.');
-      if (numeric && start < 0) {
-        start = i;
-      } else if ((!numeric || i == line.length()) && start >= 0) {
-        String token = line.substring(start, i);
-        if (token.indexOf('.') >= 0) {
-          float parsedVoltage = token.toFloat();
-          if (!voltageParsed && parsedVoltage > 0.5f && parsedVoltage < 6.5f) {
-            voltage = parsedVoltage;
-            voltageParsed = true;
-          }
-        } else {
-          int parsedPercent = token.toInt();
-          if (percent < 0 && parsedPercent >= 0 && parsedPercent <= 100) {
-            percent = parsedPercent;
-          }
-        }
-        start = -1;
-      }
-    }
-  }
-
-  if (percent >= 0) {
-    app.settings.controllerBatteryPercent = percent;
-    app.settings.hasControllerBattery = true;
-  }
-  if (voltageParsed && voltage > 0.5f && voltage < 6.5f) {
-    app.settings.controllerBatteryVoltage = voltage;
-    app.settings.hasControllerBattery = true;
-  }
-  if (percent >= 0 || app.settings.hasControllerBattery) {
-    Serial.print("controller battery: ");
-    Serial.print(app.settings.controllerBatteryPercent >= 0 ? String(app.settings.controllerBatteryPercent) + "%" : "--");
-    Serial.print(", ");
-    Serial.println(!isnan(app.settings.controllerBatteryVoltage) ? String(app.settings.controllerBatteryVoltage, 2) + "V" : "--");
-  } else if (batteryLine) {
-    Serial.print("controller battery parse failed: ");
-    Serial.println(line);
-  }
 }
 
 uint32_t patternMaskFromList(String list)
@@ -641,10 +531,6 @@ public:
   {
     return "patterns";
   }
-  static String refreshBattery()
-  {
-    return "battery";
-  }
   static String setBrightness(int value)
   {
     return "set brightness " + String(value);
@@ -724,17 +610,6 @@ void playTransferCompleteIfPending(const String& statusText)
   transferCompleteSoundPending = false;
   setStatus(statusText, COLOR_OK);
   soundManager.playTransferComplete();
-}
-
-void requestControllerBattery(bool force = false)
-{
-  unsigned long now = millis();
-  if (!force && now - lastControllerBatteryReadMs < CONTROLLER_BATTERY_POLL_MS) {
-    return;
-  }
-  lastControllerBatteryReadMs = now;
-  Serial.println("controller battery request");
-  sendCommand(NightKiteCommands::refreshBattery());
 }
 
 void pollCommandQueue()
@@ -847,26 +722,18 @@ void drawStatusBar()
   auto& d = uiCanvas;
   d.fillRect(0, 0, SCREEN_W, STATUS_H, COLOR_PANEL_DARK);
   String cp = app.cardputerBatteryPercent >= 0 ? String(app.cardputerBatteryPercent) + "%" : "--";
-  String linkText = String("U") + (app.usbConnected ? "+" : "-") + " C" +
-                    (app.controllerConnected ? (app.controllerError ? "!" : "+") : "-");
-  String nk = "NK:--";
-  if (app.controllerConnected && app.settings.hasControllerBattery) {
-    if (app.settings.controllerBatteryPercent >= 0) {
-      nk = "NK:" + String(constrain(app.settings.controllerBatteryPercent, 0, 100));
-    } else if (!isnan(app.settings.controllerBatteryVoltage)) {
-      char buffer[10];
-      snprintf(buffer, sizeof(buffer), "%.1fV", app.settings.controllerBatteryVoltage);
-      nk = String("NK:") + buffer;
-    }
+  String text = String("USB") + (app.usbConnected ? "+" : "-") + " CTRL" +
+                (app.controllerConnected ? (app.controllerError ? "!" : "+") : "-");
+  if (app.settings.controllerBatteryPercent >= 0) {
+    text += " NK:" + String(app.settings.controllerBatteryPercent) + "%";
   }
   bool cliBusy = !commandQueue.empty() || patternSyncInProgress;
   String queueText = "Q:" + String(commandQueue.size());
   uint16_t queueColor = cliBusy ? COLOR_WARN : COLOR_MUTED;
-  drawTextFit(linkText, 3, 4, 37, app.controllerError ? COLOR_WARN : COLOR_TEXT, COLOR_PANEL_DARK);
-  drawTextFit(queueText, 43, 4, 30, queueColor, COLOR_PANEL_DARK);
-  drawTextFit(String(app.selectedCard + 1) + "/" + String(CARD_COUNT), 77, 4, 28, COLOR_MUTED, COLOR_PANEL_DARK);
-  drawTextFit(nk, 111, 4, 52, app.settings.hasControllerBattery ? COLOR_OK : COLOR_MUTED, COLOR_PANEL_DARK);
-  drawTextFit(String("CP:") + cp, 169, 4, 68, app.cardputerCharging ? COLOR_OK : COLOR_ACCENT, COLOR_PANEL_DARK);
+  drawTextFit(text, 3, 4, 96, app.controllerError ? COLOR_WARN : COLOR_TEXT, COLOR_PANEL_DARK);
+  drawTextFit(queueText, 103, 4, 34, queueColor, COLOR_PANEL_DARK);
+  drawTextFit(String(app.selectedCard + 1) + "/" + String(CARD_COUNT), 160, 4, 28, COLOR_MUTED, COLOR_PANEL_DARK);
+  drawTextFit(String("CP:") + cp, 194, 4, 43, app.cardputerCharging ? COLOR_OK : COLOR_ACCENT, COLOR_PANEL_DARK);
 }
 
 void drawFooter(const String& help)
@@ -1967,7 +1834,10 @@ void parseNightKiteLine(const String& line)
     if (inverted.length() > 0) {
       applyPatternMasks(0, patternMaskFromList(inverted), false, true);
     }
-    parseControllerBattery(parsed);
+    String voltage = valueForKey(parsed, "battery_voltage");
+    if (voltage.length() > 0) {
+      app.settings.controllerBatteryVoltage = voltage.toFloat();
+    }
     parsePatternStates(parsed);
     setStatus(shortText(parsed, 34), COLOR_OK);
   } else if (parsed.startsWith("ERR")) {
@@ -1979,10 +1849,6 @@ void parseNightKiteLine(const String& line)
     app.controllerConnected = true;
     lastRxMs = millis();
     setStatus(shortText(parsed, 34), COLOR_MUTED);
-  } else if (parsed.indexOf("battery") >= 0 || parsed.indexOf("Battery") >= 0) {
-    app.controllerConnected = true;
-    lastRxMs = millis();
-    parseControllerBattery(parsed);
   }
   app.dirty = true;
 }
@@ -2020,9 +1886,6 @@ void pollTransport()
     if (!app.usbConnected) {
       app.controllerConnected = false;
       app.controllerError = true;
-      app.settings.hasControllerBattery = false;
-      app.settings.controllerBatteryPercent = -1;
-      app.settings.controllerBatteryVoltage = NAN;
       commandQueue.clear();
       transferCompleteSoundPending = false;
       setStatus("USB disconnected", COLOR_ERR);
@@ -2030,7 +1893,6 @@ void pollTransport()
       app.controllerError = false;
       setStatus("USB connected", COLOR_OK);
       sendCommand(NightKiteCommands::refreshAll());
-      requestControllerBattery(true);
     }
     app.dirty = true;
   }
@@ -2043,13 +1905,8 @@ void pollTransport()
   if (app.controllerConnected && millis() - lastRxMs > LINK_STALE_MS) {
     app.controllerConnected = false;
     app.controllerError = true;
-    app.settings.hasControllerBattery = false;
     setStatus("Controller timeout", COLOR_ERR);
     app.dirty = true;
-  }
-
-  if (app.usbConnected && app.controllerConnected) {
-    requestControllerBattery();
   }
 
   if (millis() - lastPollMs > 5000) {
@@ -2108,7 +1965,6 @@ void changeCard(int delta)
 
 void refreshCurrentCard()
 {
-  requestControllerBattery(true);
   if (static_cast<Card>(app.selectedCard) == Card::PatternList || static_cast<Card>(app.selectedCard) == Card::PatternBulk) {
     sendCommand(NightKiteCommands::refreshPatterns());
     sendCommand("get inverted_patterns");
