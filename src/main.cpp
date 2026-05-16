@@ -37,6 +37,8 @@ constexpr unsigned long CARDPUTER_BATTERY_POLL_MS = 3000;
 constexpr unsigned long CONTROLLER_BATTERY_POLL_MS = 60000;
 constexpr unsigned long LINK_STALE_MS = 9000;
 constexpr unsigned long COMMAND_SEND_INTERVAL_MS = 160;
+constexpr unsigned long AUTO_STATUS_POLL_MS = 4000;
+constexpr unsigned long AUTO_REFRESH_IDLE_MS = 1800;
 constexpr unsigned long NK4_COMMAND_TIMEOUT_MS = 1400;
 constexpr unsigned long NK4_PROBE_TIMEOUT_MS = 1600;
 constexpr unsigned long NK4_MACHINE_DELAY_MS = 120;
@@ -325,6 +327,7 @@ unsigned long lastPollMs = 0;
 unsigned long lastRxMs = 0;
 unsigned long lastCommandSendMs = 0;
 unsigned long lastControllerBatteryReadMs = 0;
+unsigned long lastUserInputMs = 0;
 bool lastUsbConnected = false;
 String rxLine;
 std::vector<CommandQueueEntry> commandQueue;
@@ -347,16 +350,52 @@ String editValue;
 bool editBool = false;
 bool detailCycle = false;
 bool detailInvert = false;
+bool brightnessDirty = false;
+bool patternDirty = false;
+int draftBrightness = -1;
+int draftActivePattern = -1;
 int draftStripLength = -1;
 int draftSmoothing = -1;
 int draftAccelRange = -1;
 int draftGyroRange = -1;
 bool draftAutoplayEnabled = false;
 int draftAutoplayIntervalSeconds = -1;
+String draftPlayMode = "unknown";
+String draftBootMode = "unknown";
+bool draftPlayAutoplayEnabled = false;
+int draftPlayAutoplayIntervalSeconds = -1;
+bool draftSyncEnabled = false;
+int draftSyncGroup = -1;
+String draftSyncRole = "unknown";
+String draftSyncLossBehavior = "unknown";
+bool draftWirelessEnabled = false;
+String draftWirelessProfile = "unknown";
+uint8_t configDirtyMask = 0;
+uint8_t playDirtyMask = 0;
+uint8_t syncDirtyMask = 0;
+uint8_t wirelessDirtyMask = 0;
+
+constexpr uint8_t CONFIG_DIRTY_STRIP = 1 << 0;
+constexpr uint8_t CONFIG_DIRTY_SMOOTH = 1 << 1;
+constexpr uint8_t CONFIG_DIRTY_ACCEL = 1 << 2;
+constexpr uint8_t CONFIG_DIRTY_GYRO = 1 << 3;
+constexpr uint8_t CONFIG_DIRTY_AUTOPLAY = 1 << 4;
+constexpr uint8_t CONFIG_DIRTY_INTERVAL = 1 << 5;
+constexpr uint8_t PLAY_DIRTY_MODE = 1 << 0;
+constexpr uint8_t PLAY_DIRTY_BOOT = 1 << 1;
+constexpr uint8_t PLAY_DIRTY_AUTOPLAY = 1 << 2;
+constexpr uint8_t PLAY_DIRTY_INTERVAL = 1 << 3;
+constexpr uint8_t SYNC_DIRTY_ENABLED = 1 << 0;
+constexpr uint8_t SYNC_DIRTY_GROUP = 1 << 1;
+constexpr uint8_t SYNC_DIRTY_ROLE = 1 << 2;
+constexpr uint8_t SYNC_DIRTY_LOSS = 1 << 3;
+constexpr uint8_t WIRELESS_DIRTY_ENABLED = 1 << 0;
+constexpr uint8_t WIRELESS_DIRTY_PROFILE = 1 << 1;
 
 UsbMscUf2Flasher uf2Flasher;
 
 bool ensureSdReady();
+void syncEditFromCard();
 
 bool flashCopyAudioQuiet()
 {
@@ -1023,6 +1062,91 @@ void sendCommand(const String& command, bool announce = true)
   }
 }
 
+void enqueueNk4RefreshForSet(const String& command)
+{
+  if (command.indexOf("play_mode=") >= 0 || command.indexOf("boot_mode=") >= 0 ||
+      command.indexOf("autoplay=") >= 0 || command.indexOf("autoplay_interval=") >= 0) {
+    enqueueCommandEntry("cmd=get section=play", true);
+    enqueueCommandEntry("cmd=status", true);
+  } else if (command.indexOf("sync_enabled=") >= 0 || command.indexOf("sync_group=") >= 0 ||
+             command.indexOf("sync_role=") >= 0 || command.indexOf("sync_loss_behavior=") >= 0 ||
+             command.indexOf("sync_master_uid=") >= 0) {
+    enqueueCommandEntry("cmd=get section=sync", true);
+    enqueueCommandEntry("cmd=sync_status", true);
+  } else if (command.indexOf("wireless_enabled=") >= 0 || command.indexOf("wireless_profile=") >= 0) {
+    enqueueCommandEntry("cmd=get section=wireless", true);
+  } else if (command.indexOf("enabled_mask=") >= 0 || command.indexOf("inverted_mask=") >= 0) {
+    enqueueCommandEntry("cmd=get section=patterns", true);
+  } else if (command.indexOf("pattern=") >= 0) {
+    enqueueCommandEntry("cmd=status", true);
+    enqueueCommandEntry("cmd=get section=patterns", true);
+  } else if (command.indexOf("brightness=") >= 0 || command.indexOf("strip_length=") >= 0 ||
+             command.indexOf("smoothing=") >= 0 || command.indexOf("accel_range=") >= 0 ||
+             command.indexOf("gyro_range=") >= 0 || command.indexOf("boot_calibration=") >= 0) {
+    enqueueCommandEntry("cmd=get section=config", true);
+    enqueueCommandEntry("cmd=status", true);
+  }
+}
+
+void handleNk4CommandOk(const String& command)
+{
+  if (!command.startsWith("cmd=set ")) {
+    return;
+  }
+  if (command.indexOf("play_mode=") >= 0) {
+    playDirtyMask &= ~PLAY_DIRTY_MODE;
+  }
+  if (command.indexOf("boot_mode=") >= 0) {
+    playDirtyMask &= ~PLAY_DIRTY_BOOT;
+  }
+  if (command.indexOf("autoplay_interval=") >= 0) {
+    playDirtyMask &= ~PLAY_DIRTY_INTERVAL;
+    configDirtyMask &= ~CONFIG_DIRTY_INTERVAL;
+  } else if (command.indexOf("autoplay=") >= 0) {
+    playDirtyMask &= ~PLAY_DIRTY_AUTOPLAY;
+    configDirtyMask &= ~CONFIG_DIRTY_AUTOPLAY;
+  }
+  if (command.indexOf("brightness=") >= 0) {
+    brightnessDirty = false;
+  }
+  if (command.indexOf("strip_length=") >= 0) {
+    configDirtyMask &= ~CONFIG_DIRTY_STRIP;
+  }
+  if (command.indexOf("smoothing=") >= 0) {
+    configDirtyMask &= ~CONFIG_DIRTY_SMOOTH;
+  }
+  if (command.indexOf("accel_range=") >= 0) {
+    configDirtyMask &= ~CONFIG_DIRTY_ACCEL;
+  }
+  if (command.indexOf("gyro_range=") >= 0) {
+    configDirtyMask &= ~CONFIG_DIRTY_GYRO;
+  }
+  if (command.indexOf("pattern=") >= 0 && command.indexOf("enabled_mask=") < 0 &&
+      command.indexOf("inverted_mask=") < 0) {
+    patternDirty = false;
+  }
+  if (command.indexOf("sync_enabled=") >= 0) {
+    syncDirtyMask &= ~SYNC_DIRTY_ENABLED;
+  }
+  if (command.indexOf("sync_group=") >= 0) {
+    syncDirtyMask &= ~SYNC_DIRTY_GROUP;
+  }
+  if (command.indexOf("sync_role=") >= 0) {
+    syncDirtyMask &= ~SYNC_DIRTY_ROLE;
+  }
+  if (command.indexOf("sync_loss_behavior=") >= 0) {
+    syncDirtyMask &= ~SYNC_DIRTY_LOSS;
+  }
+  if (command.indexOf("wireless_enabled=") >= 0) {
+    wirelessDirtyMask &= ~WIRELESS_DIRTY_ENABLED;
+  }
+  if (command.indexOf("wireless_profile=") >= 0) {
+    wirelessDirtyMask &= ~WIRELESS_DIRTY_PROFILE;
+  }
+  enqueueNk4RefreshForSet(command);
+  app.dirty = true;
+}
+
 void markTransferCompleteSoundPending()
 {
   transferCompleteSoundPending = true;
@@ -1147,6 +1271,120 @@ int wrapRange(int value, int minValue, int maxValue, int step, int delta)
 String showInt(int value)
 {
   return value >= 0 ? String(value) : "--";
+}
+
+uint8_t configFieldMask(int field)
+{
+  switch (field) {
+    case 0:
+      return CONFIG_DIRTY_STRIP;
+    case 1:
+      return CONFIG_DIRTY_SMOOTH;
+    case 2:
+      return CONFIG_DIRTY_ACCEL;
+    case 3:
+      return CONFIG_DIRTY_GYRO;
+    case 4:
+      return CONFIG_DIRTY_AUTOPLAY;
+    case 5:
+      return CONFIG_DIRTY_INTERVAL;
+    default:
+      return 0;
+  }
+}
+
+bool currentCardHasDirtyDraft()
+{
+  switch (static_cast<Card>(app.selectedCard)) {
+    case Card::Brightness:
+      return brightnessDirty;
+    case Card::ActivePattern:
+      return patternDirty;
+    case Card::Config:
+      return configDirtyMask != 0;
+    case Card::Play:
+      return playDirtyMask != 0;
+    case Card::Sync:
+      return syncDirtyMask != 0;
+    case Card::Wireless:
+      return wirelessDirtyMask != 0;
+    default:
+      return false;
+  }
+}
+
+int dirtyDraftCount()
+{
+  int count = 0;
+  count += brightnessDirty ? 1 : 0;
+  count += patternDirty ? 1 : 0;
+  count += configDirtyMask != 0 ? 1 : 0;
+  count += playDirtyMask != 0 ? 1 : 0;
+  count += syncDirtyMask != 0 ? 1 : 0;
+  count += wirelessDirtyMask != 0 ? 1 : 0;
+  count += app.patternEditsPending ? 1 : 0;
+  return count;
+}
+
+bool autoRefreshPaused()
+{
+  if (dirtyDraftCount() > 0 || nk4Pending || !commandQueue.empty()) {
+    return true;
+  }
+  return millis() - lastUserInputMs < AUTO_REFRESH_IDLE_MS;
+}
+
+void discardDraftForCard(Card card)
+{
+  switch (card) {
+    case Card::Brightness:
+      brightnessDirty = false;
+      draftBrightness = app.settings.brightness;
+      editValue = showInt(app.settings.brightness);
+      break;
+    case Card::ActivePattern:
+      patternDirty = false;
+      draftActivePattern = app.settings.activePattern;
+      editValue = showInt(app.settings.activePattern);
+      break;
+    case Card::Config:
+      configDirtyMask = 0;
+      draftStripLength = app.settings.stripLength;
+      draftSmoothing = app.settings.smoothing;
+      draftAccelRange = app.settings.accelRange;
+      draftGyroRange = app.settings.gyroRange;
+      draftAutoplayEnabled = app.settings.autoplayEnabled;
+      draftAutoplayIntervalSeconds = app.settings.autoplayIntervalSeconds;
+      break;
+    case Card::Play:
+      playDirtyMask = 0;
+      draftPlayMode = app.play.playMode;
+      draftBootMode = app.play.bootMode;
+      draftPlayAutoplayEnabled = app.settings.autoplayEnabled;
+      draftPlayAutoplayIntervalSeconds = app.settings.autoplayIntervalSeconds;
+      break;
+    case Card::Sync:
+      syncDirtyMask = 0;
+      draftSyncEnabled = app.sync.enabled;
+      draftSyncGroup = app.sync.group;
+      draftSyncRole = app.sync.role;
+      draftSyncLossBehavior = app.sync.lossBehavior;
+      break;
+    case Card::Wireless:
+      wirelessDirtyMask = 0;
+      draftWirelessEnabled = app.wireless.enabled;
+      draftWirelessProfile = app.wireless.profile;
+      break;
+    default:
+      break;
+  }
+  app.dirty = true;
+}
+
+void discardCurrentDraft()
+{
+  discardDraftForCard(static_cast<Card>(app.selectedCard));
+  setStatus("Edit cancelled", COLOR_WARN);
 }
 
 String shortText(String text, int chars)
@@ -1319,20 +1557,28 @@ String optionWithDelta(const char* const* options, int count, const String& valu
 
 void drawPlayCard()
 {
-  drawTextFit("Play", 8, CONTENT_Y + 5, 70, COLOR_MUTED);
+  drawTextFit(String("Play") + (playDirtyMask ? "*" : ""), 8, CONTENT_Y + 5, 70, playDirtyMask ? COLOR_WARN : COLOR_MUTED);
   String labels[] = {"Mode", "Boot", "Auto", "Interval"};
-  String values[] = {app.play.playMode, app.play.bootMode, app.settings.autoplayEnabled ? "ON" : "OFF",
-                     showInt(app.settings.autoplayIntervalSeconds) + "s"};
+  String values[] = {
+      (playDirtyMask & PLAY_DIRTY_MODE) ? draftPlayMode : app.play.playMode,
+      (playDirtyMask & PLAY_DIRTY_BOOT) ? draftBootMode : app.play.bootMode,
+      ((playDirtyMask & PLAY_DIRTY_AUTOPLAY) ? draftPlayAutoplayEnabled : app.settings.autoplayEnabled) ? "ON" : "OFF",
+      showInt((playDirtyMask & PLAY_DIRTY_INTERVAL) ? draftPlayAutoplayIntervalSeconds
+                                                     : app.settings.autoplayIntervalSeconds) +
+          "s",
+  };
   for (int i = 0; i < 4; ++i) {
     int x = 8 + (i % 2) * 116;
     int y = CONTENT_Y + 24 + (i / 2) * 34;
     bool active = i == app.selectedPlayField;
     uint16_t bg = active ? COLOR_ACCENT_DARK : COLOR_PANEL_DARK;
     uiCanvas.fillRoundRect(x, y, 108, 28, 3, bg);
-    drawTextFit(labels[i], x + 5, y + 6, 48, COLOR_MUTED, bg);
+    bool dirtyField = (playDirtyMask & (1 << i)) != 0;
+    drawTextFit(String(labels[i]) + (dirtyField ? "*" : ""), x + 5, y + 6, 48, dirtyField ? COLOR_WARN : COLOR_MUTED, bg);
     drawTextFit(values[i], x + 48, y + 6, 55, active ? COLOR_TEXT : COLOR_ACCENT, bg);
   }
-  drawFooter(app.protocolMode == ProtocolMode::Nk4 ? "C field  W/S edit  ENTER set" : "NK4 required");
+  drawFooter(app.protocolMode == ProtocolMode::Nk4 ? (playDirtyMask ? "PEND  ENTER set  DEL cancel" : "C field  W/S edit")
+                                                   : "NK4 required");
 }
 
 const char* const SYNC_ROLES[] = {"standalone", "master", "follower"};
@@ -1342,21 +1588,31 @@ constexpr int SYNC_LOSS_COUNT = sizeof(SYNC_LOSS) / sizeof(SYNC_LOSS[0]);
 
 void drawSyncCard()
 {
-  drawTextFit("Sync", 8, CONTENT_Y + 5, 80, COLOR_MUTED);
+  drawTextFit(String("Sync") + (syncDirtyMask ? "*" : ""), 8, CONTENT_Y + 5, 80, syncDirtyMask ? COLOR_WARN : COLOR_MUTED);
   String labels[] = {"Enable", "Group", "Role", "State", "Lock", "Loss"};
-  String values[] = {app.sync.enabled ? "ON" : "OFF", showInt(app.sync.group), app.sync.role, app.sync.state,
+  String values[] = {((syncDirtyMask & SYNC_DIRTY_ENABLED) ? draftSyncEnabled : app.sync.enabled) ? "ON" : "OFF",
+                     showInt((syncDirtyMask & SYNC_DIRTY_GROUP) ? draftSyncGroup : app.sync.group),
+                     (syncDirtyMask & SYNC_DIRTY_ROLE) ? draftSyncRole : app.sync.role, app.sync.state,
                      app.sync.locked ? "YES" : "NO", app.sync.lossBehavior};
+  if (syncDirtyMask & SYNC_DIRTY_LOSS) {
+    values[5] = draftSyncLossBehavior;
+  }
   for (int i = 0; i < 6; ++i) {
     int x = 8 + (i % 3) * 76;
     int y = CONTENT_Y + 22 + (i / 3) * 34;
     bool editable = i == 0 || i == 1 || i == 2 || i == 5;
     bool active = editable && i == app.selectedSyncField;
+    bool dirtyField = (i == 0 && (syncDirtyMask & SYNC_DIRTY_ENABLED)) ||
+                      (i == 1 && (syncDirtyMask & SYNC_DIRTY_GROUP)) ||
+                      (i == 2 && (syncDirtyMask & SYNC_DIRTY_ROLE)) ||
+                      (i == 5 && (syncDirtyMask & SYNC_DIRTY_LOSS));
     uint16_t bg = active ? COLOR_ACCENT_DARK : COLOR_PANEL_DARK;
     uiCanvas.fillRoundRect(x, y, 70, 28, 3, bg);
-    drawTextFit(labels[i], x + 5, y + 6, 60, COLOR_MUTED, bg);
+    drawTextFit(String(labels[i]) + (dirtyField ? "*" : ""), x + 5, y + 6, 60, dirtyField ? COLOR_WARN : COLOR_MUTED, bg);
     drawTextFit(values[i], x + 5, y + 18, 60, active ? COLOR_TEXT : COLOR_ACCENT, bg);
   }
-  drawFooter(app.protocolMode == ProtocolMode::Nk4 ? "C field  W/S edit  ENTER set" : "NK4 required");
+  drawFooter(app.protocolMode == ProtocolMode::Nk4 ? (syncDirtyMask ? "PEND  ENTER set  DEL cancel" : "C field  W/S edit")
+                                                   : "NK4 required");
 }
 
 const char* const WIRELESS_PROFILES[] = {"long_range", "balanced", "fast_sync"};
@@ -1364,23 +1620,29 @@ constexpr int WIRELESS_PROFILE_COUNT = sizeof(WIRELESS_PROFILES) / sizeof(WIRELE
 
 void drawWirelessCard()
 {
-  drawTextFit("Wireless", 8, CONTENT_Y + 5, 90, COLOR_MUTED);
+  drawTextFit(String("Wireless") + (wirelessDirtyMask ? "*" : ""), 8, CONTENT_Y + 5, 90,
+              wirelessDirtyMask ? COLOR_WARN : COLOR_MUTED);
   String labels[] = {"Enable", "Profile", "Radio", "TX", "RX", "CRC"};
-  String values[] = {app.wireless.enabled ? "ON" : "OFF", app.wireless.profile, app.sync.radioMode,
+  String values[] = {((wirelessDirtyMask & WIRELESS_DIRTY_ENABLED) ? draftWirelessEnabled : app.wireless.enabled) ? "ON" : "OFF",
+                     (wirelessDirtyMask & WIRELESS_DIRTY_PROFILE) ? draftWirelessProfile : app.wireless.profile, app.sync.radioMode,
                      String(app.sync.beaconTxCount), String(app.sync.beaconRxCount), String(app.sync.beaconCrcErrors)};
   for (int i = 0; i < 6; ++i) {
     int x = 8 + (i % 3) * 76;
     int y = CONTENT_Y + 20 + (i / 3) * 30;
     bool editable = i == 0 || i == 1;
     bool active = editable && i == app.selectedWirelessField;
+    bool dirtyField = (i == 0 && (wirelessDirtyMask & WIRELESS_DIRTY_ENABLED)) ||
+                      (i == 1 && (wirelessDirtyMask & WIRELESS_DIRTY_PROFILE));
     uint16_t bg = active ? COLOR_ACCENT_DARK : COLOR_PANEL_DARK;
     uiCanvas.fillRoundRect(x, y, 70, 24, 3, bg);
-    drawTextFit(labels[i], x + 5, y + 5, 60, COLOR_MUTED, bg);
+    drawTextFit(String(labels[i]) + (dirtyField ? "*" : ""), x + 5, y + 5, 60, dirtyField ? COLOR_WARN : COLOR_MUTED, bg);
     drawTextFit(values[i], x + 5, y + 16, 60, active ? COLOR_TEXT : COLOR_ACCENT, bg);
   }
   drawTextFit(String("BLE ") + (app.wireless.bleSupported ? "yes" : "--") + " " + shortText(app.wireless.bleName, 12), 10,
               CONTENT_Y + 82, 218, COLOR_TEXT);
-  drawFooter(app.protocolMode == ProtocolMode::Nk4 ? "C field  W/S edit  ENTER set" : "NK4 required");
+  drawFooter(app.protocolMode == ProtocolMode::Nk4
+                 ? (wirelessDirtyMask ? "PEND  ENTER set  DEL cancel" : "C field  W/S edit")
+                 : "NK4 required");
 }
 
 void drawValueCard(const String& title, const String& value, const String& sub, const String& help)
@@ -1395,8 +1657,8 @@ void drawValueCard(const String& title, const String& value, const String& sub, 
 
 void drawBrightnessCard()
 {
-  int value = editValue.length() ? editValue.toInt() : app.settings.brightness;
-  drawTitle("Brightness");
+  int value = brightnessDirty ? draftBrightness : app.settings.brightness;
+  drawTitle(String("Brightness") + (brightnessDirty ? "*" : ""));
   auto& d = uiCanvas;
   d.setFont(&fonts::Font4);
   d.setTextSize(1);
@@ -1407,23 +1669,23 @@ void drawBrightnessCard()
   d.drawString("/255", 92, CONTENT_Y + 38);
   d.setFont(&fonts::Font0);
   drawBar(10, CONTENT_Y + 75, 150, 9, value, 0, 255, COLOR_ACCENT);
-  drawFooter("W/S change + send");
+  drawFooter(brightnessDirty ? "PEND  ENTER set  DEL cancel" : "W/S edit  ENTER set");
 }
 
 void drawPatternCard()
 {
-  int value = editValue.length() ? editValue.toInt() : app.settings.activePattern;
+  int value = patternDirty ? draftActivePattern : app.settings.activePattern;
   ensurePatternModel();
   bool cycle = value >= 1 && value <= PATTERN_COUNT ? app.settings.patterns[value - 1].cycleEnabled : false;
   bool inverted = value >= 1 && value <= PATTERN_COUNT ? app.settings.patterns[value - 1].inverted : false;
-  drawTitle("Pattern");
+  drawTitle(String("Pattern") + (patternDirty ? "*" : ""));
   char num[8];
   snprintf(num, sizeof(num), "%02d", value > 0 ? value : 0);
   drawBigValue(value > 0 ? String(num) : "--", CONTENT_Y + 27);
   drawTextFit(patternName(value), 10, CONTENT_Y + 69, 145, COLOR_TEXT);
   drawTextFit(String("Cycle ") + (cycle ? "ON" : "OFF"), 158, CONTENT_Y + 57, 72, cycle ? COLOR_OK : COLOR_MUTED);
   drawTextFit(String("Inv ") + (inverted ? "ON" : "OFF"), 158, CONTENT_Y + 72, 72, inverted ? COLOR_WARN : COLOR_MUTED);
-  drawFooter("W/S send  C cycle  I invert");
+  drawFooter(patternDirty ? "PEND  ENTER set  DEL cancel" : "W/S edit  C cycle  I invert");
 }
 
 void drawConfigCard()
@@ -1437,18 +1699,21 @@ void drawConfigCard()
       draftAutoplayEnabled ? "ON" : "OFF",
       showInt(draftAutoplayIntervalSeconds) + " s",
   };
-  drawTextFit("Config", 8, CONTENT_Y + 6, 120, COLOR_MUTED);
+  drawTextFit(String("Config") + (configDirtyMask ? "*" : ""), 8, CONTENT_Y + 6, 120,
+              configDirtyMask ? COLOR_WARN : COLOR_MUTED);
   for (int i = 0; i < 6; ++i) {
     int x = 8 + (i % 3) * 76;
     int y = CONTENT_Y + 25 + (i / 3) * 34;
     int w = 70;
     bool active = i == app.selectedConfigField;
+    bool dirtyField = (configDirtyMask & configFieldMask(i)) != 0;
     uint16_t bg = active ? COLOR_ACCENT_DARK : COLOR_PANEL_DARK;
     uiCanvas.fillRoundRect(x, y, w, 28, 3, bg);
-    drawTextFit(labels[i], x + 5, y + 6, w - 10, COLOR_MUTED, bg);
+    drawTextFit(String(labels[i]) + (dirtyField ? "*" : ""), x + 5, y + 6, w - 10,
+                dirtyField ? COLOR_WARN : COLOR_MUTED, bg);
     drawTextFit(values[i], x + 5, y + 18, w - 10, active ? COLOR_TEXT : COLOR_ACCENT, bg);
   }
-  drawFooter("C field  W/S edit  ENTER set");
+  drawFooter(configDirtyMask ? "PEND  ENTER set  DEL cancel" : "C field  W/S edit");
 }
 
 const char* const CAL_ACTIONS[] = {"Refresh FPS", "Quick calib", "Precise calib", "Boot quick/off"};
@@ -2686,6 +2951,7 @@ void applyNk4Fields(const String& parsed)
   if (app.wireless.profile != "unknown" || app.wireless.bleName.length() > 0) {
     app.wireless.supported = true;
   }
+  syncEditFromCard();
 }
 
 bool parseNk4Line(const String& parsed)
@@ -2709,11 +2975,16 @@ bool parseNk4Line(const String& parsed)
   bool isOk = parsed.indexOf(" ok") >= 0;
   bool isErr = parsed.indexOf(" err") >= 0;
 
+  String matchedCommand;
   if (nk4Pending && seq >= 0 && seq == pendingNk4.seq) {
+    matchedCommand = pendingNk4.command;
     nk4Pending = false;
   }
 
   if (isOk || isEvent) {
+    if (matchedCommand.length() > 0) {
+      handleNk4CommandOk(matchedCommand);
+    }
     applyNk4Fields(parsed);
     if (app.protocolMode == ProtocolMode::Probing) {
       app.protocolMode = ProtocolMode::Nk4;
@@ -2813,6 +3084,7 @@ void parseNightKiteLine(const String& line)
     lastRxMs = millis();
     parseControllerBattery(parsed);
   }
+  syncEditFromCard();
   app.dirty = true;
 }
 
@@ -2856,6 +3128,13 @@ void resetControllerSession()
   app.sync = SyncState{};
   app.wireless = WirelessState{};
   app.diagnostics = DiagnosticsState{};
+  brightnessDirty = false;
+  patternDirty = false;
+  configDirtyMask = 0;
+  playDirtyMask = 0;
+  syncDirtyMask = 0;
+  wirelessDirtyMask = 0;
+  app.patternEditsPending = false;
   commandQueue.clear();
   nk4Pending = false;
   nk4MachineSent = false;
@@ -2947,10 +3226,14 @@ void pollTransport()
     requestControllerBattery();
   }
 
-  if (millis() - lastPollMs > 5000) {
+  if (millis() - lastPollMs > AUTO_STATUS_POLL_MS) {
     lastPollMs = millis();
-    if (app.usbConnected && app.protocolMode != ProtocolMode::Probing) {
-      sendCommand(NightKiteCommands::refreshAll());
+    if (app.usbConnected && app.protocolMode != ProtocolMode::Probing && !autoRefreshPaused()) {
+      if (app.protocolMode == ProtocolMode::Nk4) {
+        enqueueCommandEntry("cmd=status", true);
+      } else {
+        sendCommand(NightKiteCommands::refreshAll(), false);
+      }
     }
   }
 }
@@ -2959,19 +3242,76 @@ void syncEditFromCard()
 {
   switch (static_cast<Card>(app.selectedCard)) {
     case Card::Brightness:
-      editValue = showInt(app.settings.brightness);
+      if (!brightnessDirty) {
+        draftBrightness = app.settings.brightness;
+        editValue = showInt(app.settings.brightness);
+      }
+      break;
+    case Card::Play:
+      if ((playDirtyMask & PLAY_DIRTY_MODE) == 0) {
+        draftPlayMode = app.play.playMode;
+      }
+      if ((playDirtyMask & PLAY_DIRTY_BOOT) == 0) {
+        draftBootMode = app.play.bootMode;
+      }
+      if ((playDirtyMask & PLAY_DIRTY_AUTOPLAY) == 0) {
+        draftPlayAutoplayEnabled = app.settings.autoplayEnabled;
+      }
+      if ((playDirtyMask & PLAY_DIRTY_INTERVAL) == 0) {
+        draftPlayAutoplayIntervalSeconds = app.settings.autoplayIntervalSeconds;
+      }
+      editValue = "";
+      break;
+    case Card::Sync:
+      if ((syncDirtyMask & SYNC_DIRTY_ENABLED) == 0) {
+        draftSyncEnabled = app.sync.enabled;
+      }
+      if ((syncDirtyMask & SYNC_DIRTY_GROUP) == 0) {
+        draftSyncGroup = app.sync.group;
+      }
+      if ((syncDirtyMask & SYNC_DIRTY_ROLE) == 0) {
+        draftSyncRole = app.sync.role;
+      }
+      if ((syncDirtyMask & SYNC_DIRTY_LOSS) == 0) {
+        draftSyncLossBehavior = app.sync.lossBehavior;
+      }
+      editValue = "";
+      break;
+    case Card::Wireless:
+      if ((wirelessDirtyMask & WIRELESS_DIRTY_ENABLED) == 0) {
+        draftWirelessEnabled = app.wireless.enabled;
+      }
+      if ((wirelessDirtyMask & WIRELESS_DIRTY_PROFILE) == 0) {
+        draftWirelessProfile = app.wireless.profile;
+      }
+      editValue = "";
       break;
     case Card::Config:
       editValue = "";
-      draftStripLength = app.settings.stripLength;
-      draftSmoothing = app.settings.smoothing;
-      draftAccelRange = app.settings.accelRange;
-      draftGyroRange = app.settings.gyroRange;
-      draftAutoplayEnabled = app.settings.autoplayEnabled;
-      draftAutoplayIntervalSeconds = app.settings.autoplayIntervalSeconds;
+      if ((configDirtyMask & CONFIG_DIRTY_STRIP) == 0) {
+        draftStripLength = app.settings.stripLength;
+      }
+      if ((configDirtyMask & CONFIG_DIRTY_SMOOTH) == 0) {
+        draftSmoothing = app.settings.smoothing;
+      }
+      if ((configDirtyMask & CONFIG_DIRTY_ACCEL) == 0) {
+        draftAccelRange = app.settings.accelRange;
+      }
+      if ((configDirtyMask & CONFIG_DIRTY_GYRO) == 0) {
+        draftGyroRange = app.settings.gyroRange;
+      }
+      if ((configDirtyMask & CONFIG_DIRTY_AUTOPLAY) == 0) {
+        draftAutoplayEnabled = app.settings.autoplayEnabled;
+      }
+      if ((configDirtyMask & CONFIG_DIRTY_INTERVAL) == 0) {
+        draftAutoplayIntervalSeconds = app.settings.autoplayIntervalSeconds;
+      }
       break;
     case Card::ActivePattern:
-      editValue = showInt(app.settings.activePattern);
+      if (!patternDirty) {
+        draftActivePattern = app.settings.activePattern;
+        editValue = showInt(app.settings.activePattern);
+      }
       break;
     case Card::Calibration:
       editValue = "";
@@ -3092,63 +3432,133 @@ void changeValue(int delta)
       if (app.protocolMode != ProtocolMode::Nk4) {
         setStatus("NK4 required", COLOR_WARN);
       } else if (app.selectedPlayField == 0) {
-        app.play.playMode = optionWithDelta(PLAY_MODES, PLAY_MODE_COUNT, app.play.playMode, delta);
+        if ((playDirtyMask & PLAY_DIRTY_MODE) == 0) {
+          draftPlayMode = app.play.playMode;
+        }
+        draftPlayMode = optionWithDelta(PLAY_MODES, PLAY_MODE_COUNT, draftPlayMode, delta);
+        playDirtyMask |= PLAY_DIRTY_MODE;
       } else if (app.selectedPlayField == 1) {
-        app.play.bootMode = optionWithDelta(BOOT_MODES, BOOT_MODE_COUNT, app.play.bootMode, delta);
+        if ((playDirtyMask & PLAY_DIRTY_BOOT) == 0) {
+          draftBootMode = app.play.bootMode;
+        }
+        draftBootMode = optionWithDelta(BOOT_MODES, BOOT_MODE_COUNT, draftBootMode, delta);
+        playDirtyMask |= PLAY_DIRTY_BOOT;
       } else if (app.selectedPlayField == 2) {
-        app.settings.autoplayEnabled = !app.settings.autoplayEnabled;
+        if ((playDirtyMask & PLAY_DIRTY_AUTOPLAY) == 0) {
+          draftPlayAutoplayEnabled = app.settings.autoplayEnabled;
+        }
+        draftPlayAutoplayEnabled = !draftPlayAutoplayEnabled;
+        playDirtyMask |= PLAY_DIRTY_AUTOPLAY;
       } else {
-        app.settings.autoplayIntervalSeconds =
-            wrappedValue(autoplayIntervalLevels, AUTOPLAY_INTERVAL_LEVEL_COUNT, app.settings.autoplayIntervalSeconds, delta);
+        if ((playDirtyMask & PLAY_DIRTY_INTERVAL) == 0) {
+          draftPlayAutoplayIntervalSeconds = app.settings.autoplayIntervalSeconds;
+        }
+        draftPlayAutoplayIntervalSeconds =
+            wrappedValue(autoplayIntervalLevels, AUTOPLAY_INTERVAL_LEVEL_COUNT, draftPlayAutoplayIntervalSeconds, delta);
+        playDirtyMask |= PLAY_DIRTY_INTERVAL;
       }
       break;
     case Card::Sync:
       if (app.protocolMode != ProtocolMode::Nk4) {
         setStatus("NK4 required", COLOR_WARN);
       } else if (app.selectedSyncField == 0) {
-        app.sync.enabled = !app.sync.enabled;
+        if ((syncDirtyMask & SYNC_DIRTY_ENABLED) == 0) {
+          draftSyncEnabled = app.sync.enabled;
+        }
+        draftSyncEnabled = !draftSyncEnabled;
+        syncDirtyMask |= SYNC_DIRTY_ENABLED;
       } else if (app.selectedSyncField == 1) {
-        app.sync.group = wrapRange(app.sync.group < 0 ? 1 : app.sync.group, 1, 255, 1, delta);
+        if ((syncDirtyMask & SYNC_DIRTY_GROUP) == 0) {
+          draftSyncGroup = app.sync.group;
+        }
+        draftSyncGroup = wrapRange(draftSyncGroup < 0 ? 1 : draftSyncGroup, 1, 255, 1, delta);
+        syncDirtyMask |= SYNC_DIRTY_GROUP;
       } else if (app.selectedSyncField == 2) {
-        app.sync.role = optionWithDelta(SYNC_ROLES, SYNC_ROLE_COUNT, app.sync.role, delta);
+        if ((syncDirtyMask & SYNC_DIRTY_ROLE) == 0) {
+          draftSyncRole = app.sync.role;
+        }
+        draftSyncRole = optionWithDelta(SYNC_ROLES, SYNC_ROLE_COUNT, draftSyncRole, delta);
+        syncDirtyMask |= SYNC_DIRTY_ROLE;
       } else if (app.selectedSyncField == 5) {
-        app.sync.lossBehavior = optionWithDelta(SYNC_LOSS, SYNC_LOSS_COUNT, app.sync.lossBehavior, delta);
+        if ((syncDirtyMask & SYNC_DIRTY_LOSS) == 0) {
+          draftSyncLossBehavior = app.sync.lossBehavior;
+        }
+        draftSyncLossBehavior = optionWithDelta(SYNC_LOSS, SYNC_LOSS_COUNT, draftSyncLossBehavior, delta);
+        syncDirtyMask |= SYNC_DIRTY_LOSS;
       }
       break;
     case Card::Wireless:
       if (app.protocolMode != ProtocolMode::Nk4) {
         setStatus("NK4 required", COLOR_WARN);
       } else if (app.selectedWirelessField == 0) {
-        app.wireless.enabled = !app.wireless.enabled;
+        if ((wirelessDirtyMask & WIRELESS_DIRTY_ENABLED) == 0) {
+          draftWirelessEnabled = app.wireless.enabled;
+        }
+        draftWirelessEnabled = !draftWirelessEnabled;
+        wirelessDirtyMask |= WIRELESS_DIRTY_ENABLED;
       } else {
-        app.wireless.profile = optionWithDelta(WIRELESS_PROFILES, WIRELESS_PROFILE_COUNT, app.wireless.profile, delta);
+        if ((wirelessDirtyMask & WIRELESS_DIRTY_PROFILE) == 0) {
+          draftWirelessProfile = app.wireless.profile;
+        }
+        draftWirelessProfile = optionWithDelta(WIRELESS_PROFILES, WIRELESS_PROFILE_COUNT, draftWirelessProfile, delta);
+        wirelessDirtyMask |= WIRELESS_DIRTY_PROFILE;
       }
       break;
     case Card::Brightness:
-      editValue = String(wrappedValue(brightnessLevels, BRIGHTNESS_LEVEL_COUNT, editValue.toInt(), delta));
-      app.settings.brightness = editValue.toInt();
-      sendCommand(NightKiteCommands::setBrightness(app.settings.brightness));
+      if (!brightnessDirty) {
+        draftBrightness = app.settings.brightness;
+      }
+      draftBrightness = wrappedValue(brightnessLevels, BRIGHTNESS_LEVEL_COUNT, draftBrightness, delta);
+      editValue = String(draftBrightness);
+      brightnessDirty = true;
       break;
     case Card::Config:
       if (app.selectedConfigField == 0) {
+        if ((configDirtyMask & CONFIG_DIRTY_STRIP) == 0) {
+          draftStripLength = app.settings.stripLength;
+        }
         draftStripLength = wrapRange(draftStripLength, 10, 35, 1, delta);
+        configDirtyMask |= CONFIG_DIRTY_STRIP;
       } else if (app.selectedConfigField == 1) {
+        if ((configDirtyMask & CONFIG_DIRTY_SMOOTH) == 0) {
+          draftSmoothing = app.settings.smoothing;
+        }
         draftSmoothing = wrappedValue(smoothingLevels, SMOOTHING_LEVEL_COUNT, draftSmoothing, delta);
+        configDirtyMask |= CONFIG_DIRTY_SMOOTH;
       } else if (app.selectedConfigField == 2) {
+        if ((configDirtyMask & CONFIG_DIRTY_ACCEL) == 0) {
+          draftAccelRange = app.settings.accelRange;
+        }
         draftAccelRange = wrappedValue(accelRangeLevels, ACCEL_RANGE_LEVEL_COUNT, draftAccelRange, delta);
+        configDirtyMask |= CONFIG_DIRTY_ACCEL;
       } else if (app.selectedConfigField == 3) {
+        if ((configDirtyMask & CONFIG_DIRTY_GYRO) == 0) {
+          draftGyroRange = app.settings.gyroRange;
+        }
         draftGyroRange = wrappedValue(gyroRangeLevels, GYRO_RANGE_LEVEL_COUNT, draftGyroRange, delta);
+        configDirtyMask |= CONFIG_DIRTY_GYRO;
       } else if (app.selectedConfigField == 4) {
+        if ((configDirtyMask & CONFIG_DIRTY_AUTOPLAY) == 0) {
+          draftAutoplayEnabled = app.settings.autoplayEnabled;
+        }
         draftAutoplayEnabled = !draftAutoplayEnabled;
+        configDirtyMask |= CONFIG_DIRTY_AUTOPLAY;
       } else {
+        if ((configDirtyMask & CONFIG_DIRTY_INTERVAL) == 0) {
+          draftAutoplayIntervalSeconds = app.settings.autoplayIntervalSeconds;
+        }
         draftAutoplayIntervalSeconds =
             wrappedValue(autoplayIntervalLevels, AUTOPLAY_INTERVAL_LEVEL_COUNT, draftAutoplayIntervalSeconds, delta);
+        configDirtyMask |= CONFIG_DIRTY_INTERVAL;
       }
       break;
     case Card::ActivePattern:
-      editValue = String(wrapRange(editValue.toInt(), 1, PATTERN_COUNT, 1, delta));
-      app.settings.activePattern = editValue.toInt();
-      sendCommand(NightKiteCommands::setPattern(app.settings.activePattern));
+      if (!patternDirty) {
+        draftActivePattern = app.settings.activePattern;
+      }
+      draftActivePattern = wrapRange(draftActivePattern, 1, PATTERN_COUNT, 1, delta);
+      editValue = String(draftActivePattern);
+      patternDirty = true;
       break;
     case Card::Calibration:
       app.selectedCalAction = constrain(app.selectedCalAction + delta, 0, CAL_ACTION_COUNT - 1);
@@ -3185,65 +3595,121 @@ void applyCurrentCard()
     case Card::Play:
       if (app.protocolMode != ProtocolMode::Nk4) {
         setStatus("NK4 required", COLOR_WARN);
-      } else if (app.selectedPlayField == 0) {
-        sendCommand("set play_mode=" + app.play.playMode);
-      } else if (app.selectedPlayField == 1) {
-        sendCommand("set boot_mode=" + app.play.bootMode);
-      } else if (app.selectedPlayField == 2) {
-        sendCommand(String("set autoplay=") + (app.settings.autoplayEnabled ? "1" : "0"));
+      } else if (playDirtyMask == 0) {
+        setStatus("No edit pending", COLOR_MUTED);
       } else {
-        sendCommand("set autoplay_interval=" + String(app.settings.autoplayIntervalSeconds));
+        if (playDirtyMask & PLAY_DIRTY_MODE) {
+          sendCommand("set play_mode=" + draftPlayMode);
+        }
+        if (playDirtyMask & PLAY_DIRTY_BOOT) {
+          sendCommand("set boot_mode=" + draftBootMode);
+        }
+        if (playDirtyMask & PLAY_DIRTY_AUTOPLAY) {
+          sendCommand(String("set autoplay=") + (draftPlayAutoplayEnabled ? "1" : "0"));
+        }
+        if (playDirtyMask & PLAY_DIRTY_INTERVAL) {
+          sendCommand("set autoplay_interval=" + String(draftPlayAutoplayIntervalSeconds));
+        }
       }
       break;
     case Card::Sync:
       if (app.protocolMode != ProtocolMode::Nk4) {
         setStatus("NK4 required", COLOR_WARN);
-      } else if (app.selectedSyncField == 0) {
-        sendCommand(String("set sync_enabled=") + (app.sync.enabled ? "1" : "0"));
-      } else if (app.selectedSyncField == 1) {
-        sendCommand("set sync_group=" + String(app.sync.group));
-      } else if (app.selectedSyncField == 2) {
-        sendCommand("set sync_role=" + app.sync.role);
-      } else if (app.selectedSyncField == 5) {
-        sendCommand("set sync_loss_behavior=" + app.sync.lossBehavior);
+      } else if (syncDirtyMask == 0) {
+        setStatus("No edit pending", COLOR_MUTED);
+      } else {
+        if (syncDirtyMask & SYNC_DIRTY_ENABLED) {
+          sendCommand(String("set sync_enabled=") + (draftSyncEnabled ? "1" : "0"));
+        }
+        if (syncDirtyMask & SYNC_DIRTY_GROUP) {
+          sendCommand("set sync_group=" + String(draftSyncGroup));
+        }
+        if (syncDirtyMask & SYNC_DIRTY_ROLE) {
+          sendCommand("set sync_role=" + draftSyncRole);
+        }
+        if (syncDirtyMask & SYNC_DIRTY_LOSS) {
+          sendCommand("set sync_loss_behavior=" + draftSyncLossBehavior);
+        }
       }
       break;
     case Card::Wireless:
       if (app.protocolMode != ProtocolMode::Nk4) {
         setStatus("NK4 required", COLOR_WARN);
-      } else if (app.selectedWirelessField == 0) {
-        sendCommand(String("set wireless_enabled=") + (app.wireless.enabled ? "1" : "0"));
+      } else if (wirelessDirtyMask == 0) {
+        setStatus("No edit pending", COLOR_MUTED);
       } else {
-        sendCommand("set wireless_profile=" + app.wireless.profile);
+        if (wirelessDirtyMask & WIRELESS_DIRTY_ENABLED) {
+          sendCommand(String("set wireless_enabled=") + (draftWirelessEnabled ? "1" : "0"));
+        }
+        if (wirelessDirtyMask & WIRELESS_DIRTY_PROFILE) {
+          sendCommand("set wireless_profile=" + draftWirelessProfile);
+        }
       }
       break;
     case Card::Brightness:
-      sendCommand(NightKiteCommands::setBrightness(editValue.toInt()));
+      if (!brightnessDirty) {
+        setStatus("No edit pending", COLOR_MUTED);
+      } else {
+        sendCommand(NightKiteCommands::setBrightness(draftBrightness));
+        if (app.protocolMode != ProtocolMode::Nk4) {
+          brightnessDirty = false;
+        }
+      }
       break;
     case Card::Config:
-      if (app.selectedConfigField == 0) {
-        app.settings.stripLength = draftStripLength;
-        sendCommand(NightKiteCommands::setStripLength(draftStripLength));
-      } else if (app.selectedConfigField == 1) {
-        app.settings.smoothing = draftSmoothing;
-        sendCommand(NightKiteCommands::setSmoothing(draftSmoothing));
-      } else if (app.selectedConfigField == 2) {
-        app.settings.accelRange = draftAccelRange;
-        sendCommand(NightKiteCommands::setAccelRange(draftAccelRange));
-      } else if (app.selectedConfigField == 3) {
-        app.settings.gyroRange = draftGyroRange;
-        sendCommand(NightKiteCommands::setGyroRange(draftGyroRange));
-      } else if (app.selectedConfigField == 4) {
-        app.settings.autoplayEnabled = draftAutoplayEnabled;
-        sendCommand(NightKiteCommands::setAutoplay(draftAutoplayEnabled));
-      } else {
-        app.settings.autoplayIntervalSeconds = draftAutoplayIntervalSeconds;
-        sendCommand(NightKiteCommands::setAutoplayInterval(draftAutoplayIntervalSeconds));
+      if (configDirtyMask == 0) {
+        setStatus("No edit pending", COLOR_MUTED);
+      }
+      {
+        uint8_t pendingConfigDirty = configDirtyMask;
+        if (pendingConfigDirty & CONFIG_DIRTY_STRIP) {
+          sendCommand(NightKiteCommands::setStripLength(draftStripLength));
+          if (app.protocolMode != ProtocolMode::Nk4) {
+            configDirtyMask &= ~CONFIG_DIRTY_STRIP;
+          }
+        }
+        if (pendingConfigDirty & CONFIG_DIRTY_SMOOTH) {
+          sendCommand(NightKiteCommands::setSmoothing(draftSmoothing));
+          if (app.protocolMode != ProtocolMode::Nk4) {
+            configDirtyMask &= ~CONFIG_DIRTY_SMOOTH;
+          }
+        }
+        if (pendingConfigDirty & CONFIG_DIRTY_ACCEL) {
+          sendCommand(NightKiteCommands::setAccelRange(draftAccelRange));
+          if (app.protocolMode != ProtocolMode::Nk4) {
+            configDirtyMask &= ~CONFIG_DIRTY_ACCEL;
+          }
+        }
+        if (pendingConfigDirty & CONFIG_DIRTY_GYRO) {
+          sendCommand(NightKiteCommands::setGyroRange(draftGyroRange));
+          if (app.protocolMode != ProtocolMode::Nk4) {
+            configDirtyMask &= ~CONFIG_DIRTY_GYRO;
+          }
+        }
+        if (pendingConfigDirty & CONFIG_DIRTY_AUTOPLAY) {
+          sendCommand(NightKiteCommands::setAutoplay(draftAutoplayEnabled));
+          if (app.protocolMode != ProtocolMode::Nk4) {
+            configDirtyMask &= ~CONFIG_DIRTY_AUTOPLAY;
+          }
+        }
+        if (pendingConfigDirty & CONFIG_DIRTY_INTERVAL) {
+          sendCommand(NightKiteCommands::setAutoplayInterval(draftAutoplayIntervalSeconds));
+          if (app.protocolMode != ProtocolMode::Nk4) {
+            configDirtyMask &= ~CONFIG_DIRTY_INTERVAL;
+          }
+        }
       }
       app.dirty = true;
       break;
     case Card::ActivePattern:
-      sendCommand(NightKiteCommands::setPattern(editValue.toInt()));
+      if (!patternDirty) {
+        setStatus("No edit pending", COLOR_MUTED);
+      } else {
+        sendCommand(NightKiteCommands::setPattern(draftActivePattern));
+        if (app.protocolMode != ProtocolMode::Nk4) {
+          patternDirty = false;
+        }
+      }
       break;
     case Card::Calibration:
       if (app.selectedCalAction == 0) {
@@ -3696,6 +4162,7 @@ void handleKeyboard()
     return;
   }
 
+  lastUserInputMs = millis();
   auto& status = M5Cardputer.Keyboard.keysState();
   playKeyboardSound(status);
 
@@ -3763,6 +4230,8 @@ void handleKeyboard()
         setStatus("Apply cancelled", COLOR_WARN);
       }
       mode = Mode::Cards;
+    } else if (currentCardHasDirtyDraft()) {
+      discardCurrentDraft();
     } else if (app.selectedCard != 0) {
       app.selectedCard = 0;
       syncEditFromCard();

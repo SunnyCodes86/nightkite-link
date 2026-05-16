@@ -205,7 +205,7 @@ The current keyboard handling processes these controls:
 | Key | Action |
 | --- | --- |
 | `A` / `D` | Previous / next card |
-| `W` / `S` | Change value or move selection |
+| `W` / `S` | Edit value or move selection |
 | `Enter` | Apply, open, confirm, or continue in flash workflow |
 | `Backspace` / `DEL` | Back or cancel where supported |
 | `Tab` | Next card |
@@ -219,6 +219,11 @@ The current keyboard handling processes these controls:
 
 During critical firmware copy states, normal card navigation is locked. Cancel
 is only accepted in safe flash states.
+
+Editable cards keep a local draft while a field is marked pending. Automatic
+controller refreshes continue updating the controller state, but they do not
+overwrite the active draft. Pending fields are marked with `*`; press `Enter` to
+apply them or `Backspace` / `DEL` to discard the local edit.
 
 ## UI Concept
 
@@ -250,6 +255,10 @@ On USB connect, Link first attempts Firmware 4.0/NK4:
 
 The NK4 parser handles `ok`, `err` and `event` lines, matches `seq`, tolerates
 unknown keys and uses timeouts so the UI does not freeze.
+
+In USB NK4 mode, automatic polling is intentionally light: Link polls `status`
+periodically after the UI has been idle, while full section reads are reserved
+for connect, manual refresh and successful apply follow-up reads.
 
 The parser handles:
 

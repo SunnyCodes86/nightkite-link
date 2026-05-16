@@ -212,7 +212,7 @@ Die aktuelle Tastaturbehandlung verarbeitet diese Eingaben:
 | Taste | Aktion |
 | --- | --- |
 | `A` / `D` | Vorherige / nächste Card |
-| `W` / `S` | Wert ändern oder Auswahl bewegen |
+| `W` / `S` | Wert editieren oder Auswahl bewegen |
 | `Enter` | Anwenden, öffnen, bestätigen oder im Flash-Workflow fortfahren |
 | `Backspace` / `DEL` | Zurück oder abbrechen, wo unterstützt |
 | `Tab` | Nächste Card |
@@ -226,6 +226,12 @@ Die aktuelle Tastaturbehandlung verarbeitet diese Eingaben:
 
 Während kritischer Firmware-Kopierzustände ist die normale Card-Navigation
 gesperrt. Abbrechen ist nur in sicheren Flash-Zuständen möglich.
+
+Editierbare Cards halten einen lokalen Draft, solange ein Feld pending ist.
+Automatische Controller-Refreshes aktualisieren weiter den Controller-State,
+überschreiben aber den aktiven Draft nicht. Pending-Felder sind mit `*`
+markiert; `Enter` wendet sie an, `Backspace` / `DEL` verwirft die lokale
+Änderung.
 
 ## UI-Konzept
 
@@ -259,6 +265,10 @@ Beim USB-Verbinden versucht Link zuerst Firmware 4.0/NK4:
 
 Der NK4-Parser verarbeitet `ok`-, `err`- und `event`-Zeilen, gleicht `seq` ab,
 toleriert unbekannte Keys und nutzt Timeouts, damit die UI nicht einfriert.
+
+Im USB-NK4-Modus ist automatisches Polling bewusst leichtgewichtig: Link pollt
+regelmäßig `status`, nachdem die UI kurz idle war. Vollständige Section-Reads
+laufen nur nach Connect, manuellem Refresh und erfolgreichen Apply-Follow-ups.
 
 Der Parser verarbeitet:
 
