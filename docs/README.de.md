@@ -154,20 +154,32 @@ Profile werden als JSON geschrieben, aber ohne ArduinoJson verarbeitet. Das
 Laden ist bewusst einfach gehalten und liest die Schlüssel, die der aktuelle
 Code nutzt.
 
-Aktuell gespeicherte Struktur:
+Aktuell gespeicherte Struktur. `profile_version: 2` ergänzt optionale
+Firmware-4.0-Felder. Ältere Profile bleiben lesbar; fehlende Schlüssel behalten
+den aktuellen Wert bzw. den Default.
 
 ```json
 {
-  "profile_version": 1,
+  "profile_version": 2,
   "project": "NightKite Link",
   "target": "NightKite Multi",
   "settings": {
+    "device_name": "NK-Test",
     "brightness": 159,
     "strip_length": 50,
     "active_pattern": 7,
     "smoothing": 45,
     "accel_range": 4,
     "gyro_range": 500,
+    "play_mode": "manual",
+    "boot_mode": "last",
+    "sync_enabled": false,
+    "sync_group": 1,
+    "sync_role": "standalone",
+    "sync_master_uid": "",
+    "sync_loss_behavior": "continue_local",
+    "wireless_enabled": false,
+    "wireless_profile": "balanced",
     "enabled_pattern_mask": 4194303,
     "inverted_pattern_mask": 0,
     "autoplay": {
@@ -186,9 +198,12 @@ Aktuell gespeicherte Struktur:
 }
 ```
 
-Beim Anwenden eines geladenen Profils sendet NightKite Link die einzelnen
-Settings, aktiviert/deaktiviert Patterns anhand der Masken, setzt alle Patterns
-zuerst auf normal und setzt danach die invertierte Pattern-Liste erneut.
+Beim Anwenden eines geladenen Profils auf einen Firmware-4.0/NK4-Controller
+bevorzugt NightKite Link kompakte NK4-`set`-Befehle, inklusive `enabled_mask`
+und `inverted_mask`. Im Legacy-Modus bleibt der Firmware-3.x-Ablauf erhalten:
+einzelne Settings senden, Patterns per Listen aktivieren/deaktivieren, alle
+Patterns zuerst auf normal setzen und danach die invertierte Pattern-Liste erneut
+setzen.
 
 ## Bedienung
 
@@ -202,7 +217,7 @@ Die aktuelle Tastaturbehandlung verarbeitet diese Eingaben:
 | `Backspace` / `DEL` | Zurück oder abbrechen, wo unterstützt |
 | `Tab` | Nächste Card |
 | `R` | Aktuelle Card bzw. Controllerdaten neu lesen, wo implementiert |
-| `C` | Config-Feld wählen, Firmware-Ziel umschalten oder Pattern-Cycle toggeln |
+| `C` | Editierbares Feld wählen, Firmware-Ziel umschalten oder Pattern-Cycle toggeln |
 | `I` | Pattern-Invert toggeln oder ausgewähltes Profil auf der Profiles-Card löschen |
 | `,` / `<` | Vorherige Card |
 | `/` / `?` | Nächste Card |
@@ -216,13 +231,15 @@ gesperrt. Abbrechen ist nur in sicheren Flash-Zuständen möglich.
 
 NightKite Link nutzt ein Card-based Interface statt eines großen klassischen
 Menüs, weil das Display nur 240 x 135 px groß ist. Jede Card steht für eine
-Hauptaufgabe: Status, Brightness, Config, Calibration, Active Pattern,
-Pattern-Liste, Bulk-Aktionen, Firmware oder Profiles.
+Hauptaufgabe: Status/Device, Play Mode, Sync, Wireless-Diagnose, Brightness,
+Config, Calibration, Active Pattern, Pattern-Liste, Bulk-Aktionen, Firmware oder
+Profiles.
 
-Die Statusleiste oben zeigt USB-Status, Controller-Status, Command-Queue,
-Seitennummer und Cardputer-Akku. Der Firmware-Flasher verwendet eigene
-Workflow-Screens für Bestätigung, BOOTSEL-Anweisung, Warten, Fortschritt,
-Reboot und Fehler.
+Die Statusleiste oben zeigt kompakt Transport/Protokoll (`USB LEG` oder
+`USB NK4`), Controller-Name oder Short-ID, Play-/Rollen-Token, Controller-Akku
+falls verfügbar und Cardputer-Akku. Der Firmware-Flasher verwendet eigene
+Workflow-Screens für Bestätigung, BOOTSEL-Anweisung, Warten, Fortschritt, Reboot
+und Fehler.
 
 ## Controller-Kommunikation
 
@@ -230,12 +247,28 @@ NightKite Link nutzt `USBHostSerial` im USB-Host-Modus, wenn
 `NIGHTKITE_USB_HOST=1` aktiviert ist. Für Builds ohne USB-Host existiert ein
 Debug-Serial-Transport.
 
+Beim USB-Verbinden versucht Link zuerst Firmware 4.0/NK4:
+
+1. `protocol machine` senden.
+2. `NK4 seq=<id> cmd=hello client=nightkite-link proto_min=4 proto_max=4` senden.
+3. Bei einer gültigen NK4-Antwort auf USB NK4 wechseln und `info`, `caps`,
+   `status`, `get section=config`, `get section=play`, `get section=sync`,
+   `get section=wireless` und `get section=patterns` abfragen.
+4. Wenn NK4 in ein Timeout läuft, sauber auf die bestehende USB-Legacy-CLI
+   zurückfallen.
+
+Der NK4-Parser verarbeitet `ok`-, `err`- und `event`-Zeilen, gleicht `seq` ab,
+toleriert unbekannte Keys und nutzt Timeouts, damit die UI nicht einfriert.
+
 Der Parser verarbeitet:
 
 - `OK key=value ...`
 - `ERR ...`
 - `INFO ...`
 - `[NightKite CLI] ...`
+- `NK4 seq=<id> ok key=value ...`
+- `NK4 seq=<id> err code=<code> msg=<message>`
+- `NK4 event=<name> key=value ...`
 
 Der Code aktualisiert Controllerdaten aus Schlüsseln wie:
 
@@ -275,6 +308,18 @@ Vom Code aktuell gesendete Befehle:
 - `calibrate precise`
 - `set boot_calibration quick|off`
 - `save`
+
+Im NK4-Modus werden bestehende UI-Aktionen in NK4-Requests übersetzt, zum
+Beispiel `cmd=set brightness=...`, `cmd=set play_mode=manual|autoplay|sync`,
+`cmd=set sync_enabled=0|1`, `cmd=set sync_group=...`,
+`cmd=set sync_role=standalone|master|follower`,
+`cmd=set wireless_enabled=0|1`, `cmd=set wireless_profile=...`,
+`cmd=set enabled_mask=...` und `cmd=set inverted_mask=...`.
+
+Der BLE-NK4-Service aus Firmware 4.0 wird von dieser NightKite-Link-Version noch
+nicht verwendet. USB bleibt der stabile Pfad. Link ist Konfigurator und
+Diagnosegerät; es leitet keine Echtzeit-Sync-Beacons weiter und streamt keine
+LED-Frames.
 
 Bulk-Invert wird aktuell über kommaseparierte `invert_pattern`- bzw.
 `normal_pattern`-Befehle umgesetzt. Im Code ist ein zukünftiger dedizierter

@@ -37,6 +37,9 @@ constexpr unsigned long CARDPUTER_BATTERY_POLL_MS = 3000;
 constexpr unsigned long CONTROLLER_BATTERY_POLL_MS = 60000;
 constexpr unsigned long LINK_STALE_MS = 9000;
 constexpr unsigned long COMMAND_SEND_INTERVAL_MS = 160;
+constexpr unsigned long NK4_COMMAND_TIMEOUT_MS = 1400;
+constexpr unsigned long NK4_PROBE_TIMEOUT_MS = 1600;
+constexpr unsigned long NK4_MACHINE_DELAY_MS = 120;
 constexpr unsigned long SPLASH_DURATION_MS = 1500;
 constexpr unsigned long STARTUP_SOUND_DELAY_MS = 180;
 
@@ -108,11 +111,113 @@ struct ControllerSettings {
   bool hasControllerBattery = false;
   uint32_t enabledPatternMask = 0;
   uint32_t invertedPatternMask = 0;
+  String deviceName;
+  String playMode = "unknown";
+  String bootMode = "unknown";
+  bool syncEnabled = false;
+  int syncGroup = -1;
+  String syncRole = "unknown";
+  String syncMasterUid;
+  String syncLossBehavior = "unknown";
+  bool wirelessEnabled = false;
+  String wirelessProfile = "unknown";
   std::vector<PatternConfig> patterns;
+};
+
+enum class ProtocolMode : uint8_t {
+  Unknown,
+  Probing,
+  Legacy,
+  Nk4,
+};
+
+enum class TransportMode : uint8_t {
+  Usb,
+  Ble,
+};
+
+struct ControllerIdentity {
+  String uid;
+  String shortId;
+  String name;
+  String firmware;
+  String protocol;
+  String hardware;
+  String caps;
+};
+
+struct ControllerCapabilities {
+  bool play = false;
+  bool sync = false;
+  bool wireless = false;
+  bool ble = false;
+  bool syncRadio = false;
+};
+
+struct PlayState {
+  String playMode = "unknown";
+  String bootMode = "unknown";
+};
+
+struct SyncState {
+  bool supported = false;
+  bool enabled = false;
+  int group = -1;
+  String role = "unknown";
+  String masterUid;
+  String lossBehavior = "unknown";
+  String state = "unknown";
+  bool locked = false;
+  int lastSeq = -1;
+  int driftMs = 0;
+  bool beaconTx = false;
+  bool beaconRx = false;
+  unsigned long beaconTxCount = 0;
+  unsigned long beaconRxCount = 0;
+  unsigned long beaconCrcErrors = 0;
+  unsigned long beaconGroupMismatch = 0;
+  int beaconAgeMs = -1;
+  String radioMode = "unknown";
+};
+
+struct WirelessState {
+  bool supported = false;
+  bool enabled = false;
+  String profile = "unknown";
+  bool bleSupported = false;
+  bool bleEnabled = false;
+  bool bleInitialized = false;
+  bool bleAdvertising = false;
+  bool bleConnected = false;
+  bool bleGatt = false;
+  String bleName;
+  String wifi = "unknown";
+  bool syncRadioSupported = false;
+  bool syncRadioActive = false;
+};
+
+struct DiagnosticsState {
+  String imu = "unknown";
+  String bootStage = "unknown";
+  String configValid = "unknown";
+  bool configRepaired = false;
+  int configVersion = -1;
+  bool safeBoot = false;
+};
+
+struct CommandQueueEntry {
+  String command;
+  bool nk4Raw = false;
+  uint16_t seq = 0;
+  unsigned long sentAt = 0;
 };
 
 enum class Card : uint8_t {
   Status,
+  Device,
+  Play,
+  Sync,
+  Wireless,
   Brightness,
   Config,
   Calibration,
@@ -123,7 +228,7 @@ enum class Card : uint8_t {
   Profiles,
 };
 
-constexpr int CARD_COUNT = 9;
+constexpr int CARD_COUNT = 13;
 
 enum class Mode : uint8_t {
   Cards,
@@ -176,6 +281,14 @@ struct AppState {
   bool cardputerCharging = false;
   ControllerSettings settings;
   ControllerSettings loadedProfile;
+  ProtocolMode protocolMode = ProtocolMode::Unknown;
+  TransportMode transportMode = TransportMode::Usb;
+  ControllerIdentity identity;
+  ControllerCapabilities capabilities;
+  PlayState play;
+  SyncState sync;
+  WirelessState wireless;
+  DiagnosticsState diagnostics;
   bool hasLoadedProfile = false;
   String loadedProfileName;
   String loadedProfilePath;
@@ -187,6 +300,9 @@ struct AppState {
   int selectedProfileAction = 0;
   int selectedProfileIndex = 0;
   int selectedConfigField = 0;
+  int selectedPlayField = 0;
+  int selectedSyncField = 0;
+  int selectedWirelessField = 0;
   int selectedCalAction = 0;
   int selectedBulkAction = 0;
   int selectedFirmwareTarget = 0;
@@ -211,7 +327,14 @@ unsigned long lastCommandSendMs = 0;
 unsigned long lastControllerBatteryReadMs = 0;
 bool lastUsbConnected = false;
 String rxLine;
-std::vector<String> commandQueue;
+std::vector<CommandQueueEntry> commandQueue;
+bool nk4Pending = false;
+CommandQueueEntry pendingNk4;
+uint16_t nextNk4Seq = 1;
+bool nk4MachineSent = false;
+bool nk4HelloSent = false;
+unsigned long nk4ProbeStartMs = 0;
+unsigned long nk4MachineSentMs = 0;
 bool patternSyncInProgress = false;
 bool transferCompleteSoundPending = false;
 bool canvasReady = false;
@@ -386,9 +509,16 @@ String stripCliPrompt(String line)
 String valueForKey(const String& line, const char* key)
 {
   String token = String(key) + "=";
-  int start = line.indexOf(token);
-  if (start < 0) {
-    return "";
+  int start = 0;
+  while (true) {
+    start = line.indexOf(token, start);
+    if (start < 0) {
+      return "";
+    }
+    if (start == 0 || line[start - 1] == ' ') {
+      break;
+    }
+    ++start;
   }
   start += token.length();
   int end = line.indexOf(' ', start);
@@ -398,6 +528,86 @@ String valueForKey(const String& line, const char* key)
   String value = line.substring(start, end);
   value.trim();
   return value;
+}
+
+const char* protocolToken()
+{
+  switch (app.protocolMode) {
+    case ProtocolMode::Legacy:
+      return "LEG";
+    case ProtocolMode::Nk4:
+      return "NK4";
+    case ProtocolMode::Probing:
+      return "...";
+    case ProtocolMode::Unknown:
+    default:
+      return "--";
+  }
+}
+
+const char* transportToken()
+{
+  return app.transportMode == TransportMode::Ble ? "BLE" : "USB";
+}
+
+String controllerLabel()
+{
+  if (app.identity.name.length() > 0) {
+    return app.identity.name;
+  }
+  if (app.identity.shortId.length() > 0) {
+    return app.identity.shortId;
+  }
+  if (app.identity.uid.length() > 0) {
+    return app.identity.uid.substring(0, min(8, static_cast<int>(app.identity.uid.length())));
+  }
+  return "NK";
+}
+
+String playToken()
+{
+  if (app.play.playMode == "manual") {
+    return "MAN";
+  }
+  if (app.play.playMode == "autoplay") {
+    return "AUTO";
+  }
+  if (app.play.playMode == "sync") {
+    return "SYNC";
+  }
+  return "--";
+}
+
+String roleToken()
+{
+  if (app.sync.role == "master") {
+    return "M";
+  }
+  if (app.sync.role == "follower") {
+    return "F";
+  }
+  if (app.sync.role == "standalone") {
+    return "S";
+  }
+  return "-";
+}
+
+uint32_t parseUint32Text(String value, uint32_t fallback)
+{
+  value.trim();
+  if (value.length() == 0) {
+    return fallback;
+  }
+  return static_cast<uint32_t>(strtoul(value.c_str(), nullptr, 0));
+}
+
+unsigned long parseUlongText(String value, unsigned long fallback)
+{
+  value.trim();
+  if (value.length() == 0) {
+    return fallback;
+  }
+  return strtoul(value.c_str(), nullptr, 0);
 }
 
 void parseIntField(const String& line, const char* key, int& target)
@@ -421,6 +631,24 @@ bool parseFloatField(const String& line, const char* key, float& target)
 bool parseBoolText(const String& value)
 {
   return value == "on" || value == "1" || value == "true" || value == "yes";
+}
+
+bool hasBoolKey(const String& line, const char* key, bool& target)
+{
+  String value = valueForKey(line, key);
+  if (value.length() == 0) {
+    return false;
+  }
+  target = parseBoolText(value);
+  return true;
+}
+
+void parseStringField(const String& line, const char* key, String& target)
+{
+  String value = valueForKey(line, key);
+  if (value.length() > 0) {
+    target = value;
+  }
 }
 
 bool parsePercentNearSymbol(const String& line, int& percent)
@@ -685,6 +913,90 @@ public:
   }
 };
 
+String legacyCommandToNk4Payload(String command)
+{
+  command.trim();
+  if (command == "show") {
+    return "cmd=status";
+  }
+  if (command == "patterns" || command == "get inverted_patterns") {
+    return "cmd=get section=patterns";
+  }
+  if (command == "battery") {
+    return "cmd=battery";
+  }
+  if (command == "sensor") {
+    return "cmd=sensor";
+  }
+  if (command == "timing") {
+    return "cmd=timing";
+  }
+  if (command == "save") {
+    return "cmd=save";
+  }
+  if (command == "calibrate quick") {
+    return "cmd=calibrate mode=quick";
+  }
+  if (command == "calibrate precise") {
+    return "cmd=calibrate mode=precise";
+  }
+  if (command.startsWith("set brightness ")) {
+    return "cmd=set brightness=" + command.substring(15);
+  }
+  if (command.startsWith("set strip_length ")) {
+    return "cmd=set strip_length=" + command.substring(17);
+  }
+  if (command.startsWith("set pattern ")) {
+    return "cmd=set pattern=" + command.substring(12);
+  }
+  if (command.startsWith("set smoothing ")) {
+    return "cmd=set smoothing=" + command.substring(14);
+  }
+  if (command.startsWith("set accel_range ")) {
+    return "cmd=set accel_range=" + command.substring(16);
+  }
+  if (command.startsWith("set gyro_range ")) {
+    return "cmd=set gyro_range=" + command.substring(15);
+  }
+  if (command.startsWith("set boot_calibration ")) {
+    return "cmd=set boot_calibration=" + command.substring(21);
+  }
+  if (command.startsWith("set autoplay_interval ")) {
+    return "cmd=set autoplay_interval=" + command.substring(22);
+  }
+  if (command.startsWith("set autoplay ")) {
+    String value = command.substring(13);
+    value.trim();
+    return String("cmd=set autoplay=") + (parseBoolText(value) ? "1" : "0");
+  }
+  if (command.startsWith("enable_pattern ") || command.startsWith("disable_pattern ")) {
+    bool enable = command.startsWith("enable_pattern ");
+    String list = command.substring(enable ? 15 : 16);
+    uint32_t mask = currentEnabledMask();
+    uint32_t requested = patternMaskFromList(list);
+    mask = enable ? (mask | requested) : (mask & ~requested);
+    return "cmd=set enabled_mask=" + String(mask);
+  }
+  if (command.startsWith("invert_pattern ") || command.startsWith("normal_pattern ")) {
+    bool invert = command.startsWith("invert_pattern ");
+    String list = command.substring(invert ? 15 : 15);
+    uint32_t mask = currentInvertedMask();
+    uint32_t requested = patternMaskFromList(list);
+    mask = invert ? (mask | requested) : (mask & ~requested);
+    return "cmd=set inverted_mask=" + String(mask);
+  }
+  return "cmd=" + command;
+}
+
+void enqueueCommandEntry(const String& command, bool nk4Raw = false)
+{
+  CommandQueueEntry entry;
+  entry.command = command;
+  entry.nk4Raw = nk4Raw;
+  commandQueue.push_back(entry);
+  app.lastCommand = command;
+}
+
 void sendCommand(const String& command, bool announce = true)
 {
   if (command.length() == 0) {
@@ -692,8 +1004,20 @@ void sendCommand(const String& command, bool announce = true)
     return;
   }
   bool wasEmpty = commandQueue.empty();
-  commandQueue.push_back(command);
-  app.lastCommand = command;
+  if (app.protocolMode == ProtocolMode::Nk4 && command == NightKiteCommands::refreshAll()) {
+    enqueueCommandEntry("cmd=info", true);
+    enqueueCommandEntry("cmd=caps", true);
+    enqueueCommandEntry("cmd=status", true);
+    enqueueCommandEntry("cmd=get section=config", true);
+    enqueueCommandEntry("cmd=get section=play", true);
+    enqueueCommandEntry("cmd=get section=sync", true);
+    enqueueCommandEntry("cmd=get section=wireless", true);
+    enqueueCommandEntry("cmd=get section=patterns", true);
+  } else if (app.protocolMode == ProtocolMode::Nk4) {
+    enqueueCommandEntry(legacyCommandToNk4Payload(command), true);
+  } else {
+    enqueueCommandEntry(command, false);
+  }
   if (announce && wasEmpty) {
     setStatus("Queued command", COLOR_ACCENT);
   }
@@ -727,6 +1051,20 @@ void requestControllerBattery(bool force = false)
 
 void pollCommandQueue()
 {
+  if (nk4Pending) {
+    if (!app.usbConnected) {
+      nk4Pending = false;
+    } else if (millis() - pendingNk4.sentAt > NK4_COMMAND_TIMEOUT_MS) {
+      String timedOut = pendingNk4.command;
+      nk4Pending = false;
+      app.controllerError = true;
+      setStatus("NK4 timeout", COLOR_ERR);
+      Serial.print("NK4 timeout: ");
+      Serial.println(timedOut);
+    }
+    return;
+  }
+
   if (commandQueue.empty()) {
     if (patternSyncInProgress) {
       patternSyncInProgress = false;
@@ -748,11 +1086,19 @@ void pollCommandQueue()
     app.dirty = true;
     return;
   }
-  String command = commandQueue.front();
+  CommandQueueEntry entry = commandQueue.front();
   commandQueue.erase(commandQueue.begin());
-  transport.sendLine(command);
+  String wireCommand = entry.command;
+  if (entry.nk4Raw) {
+    entry.seq = nextNk4Seq++;
+    wireCommand = "NK4 seq=" + String(entry.seq) + " " + entry.command;
+    entry.sentAt = millis();
+    pendingNk4 = entry;
+    nk4Pending = true;
+  }
+  transport.sendLine(wireCommand);
   lastCommandSendMs = millis();
-  app.lastCommand = command;
+  app.lastCommand = wireCommand;
   app.dirty = true;
   if (commandQueue.empty() && !patternSyncInProgress) {
     setStatus("Command sent", COLOR_ACCENT);
@@ -835,26 +1181,30 @@ void drawStatusBar()
   auto& d = uiCanvas;
   d.fillRect(0, 0, SCREEN_W, STATUS_H, COLOR_PANEL_DARK);
   String cp = app.cardputerBatteryPercent >= 0 ? String(app.cardputerBatteryPercent) + "%" : "--";
-  String text = String("USB") + (app.usbConnected ? "+" : "-") + " CTRL" +
-                (app.controllerConnected ? (app.controllerError ? "!" : "+") : "-");
+  String text = String(transportToken()) + " " + protocolToken();
+  String name = app.controllerConnected ? shortText(controllerLabel(), 8) : "--";
+  String play = app.protocolMode == ProtocolMode::Nk4 ? playToken() + "/" + roleToken() : "CTRL";
   String nk = "NK:--";
   if (app.controllerConnected && app.settings.hasControllerBattery) {
-    if (!isnan(app.settings.controllerBatteryVoltage)) {
+    if (app.settings.controllerBatteryPercent >= 0) {
+      nk = "NK:" + String(app.settings.controllerBatteryPercent) + "%";
+    } else if (!isnan(app.settings.controllerBatteryVoltage)) {
       char buffer[12];
       snprintf(buffer, sizeof(buffer), "%.1fV", app.settings.controllerBatteryVoltage);
       nk = String("NK:") + buffer;
-    } else if (app.settings.controllerBatteryPercent >= 0) {
-      nk = "NK:" + String(app.settings.controllerBatteryPercent) + "%";
     }
   }
   bool cliBusy = !commandQueue.empty() || patternSyncInProgress;
   String queueText = "Q:" + String(commandQueue.size());
   uint16_t queueColor = cliBusy ? COLOR_WARN : COLOR_MUTED;
-  drawTextFit(text, 3, 4, 62, app.controllerError ? COLOR_WARN : COLOR_TEXT, COLOR_PANEL_DARK);
-  drawTextFit(queueText, 68, 4, 27, queueColor, COLOR_PANEL_DARK);
-  drawTextFit(String(app.selectedCard + 1) + "/" + String(CARD_COUNT), 99, 4, 24, COLOR_MUTED, COLOR_PANEL_DARK);
-  drawTextFit(nk, 127, 4, 48, app.settings.hasControllerBattery ? COLOR_OK : COLOR_MUTED, COLOR_PANEL_DARK);
-  drawTextFit(String("CP:") + cp, 181, 4, 56, app.cardputerCharging ? COLOR_OK : COLOR_ACCENT, COLOR_PANEL_DARK);
+  drawTextFit(text, 3, 4, 45, app.controllerError ? COLOR_WARN : COLOR_TEXT, COLOR_PANEL_DARK);
+  drawTextFit(name, 51, 4, 50, app.controllerConnected ? COLOR_ACCENT : COLOR_MUTED, COLOR_PANEL_DARK);
+  drawTextFit(play, 105, 4, 50, app.protocolMode == ProtocolMode::Nk4 ? COLOR_OK : COLOR_MUTED, COLOR_PANEL_DARK);
+  drawTextFit(nk, 158, 4, 39, app.settings.hasControllerBattery ? COLOR_OK : COLOR_MUTED, COLOR_PANEL_DARK);
+  drawTextFit(String("L:") + cp, 201, 4, 36, app.cardputerCharging ? COLOR_OK : COLOR_ACCENT, COLOR_PANEL_DARK);
+  if (cliBusy) {
+    drawTextFit(queueText, 130, 4, 25, queueColor, COLOR_PANEL_DARK);
+  }
 }
 
 void drawFooter(const String& help)
@@ -905,6 +1255,132 @@ void drawStatusCard()
                  app.settings.autoplayEnabled ? COLOR_OK : COLOR_MUTED);
   drawStatusTile(181, CONTENT_Y + 58, 53, 27, "Int", showInt(app.settings.autoplayIntervalSeconds) + "s", COLOR_TEXT);
   drawFooter("A/D cards  R refresh");
+}
+
+void drawDeviceCard()
+{
+  String battery = "--";
+  if (app.settings.hasControllerBattery) {
+    if (app.settings.controllerBatteryPercent >= 0) {
+      battery = String(app.settings.controllerBatteryPercent) + "%";
+    } else if (!isnan(app.settings.controllerBatteryVoltage)) {
+      char buffer[12];
+      snprintf(buffer, sizeof(buffer), "%.1fV", app.settings.controllerBatteryVoltage);
+      battery = buffer;
+    }
+  }
+  drawTextFit("Device", 8, CONTENT_Y + 5, 90, COLOR_MUTED);
+  drawTextFit(String(transportToken()) + " " + protocolToken(), 160, CONTENT_Y + 5, 70,
+              app.protocolMode == ProtocolMode::Nk4 ? COLOR_OK : COLOR_WARN);
+  drawStatusTile(8, CONTENT_Y + 22, 70, 25, "Name", app.controllerConnected ? shortText(controllerLabel(), 9) : "--",
+                 COLOR_ACCENT);
+  drawStatusTile(85, CONTENT_Y + 22, 70, 25, "Short", app.identity.shortId.length() ? app.identity.shortId : "--",
+                 COLOR_TEXT);
+  drawStatusTile(162, CONTENT_Y + 22, 70, 25, "Battery", battery, app.settings.hasControllerBattery ? COLOR_OK : COLOR_MUTED);
+  drawTextFit("FW " + (app.identity.firmware.length() ? app.identity.firmware : "--"), 10, CONTENT_Y + 58, 108,
+              COLOR_TEXT);
+  drawTextFit("Proto " + (app.identity.protocol.length() ? app.identity.protocol : "--"), 125, CONTENT_Y + 58, 105,
+              COLOR_TEXT);
+  drawTextFit("HW " + (app.identity.hardware.length() ? app.identity.hardware : "--"), 10, CONTENT_Y + 74, 108,
+              COLOR_TEXT);
+  drawTextFit("Cfg " + app.diagnostics.configValid, 125, CONTENT_Y + 74, 105,
+              app.diagnostics.configValid == "1" || app.diagnostics.configValid == "true" ? COLOR_OK : COLOR_MUTED);
+  drawFooter("R refresh");
+}
+
+const char* const PLAY_MODES[] = {"manual", "autoplay", "sync"};
+constexpr int PLAY_MODE_COUNT = sizeof(PLAY_MODES) / sizeof(PLAY_MODES[0]);
+const char* const BOOT_MODES[] = {"last", "manual", "autoplay", "sync"};
+constexpr int BOOT_MODE_COUNT = sizeof(BOOT_MODES) / sizeof(BOOT_MODES[0]);
+
+int indexOfOption(const char* const* options, int count, const String& value)
+{
+  for (int i = 0; i < count; ++i) {
+    if (value == options[i]) {
+      return i;
+    }
+  }
+  return 0;
+}
+
+String optionWithDelta(const char* const* options, int count, const String& value, int delta)
+{
+  if (count <= 0) {
+    return value;
+  }
+  int index = indexOfOption(options, count, value) + delta;
+  if (index < 0) {
+    index = count - 1;
+  } else if (index >= count) {
+    index = 0;
+  }
+  return options[index];
+}
+
+void drawPlayCard()
+{
+  drawTextFit("Play", 8, CONTENT_Y + 5, 70, COLOR_MUTED);
+  String labels[] = {"Mode", "Boot", "Auto", "Interval"};
+  String values[] = {app.play.playMode, app.play.bootMode, app.settings.autoplayEnabled ? "ON" : "OFF",
+                     showInt(app.settings.autoplayIntervalSeconds) + "s"};
+  for (int i = 0; i < 4; ++i) {
+    int x = 8 + (i % 2) * 116;
+    int y = CONTENT_Y + 24 + (i / 2) * 34;
+    bool active = i == app.selectedPlayField;
+    uint16_t bg = active ? COLOR_ACCENT_DARK : COLOR_PANEL_DARK;
+    uiCanvas.fillRoundRect(x, y, 108, 28, 3, bg);
+    drawTextFit(labels[i], x + 5, y + 6, 48, COLOR_MUTED, bg);
+    drawTextFit(values[i], x + 48, y + 6, 55, active ? COLOR_TEXT : COLOR_ACCENT, bg);
+  }
+  drawFooter(app.protocolMode == ProtocolMode::Nk4 ? "C field  W/S edit  ENTER set" : "NK4 required");
+}
+
+const char* const SYNC_ROLES[] = {"standalone", "master", "follower"};
+constexpr int SYNC_ROLE_COUNT = sizeof(SYNC_ROLES) / sizeof(SYNC_ROLES[0]);
+const char* const SYNC_LOSS[] = {"continue_local", "fallback_autoplay", "warning_only"};
+constexpr int SYNC_LOSS_COUNT = sizeof(SYNC_LOSS) / sizeof(SYNC_LOSS[0]);
+
+void drawSyncCard()
+{
+  drawTextFit("Sync", 8, CONTENT_Y + 5, 80, COLOR_MUTED);
+  String labels[] = {"Enable", "Group", "Role", "State", "Lock", "Loss"};
+  String values[] = {app.sync.enabled ? "ON" : "OFF", showInt(app.sync.group), app.sync.role, app.sync.state,
+                     app.sync.locked ? "YES" : "NO", app.sync.lossBehavior};
+  for (int i = 0; i < 6; ++i) {
+    int x = 8 + (i % 3) * 76;
+    int y = CONTENT_Y + 22 + (i / 3) * 34;
+    bool editable = i == 0 || i == 1 || i == 2 || i == 5;
+    bool active = editable && i == app.selectedSyncField;
+    uint16_t bg = active ? COLOR_ACCENT_DARK : COLOR_PANEL_DARK;
+    uiCanvas.fillRoundRect(x, y, 70, 28, 3, bg);
+    drawTextFit(labels[i], x + 5, y + 6, 60, COLOR_MUTED, bg);
+    drawTextFit(values[i], x + 5, y + 18, 60, active ? COLOR_TEXT : COLOR_ACCENT, bg);
+  }
+  drawFooter(app.protocolMode == ProtocolMode::Nk4 ? "C field  W/S edit  ENTER set" : "NK4 required");
+}
+
+const char* const WIRELESS_PROFILES[] = {"long_range", "balanced", "fast_sync"};
+constexpr int WIRELESS_PROFILE_COUNT = sizeof(WIRELESS_PROFILES) / sizeof(WIRELESS_PROFILES[0]);
+
+void drawWirelessCard()
+{
+  drawTextFit("Wireless", 8, CONTENT_Y + 5, 90, COLOR_MUTED);
+  String labels[] = {"Enable", "Profile", "Radio", "TX", "RX", "CRC"};
+  String values[] = {app.wireless.enabled ? "ON" : "OFF", app.wireless.profile, app.sync.radioMode,
+                     String(app.sync.beaconTxCount), String(app.sync.beaconRxCount), String(app.sync.beaconCrcErrors)};
+  for (int i = 0; i < 6; ++i) {
+    int x = 8 + (i % 3) * 76;
+    int y = CONTENT_Y + 20 + (i / 3) * 30;
+    bool editable = i == 0 || i == 1;
+    bool active = editable && i == app.selectedWirelessField;
+    uint16_t bg = active ? COLOR_ACCENT_DARK : COLOR_PANEL_DARK;
+    uiCanvas.fillRoundRect(x, y, 70, 24, 3, bg);
+    drawTextFit(labels[i], x + 5, y + 5, 60, COLOR_MUTED, bg);
+    drawTextFit(values[i], x + 5, y + 16, 60, active ? COLOR_TEXT : COLOR_ACCENT, bg);
+  }
+  drawTextFit(String("BLE ") + (app.wireless.bleSupported ? "yes" : "--") + " " + shortText(app.wireless.bleName, 12), 10,
+              CONTENT_Y + 82, 218, COLOR_TEXT);
+  drawFooter(app.protocolMode == ProtocolMode::Nk4 ? "C field  W/S edit  ENTER set" : "NK4 required");
 }
 
 void drawValueCard(const String& title, const String& value, const String& sub, const String& help)
@@ -1403,6 +1879,18 @@ void render()
       case Card::Status:
         drawStatusCard();
         break;
+      case Card::Device:
+        drawDeviceCard();
+        break;
+      case Card::Play:
+        drawPlayCard();
+        break;
+      case Card::Sync:
+        drawSyncCard();
+        break;
+      case Card::Wireless:
+        drawWirelessCard();
+        break;
       case Card::Brightness:
         drawBrightnessCard();
         break;
@@ -1568,16 +2056,40 @@ bool saveCurrentProfileToPath(const String& path, const String& displayName, boo
 
   ensurePatternModel();
   file.println("{");
-  file.println("  \"profile_version\": 1,");
+  file.println("  \"profile_version\": 2,");
   file.println("  \"project\": \"NightKite Link\",");
   file.println("  \"target\": \"NightKite Multi\",");
   file.println("  \"settings\": {");
+  file.print("    \"device_name\": ");
+  writeJsonString(file, app.identity.name);
+  file.println(",");
   file.printf("    \"brightness\": %d,\n", app.settings.brightness);
   file.printf("    \"strip_length\": %d,\n", app.settings.stripLength);
   file.printf("    \"active_pattern\": %d,\n", app.settings.activePattern);
   file.printf("    \"smoothing\": %d,\n", app.settings.smoothing);
   file.printf("    \"accel_range\": %d,\n", app.settings.accelRange);
   file.printf("    \"gyro_range\": %d,\n", app.settings.gyroRange);
+  file.print("    \"play_mode\": ");
+  writeJsonString(file, app.play.playMode);
+  file.println(",");
+  file.print("    \"boot_mode\": ");
+  writeJsonString(file, app.play.bootMode);
+  file.println(",");
+  file.printf("    \"sync_enabled\": %s,\n", app.sync.enabled ? "true" : "false");
+  file.printf("    \"sync_group\": %d,\n", app.sync.group);
+  file.print("    \"sync_role\": ");
+  writeJsonString(file, app.sync.role);
+  file.println(",");
+  file.print("    \"sync_master_uid\": ");
+  writeJsonString(file, app.sync.masterUid);
+  file.println(",");
+  file.print("    \"sync_loss_behavior\": ");
+  writeJsonString(file, app.sync.lossBehavior);
+  file.println(",");
+  file.printf("    \"wireless_enabled\": %s,\n", app.wireless.enabled ? "true" : "false");
+  file.print("    \"wireless_profile\": ");
+  writeJsonString(file, app.wireless.profile);
+  file.println(",");
   file.printf("    \"enabled_pattern_mask\": %lu,\n", static_cast<unsigned long>(currentEnabledMask()));
   file.printf("    \"inverted_pattern_mask\": %lu,\n", static_cast<unsigned long>(currentInvertedMask()));
   file.println("    \"autoplay\": {");
@@ -1684,6 +2196,35 @@ bool jsonBool(const String& json, const char* key, bool fallback)
   return json.substring(start).startsWith("true");
 }
 
+String jsonStringValue(const String& json, const char* key, const String& fallback)
+{
+  String token = String("\"") + key + "\":";
+  int start = json.indexOf(token);
+  if (start < 0) {
+    return fallback;
+  }
+  start += token.length();
+  while (start < json.length() && isspace(static_cast<unsigned char>(json[start]))) {
+    ++start;
+  }
+  if (start >= json.length() || json[start] != '"') {
+    return fallback;
+  }
+  ++start;
+  String value;
+  while (start < json.length()) {
+    char c = json[start++];
+    if (c == '\\' && start < json.length()) {
+      value += json[start++];
+    } else if (c == '"') {
+      break;
+    } else {
+      value += c;
+    }
+  }
+  return value;
+}
+
 bool loadNewestProfile()
 {
   String path = newestProfilePath();
@@ -1712,6 +2253,16 @@ bool loadNewestProfile()
   loaded.smoothing = jsonInt(json, "smoothing", loaded.smoothing);
   loaded.accelRange = jsonInt(json, "accel_range", loaded.accelRange);
   loaded.gyroRange = jsonInt(json, "gyro_range", loaded.gyroRange);
+  loaded.deviceName = jsonStringValue(json, "device_name", loaded.deviceName);
+  loaded.playMode = jsonStringValue(json, "play_mode", loaded.playMode);
+  loaded.bootMode = jsonStringValue(json, "boot_mode", loaded.bootMode);
+  loaded.syncEnabled = jsonBool(json, "sync_enabled", loaded.syncEnabled);
+  loaded.syncGroup = jsonInt(json, "sync_group", loaded.syncGroup);
+  loaded.syncRole = jsonStringValue(json, "sync_role", loaded.syncRole);
+  loaded.syncMasterUid = jsonStringValue(json, "sync_master_uid", loaded.syncMasterUid);
+  loaded.syncLossBehavior = jsonStringValue(json, "sync_loss_behavior", loaded.syncLossBehavior);
+  loaded.wirelessEnabled = jsonBool(json, "wireless_enabled", loaded.wirelessEnabled);
+  loaded.wirelessProfile = jsonStringValue(json, "wireless_profile", loaded.wirelessProfile);
   loaded.enabledPatternMask = jsonUint32(json, "enabled_pattern_mask", currentEnabledMask());
   loaded.invertedPatternMask = jsonUint32(json, "inverted_pattern_mask", currentInvertedMask());
   loaded.autoplayEnabled = jsonBool(json, "enabled", loaded.autoplayEnabled);
@@ -1761,6 +2312,16 @@ bool loadProfileFile(const String& fileName)
   loaded.smoothing = jsonInt(json, "smoothing", loaded.smoothing);
   loaded.accelRange = jsonInt(json, "accel_range", loaded.accelRange);
   loaded.gyroRange = jsonInt(json, "gyro_range", loaded.gyroRange);
+  loaded.deviceName = jsonStringValue(json, "device_name", loaded.deviceName);
+  loaded.playMode = jsonStringValue(json, "play_mode", loaded.playMode);
+  loaded.bootMode = jsonStringValue(json, "boot_mode", loaded.bootMode);
+  loaded.syncEnabled = jsonBool(json, "sync_enabled", loaded.syncEnabled);
+  loaded.syncGroup = jsonInt(json, "sync_group", loaded.syncGroup);
+  loaded.syncRole = jsonStringValue(json, "sync_role", loaded.syncRole);
+  loaded.syncMasterUid = jsonStringValue(json, "sync_master_uid", loaded.syncMasterUid);
+  loaded.syncLossBehavior = jsonStringValue(json, "sync_loss_behavior", loaded.syncLossBehavior);
+  loaded.wirelessEnabled = jsonBool(json, "wireless_enabled", loaded.wirelessEnabled);
+  loaded.wirelessProfile = jsonStringValue(json, "wireless_profile", loaded.wirelessProfile);
   loaded.enabledPatternMask = jsonUint32(json, "enabled_pattern_mask", currentEnabledMask());
   loaded.invertedPatternMask = jsonUint32(json, "inverted_pattern_mask", currentInvertedMask());
   loaded.autoplayEnabled = jsonBool(json, "enabled", loaded.autoplayEnabled);
@@ -1791,6 +2352,46 @@ void applyLoadedProfile()
   }
   setStatus("Applying profile...", COLOR_ACCENT);
   markTransferCompleteSoundPending();
+  if (app.protocolMode == ProtocolMode::Nk4) {
+    if (app.loadedProfile.deviceName.length() > 0) {
+      sendCommand("set name=" + app.loadedProfile.deviceName);
+    }
+    sendCommand(NightKiteCommands::setBrightness(app.loadedProfile.brightness));
+    sendCommand(NightKiteCommands::setStripLength(app.loadedProfile.stripLength));
+    sendCommand(NightKiteCommands::setPattern(app.loadedProfile.activePattern));
+    sendCommand(NightKiteCommands::setSmoothing(app.loadedProfile.smoothing));
+    sendCommand(NightKiteCommands::setAccelRange(app.loadedProfile.accelRange));
+    sendCommand(NightKiteCommands::setGyroRange(app.loadedProfile.gyroRange));
+    sendCommand(String("set autoplay=") + (app.loadedProfile.autoplayEnabled ? "1" : "0"));
+    sendCommand("set autoplay_interval=" + String(app.loadedProfile.autoplayIntervalSeconds));
+    if (app.loadedProfile.playMode != "unknown") {
+      sendCommand("set play_mode=" + app.loadedProfile.playMode);
+    }
+    if (app.loadedProfile.bootMode != "unknown") {
+      sendCommand("set boot_mode=" + app.loadedProfile.bootMode);
+    }
+    sendCommand("set enabled_mask=" + String(app.loadedProfile.enabledPatternMask));
+    sendCommand("set inverted_mask=" + String(app.loadedProfile.invertedPatternMask));
+    sendCommand(String("set sync_enabled=") + (app.loadedProfile.syncEnabled ? "1" : "0"));
+    if (app.loadedProfile.syncGroup >= 0) {
+      sendCommand("set sync_group=" + String(app.loadedProfile.syncGroup));
+    }
+    if (app.loadedProfile.syncRole != "unknown") {
+      sendCommand("set sync_role=" + app.loadedProfile.syncRole);
+    }
+    if (app.loadedProfile.syncMasterUid.length() > 0) {
+      sendCommand("set sync_master_uid=" + app.loadedProfile.syncMasterUid);
+    }
+    if (app.loadedProfile.syncLossBehavior != "unknown") {
+      sendCommand("set sync_loss_behavior=" + app.loadedProfile.syncLossBehavior);
+    }
+    sendCommand(String("set wireless_enabled=") + (app.loadedProfile.wirelessEnabled ? "1" : "0"));
+    if (app.loadedProfile.wirelessProfile != "unknown") {
+      sendCommand("set wireless_profile=" + app.loadedProfile.wirelessProfile);
+    }
+    setStatus("Profile queued", COLOR_ACCENT);
+    return;
+  }
   sendCommand(NightKiteCommands::setBrightness(app.loadedProfile.brightness));
   sendCommand(NightKiteCommands::setStripLength(app.loadedProfile.stripLength));
   sendCommand(NightKiteCommands::setPattern(app.loadedProfile.activePattern));
@@ -1915,12 +2516,246 @@ void parsePatternStates(const String& line)
   app.dirty = true;
 }
 
+String nk4FriendlyError(const String& code)
+{
+  if (code == "unsupported") {
+    return "Unsupported";
+  }
+  if (code == "invalid_value" || code == "range_error") {
+    return "Invalid value";
+  }
+  if (code == "busy" || code == "sync_busy") {
+    return "Busy";
+  }
+  if (code == "timeout") {
+    return "Timeout";
+  }
+  if (code == "not_ready") {
+    return "Not ready";
+  }
+  if (code == "save_failed") {
+    return "Save failed";
+  }
+  if (code == "sync_not_armed") {
+    return "Sync not armed";
+  }
+  if (code == "sync_too_late") {
+    return "Sync too late";
+  }
+  return code.length() > 0 ? code : "NK4 error";
+}
+
+void applyNk4Fields(const String& parsed)
+{
+  parseStringField(parsed, "uid", app.identity.uid);
+  parseStringField(parsed, "device_uid", app.identity.uid);
+  parseStringField(parsed, "short_id", app.identity.shortId);
+  parseStringField(parsed, "name", app.identity.name);
+  parseStringField(parsed, "device_name", app.identity.name);
+  parseStringField(parsed, "fw", app.identity.firmware);
+  parseStringField(parsed, "firmware", app.identity.firmware);
+  parseStringField(parsed, "firmware_version", app.identity.firmware);
+  parseStringField(parsed, "proto", app.identity.protocol);
+  parseStringField(parsed, "protocol", app.identity.protocol);
+  parseStringField(parsed, "protocol_version", app.identity.protocol);
+  parseStringField(parsed, "hw", app.identity.hardware);
+  parseStringField(parsed, "hardware", app.identity.hardware);
+  parseStringField(parsed, "hardware_id", app.identity.hardware);
+  parseStringField(parsed, "caps", app.identity.caps);
+
+  if (app.identity.caps.length() > 0) {
+    app.capabilities.play = app.identity.caps.indexOf("play") >= 0;
+    app.capabilities.sync = app.identity.caps.indexOf("sync") >= 0;
+    app.capabilities.wireless = app.identity.caps.indexOf("wireless") >= 0;
+    app.capabilities.ble = app.identity.caps.indexOf("ble") >= 0;
+    app.capabilities.syncRadio = app.identity.caps.indexOf("sync_radio") >= 0 || app.identity.caps.indexOf("beacon") >= 0;
+  }
+
+  parseIntField(parsed, "pattern", app.settings.activePattern);
+  parseIntField(parsed, "brightness", app.settings.brightness);
+  parseIntField(parsed, "strip_length", app.settings.stripLength);
+  parseIntField(parsed, "smoothing", app.settings.smoothing);
+  parseIntField(parsed, "accel_range", app.settings.accelRange);
+  parseIntField(parsed, "gyro_range", app.settings.gyroRange);
+  parseIntField(parsed, "autoplay_interval", app.settings.autoplayIntervalSeconds);
+  parseStringField(parsed, "boot_calibration", app.settings.bootCalibration);
+  parseStringField(parsed, "fps", app.settings.fps);
+  parseStringField(parsed, "imu", app.diagnostics.imu);
+  parseStringField(parsed, "boot_stage", app.diagnostics.bootStage);
+  parseStringField(parsed, "config_valid", app.diagnostics.configValid);
+  parseIntField(parsed, "config_version", app.diagnostics.configVersion);
+  hasBoolKey(parsed, "config_repaired", app.diagnostics.configRepaired);
+  hasBoolKey(parsed, "safe_boot", app.diagnostics.safeBoot);
+
+  String autoplay = valueForKey(parsed, "autoplay");
+  if (autoplay.length() > 0) {
+    app.settings.autoplayEnabled = parseBoolText(autoplay);
+  }
+  parseStringField(parsed, "play_mode", app.play.playMode);
+  parseStringField(parsed, "boot_mode", app.play.bootMode);
+  app.settings.deviceName = app.identity.name;
+  app.settings.playMode = app.play.playMode;
+  app.settings.bootMode = app.play.bootMode;
+
+  String enabledMask = valueForKey(parsed, "enabled_mask");
+  String invertedMask = valueForKey(parsed, "inverted_mask");
+  if (enabledMask.length() > 0 || invertedMask.length() > 0) {
+    applyPatternMasks(parseUint32Text(enabledMask, app.settings.enabledPatternMask),
+                      parseUint32Text(invertedMask, app.settings.invertedPatternMask), enabledMask.length() > 0,
+                      invertedMask.length() > 0);
+  }
+  parsePatternStates(parsed);
+  parseControllerBattery(parsed);
+
+  bool boolValue = false;
+  if (hasBoolKey(parsed, "sync_enabled", boolValue)) {
+    app.sync.supported = true;
+    app.sync.enabled = boolValue;
+    app.settings.syncEnabled = boolValue;
+  }
+  parseIntField(parsed, "sync_group", app.sync.group);
+  parseIntField(parsed, "group", app.sync.group);
+  parseStringField(parsed, "sync_role", app.sync.role);
+  parseStringField(parsed, "role", app.sync.role);
+  parseStringField(parsed, "sync_master_uid", app.sync.masterUid);
+  parseStringField(parsed, "master_uid", app.sync.masterUid);
+  parseStringField(parsed, "sync_loss_behavior", app.sync.lossBehavior);
+  parseStringField(parsed, "loss_behavior", app.sync.lossBehavior);
+  app.settings.syncGroup = app.sync.group;
+  app.settings.syncRole = app.sync.role;
+  app.settings.syncMasterUid = app.sync.masterUid;
+  app.settings.syncLossBehavior = app.sync.lossBehavior;
+  parseStringField(parsed, "sync_state", app.sync.state);
+  if (hasBoolKey(parsed, "sync_locked", boolValue)) {
+    app.sync.locked = boolValue;
+  }
+  parseIntField(parsed, "last_seq", app.sync.lastSeq);
+  parseIntField(parsed, "drift_ms", app.sync.driftMs);
+  if (hasBoolKey(parsed, "beacon_tx", boolValue)) {
+    app.sync.beaconTx = boolValue;
+  }
+  if (hasBoolKey(parsed, "beacon_rx", boolValue)) {
+    app.sync.beaconRx = boolValue;
+  }
+  app.sync.beaconTxCount = parseUlongText(valueForKey(parsed, "beacon_tx_count"), app.sync.beaconTxCount);
+  app.sync.beaconRxCount = parseUlongText(valueForKey(parsed, "beacon_rx_count"), app.sync.beaconRxCount);
+  app.sync.beaconCrcErrors = parseUlongText(valueForKey(parsed, "beacon_crc_errors"), app.sync.beaconCrcErrors);
+  app.sync.beaconGroupMismatch =
+      parseUlongText(valueForKey(parsed, "beacon_group_mismatch"), app.sync.beaconGroupMismatch);
+  parseIntField(parsed, "beacon_age_ms", app.sync.beaconAgeMs);
+  parseIntField(parsed, "last_beacon_ms", app.sync.beaconAgeMs);
+  parseStringField(parsed, "radio_mode", app.sync.radioMode);
+
+  if (hasBoolKey(parsed, "wireless_enabled", boolValue)) {
+    app.wireless.supported = true;
+    app.wireless.enabled = boolValue;
+    app.settings.wirelessEnabled = boolValue;
+  }
+  parseStringField(parsed, "wireless_profile", app.wireless.profile);
+  app.settings.wirelessProfile = app.wireless.profile;
+  if (hasBoolKey(parsed, "ble_supported", boolValue)) {
+    app.wireless.bleSupported = boolValue;
+  }
+  if (hasBoolKey(parsed, "ble_enabled", boolValue)) {
+    app.wireless.bleEnabled = boolValue;
+  }
+  if (hasBoolKey(parsed, "ble_initialized", boolValue)) {
+    app.wireless.bleInitialized = boolValue;
+  }
+  if (hasBoolKey(parsed, "ble_advertising", boolValue)) {
+    app.wireless.bleAdvertising = boolValue;
+  }
+  if (hasBoolKey(parsed, "ble_connected", boolValue)) {
+    app.wireless.bleConnected = boolValue;
+  }
+  if (hasBoolKey(parsed, "ble_gatt", boolValue)) {
+    app.wireless.bleGatt = boolValue;
+  }
+  parseStringField(parsed, "ble_name", app.wireless.bleName);
+  parseStringField(parsed, "wifi", app.wireless.wifi);
+  if (hasBoolKey(parsed, "sync_radio_supported", boolValue)) {
+    app.wireless.syncRadioSupported = boolValue;
+  }
+  if (hasBoolKey(parsed, "sync_radio_active", boolValue)) {
+    app.wireless.syncRadioActive = boolValue;
+  }
+
+  if (app.sync.group >= 0 || app.sync.role != "unknown" || app.sync.state != "unknown") {
+    app.sync.supported = true;
+  }
+  if (app.wireless.profile != "unknown" || app.wireless.bleName.length() > 0) {
+    app.wireless.supported = true;
+  }
+}
+
+bool parseNk4Line(const String& parsed)
+{
+  if (!parsed.startsWith("NK4 ")) {
+    return false;
+  }
+
+  app.controllerConnected = true;
+  app.controllerError = false;
+  lastRxMs = millis();
+  app.lastResponse = parsed;
+
+  bool isEvent = parsed.indexOf(" event=") >= 0;
+  int seq = -1;
+  String seqText = valueForKey(parsed, "seq");
+  if (seqText.length() > 0) {
+    seq = seqText.toInt();
+  }
+
+  bool isOk = parsed.indexOf(" ok") >= 0;
+  bool isErr = parsed.indexOf(" err") >= 0;
+
+  if (nk4Pending && seq >= 0 && seq == pendingNk4.seq) {
+    nk4Pending = false;
+  }
+
+  if (isOk || isEvent) {
+    applyNk4Fields(parsed);
+    if (app.protocolMode == ProtocolMode::Probing) {
+      app.protocolMode = ProtocolMode::Nk4;
+      app.controllerError = false;
+      commandQueue.clear();
+      setStatus("USB NK4 detected", COLOR_OK);
+      sendCommand(NightKiteCommands::refreshAll(), false);
+    } else if (isEvent) {
+      setStatus(shortText(parsed, 34), COLOR_MUTED);
+    } else {
+      setStatus(shortText(parsed, 34), COLOR_OK);
+    }
+  } else if (isErr) {
+    String code = valueForKey(parsed, "code");
+    String msg = valueForKey(parsed, "msg");
+    setStatus(msg.length() > 0 ? msg : nk4FriendlyError(code), code == "unsupported" ? COLOR_WARN : COLOR_ERR);
+    app.controllerError = code != "unsupported";
+  } else {
+    applyNk4Fields(parsed);
+  }
+
+  app.dirty = true;
+  return true;
+}
+
 void parseNightKiteLine(const String& line)
 {
   String parsed = stripCliPrompt(line);
   app.lastResponse = parsed;
 
+  if (parseNk4Line(parsed)) {
+    return;
+  }
+
+  if (app.protocolMode == ProtocolMode::Probing) {
+    return;
+  }
+
   if (parsed.startsWith("OK ")) {
+    if (app.protocolMode == ProtocolMode::Unknown) {
+      app.protocolMode = ProtocolMode::Legacy;
+    }
     app.controllerConnected = true;
     app.controllerError = false;
     lastRxMs = millis();
@@ -1959,11 +2794,17 @@ void parseNightKiteLine(const String& line)
     parsePatternStates(parsed);
     setStatus(shortText(parsed, 34), COLOR_OK);
   } else if (parsed.startsWith("ERR")) {
+    if (app.protocolMode == ProtocolMode::Unknown) {
+      app.protocolMode = ProtocolMode::Legacy;
+    }
     app.controllerConnected = true;
     app.controllerError = true;
     lastRxMs = millis();
     setStatus(shortText(parsed, 34), COLOR_ERR);
   } else if (parsed.startsWith("INFO") || parsed.startsWith("[NightKite CLI]")) {
+    if (app.protocolMode == ProtocolMode::Unknown) {
+      app.protocolMode = ProtocolMode::Legacy;
+    }
     app.controllerConnected = true;
     lastRxMs = millis();
     setStatus(shortText(parsed, 34), COLOR_MUTED);
@@ -2000,25 +2841,89 @@ void updateCardputerBattery(bool force = false)
   app.dirty = true;
 }
 
+void resetControllerSession()
+{
+  app.controllerConnected = false;
+  app.controllerError = false;
+  app.settings.hasControllerBattery = false;
+  app.settings.controllerBatteryPercent = -1;
+  app.settings.controllerBatteryVoltage = NAN;
+  app.protocolMode = ProtocolMode::Unknown;
+  app.transportMode = TransportMode::Usb;
+  app.identity = ControllerIdentity{};
+  app.capabilities = ControllerCapabilities{};
+  app.play = PlayState{};
+  app.sync = SyncState{};
+  app.wireless = WirelessState{};
+  app.diagnostics = DiagnosticsState{};
+  commandQueue.clear();
+  nk4Pending = false;
+  nk4MachineSent = false;
+  nk4HelloSent = false;
+}
+
+void beginNk4Probe()
+{
+  resetControllerSession();
+  app.protocolMode = ProtocolMode::Probing;
+  nk4ProbeStartMs = millis();
+  nk4MachineSentMs = 0;
+  setStatus("USB probing NK4", COLOR_ACCENT);
+}
+
+void fallbackToLegacy()
+{
+  app.protocolMode = ProtocolMode::Legacy;
+  nk4Pending = false;
+  commandQueue.clear();
+  setStatus("USB legacy mode", COLOR_WARN);
+  sendCommand(NightKiteCommands::refreshAll(), false);
+  requestControllerBattery(true);
+}
+
+void pollNk4Probe()
+{
+  if (!app.usbConnected || app.protocolMode != ProtocolMode::Probing) {
+    return;
+  }
+  unsigned long now = millis();
+  if (!nk4MachineSent) {
+    transport.sendLine("protocol machine");
+    nk4MachineSent = true;
+    nk4MachineSentMs = now;
+    return;
+  }
+  if (!nk4HelloSent && now - nk4MachineSentMs >= NK4_MACHINE_DELAY_MS) {
+    pendingNk4 = CommandQueueEntry{};
+    pendingNk4.command = "cmd=hello";
+    pendingNk4.nk4Raw = true;
+    pendingNk4.seq = nextNk4Seq++;
+    pendingNk4.sentAt = now;
+    nk4Pending = true;
+    nk4HelloSent = true;
+    transport.sendLine("NK4 seq=" + String(pendingNk4.seq) +
+                       " cmd=hello client=nightkite-link proto_min=4 proto_max=4");
+    app.lastCommand = "NK4 hello";
+    app.dirty = true;
+    return;
+  }
+  if (nk4HelloSent && now - nk4ProbeStartMs > NK4_PROBE_TIMEOUT_MS) {
+    fallbackToLegacy();
+  }
+}
+
 void pollTransport()
 {
   bool wasUsbConnected = app.usbConnected;
   app.usbConnected = transport.connected();
   if (app.usbConnected != wasUsbConnected) {
     if (!app.usbConnected) {
-      app.controllerConnected = false;
+      resetControllerSession();
       app.controllerError = true;
-      app.settings.hasControllerBattery = false;
-      app.settings.controllerBatteryPercent = -1;
-      app.settings.controllerBatteryVoltage = NAN;
-      commandQueue.clear();
       transferCompleteSoundPending = false;
       setStatus("USB disconnected", COLOR_ERR);
     } else {
-      app.controllerError = false;
-      setStatus("USB connected", COLOR_OK);
-      sendCommand(NightKiteCommands::refreshAll());
-      requestControllerBattery(true);
+      beginNk4Probe();
     }
     app.dirty = true;
   }
@@ -2027,6 +2932,8 @@ void pollTransport()
   while (transport.readLine(line)) {
     parseNightKiteLine(line);
   }
+
+  pollNk4Probe();
 
   if (app.controllerConnected && millis() - lastRxMs > LINK_STALE_MS) {
     app.controllerConnected = false;
@@ -2042,7 +2949,7 @@ void pollTransport()
 
   if (millis() - lastPollMs > 5000) {
     lastPollMs = millis();
-    if (app.usbConnected) {
+    if (app.usbConnected && app.protocolMode != ProtocolMode::Probing) {
       sendCommand(NightKiteCommands::refreshAll());
     }
   }
@@ -2097,7 +3004,28 @@ void changeCard(int delta)
 void refreshCurrentCard()
 {
   requestControllerBattery(true);
-  if (static_cast<Card>(app.selectedCard) == Card::PatternList || static_cast<Card>(app.selectedCard) == Card::PatternBulk) {
+  if (app.protocolMode == ProtocolMode::Nk4) {
+    if (static_cast<Card>(app.selectedCard) == Card::Device || static_cast<Card>(app.selectedCard) == Card::Status) {
+      sendCommand(NightKiteCommands::refreshAll());
+    } else if (static_cast<Card>(app.selectedCard) == Card::Play) {
+      enqueueCommandEntry("cmd=get section=play", true);
+      enqueueCommandEntry("cmd=status", true);
+    } else if (static_cast<Card>(app.selectedCard) == Card::Sync) {
+      enqueueCommandEntry("cmd=get section=sync", true);
+      enqueueCommandEntry("cmd=sync_status", true);
+    } else if (static_cast<Card>(app.selectedCard) == Card::Wireless) {
+      enqueueCommandEntry("cmd=get section=wireless", true);
+      enqueueCommandEntry("cmd=ble_status", true);
+    } else if (static_cast<Card>(app.selectedCard) == Card::PatternList ||
+               static_cast<Card>(app.selectedCard) == Card::PatternBulk) {
+      enqueueCommandEntry("cmd=get section=patterns", true);
+    } else if (static_cast<Card>(app.selectedCard) == Card::Calibration) {
+      enqueueCommandEntry("cmd=timing", true);
+      enqueueCommandEntry("cmd=sensor", true);
+    } else {
+      sendCommand(NightKiteCommands::refreshAll());
+    }
+  } else if (static_cast<Card>(app.selectedCard) == Card::PatternList || static_cast<Card>(app.selectedCard) == Card::PatternBulk) {
     sendCommand(NightKiteCommands::refreshPatterns());
     sendCommand("get inverted_patterns");
   } else if (static_cast<Card>(app.selectedCard) == Card::Profiles) {
@@ -2160,6 +3088,42 @@ void startFirmwareFlash();
 void changeValue(int delta)
 {
   switch (static_cast<Card>(app.selectedCard)) {
+    case Card::Play:
+      if (app.protocolMode != ProtocolMode::Nk4) {
+        setStatus("NK4 required", COLOR_WARN);
+      } else if (app.selectedPlayField == 0) {
+        app.play.playMode = optionWithDelta(PLAY_MODES, PLAY_MODE_COUNT, app.play.playMode, delta);
+      } else if (app.selectedPlayField == 1) {
+        app.play.bootMode = optionWithDelta(BOOT_MODES, BOOT_MODE_COUNT, app.play.bootMode, delta);
+      } else if (app.selectedPlayField == 2) {
+        app.settings.autoplayEnabled = !app.settings.autoplayEnabled;
+      } else {
+        app.settings.autoplayIntervalSeconds =
+            wrappedValue(autoplayIntervalLevels, AUTOPLAY_INTERVAL_LEVEL_COUNT, app.settings.autoplayIntervalSeconds, delta);
+      }
+      break;
+    case Card::Sync:
+      if (app.protocolMode != ProtocolMode::Nk4) {
+        setStatus("NK4 required", COLOR_WARN);
+      } else if (app.selectedSyncField == 0) {
+        app.sync.enabled = !app.sync.enabled;
+      } else if (app.selectedSyncField == 1) {
+        app.sync.group = wrapRange(app.sync.group < 0 ? 1 : app.sync.group, 1, 255, 1, delta);
+      } else if (app.selectedSyncField == 2) {
+        app.sync.role = optionWithDelta(SYNC_ROLES, SYNC_ROLE_COUNT, app.sync.role, delta);
+      } else if (app.selectedSyncField == 5) {
+        app.sync.lossBehavior = optionWithDelta(SYNC_LOSS, SYNC_LOSS_COUNT, app.sync.lossBehavior, delta);
+      }
+      break;
+    case Card::Wireless:
+      if (app.protocolMode != ProtocolMode::Nk4) {
+        setStatus("NK4 required", COLOR_WARN);
+      } else if (app.selectedWirelessField == 0) {
+        app.wireless.enabled = !app.wireless.enabled;
+      } else {
+        app.wireless.profile = optionWithDelta(WIRELESS_PROFILES, WIRELESS_PROFILE_COUNT, app.wireless.profile, delta);
+      }
+      break;
     case Card::Brightness:
       editValue = String(wrappedValue(brightnessLevels, BRIGHTNESS_LEVEL_COUNT, editValue.toInt(), delta));
       app.settings.brightness = editValue.toInt();
@@ -2203,6 +3167,8 @@ void changeValue(int delta)
       app.selectedProfileAction = constrain(app.selectedProfileAction + delta, 0,
                                             max(0, PROFILE_ACTION_COUNT + static_cast<int>(app.profileFiles.size()) - 1));
       break;
+    case Card::Status:
+    case Card::Device:
     default:
       break;
   }
@@ -2213,7 +3179,43 @@ void applyCurrentCard()
 {
   switch (static_cast<Card>(app.selectedCard)) {
     case Card::Status:
+    case Card::Device:
       refreshCurrentCard();
+      break;
+    case Card::Play:
+      if (app.protocolMode != ProtocolMode::Nk4) {
+        setStatus("NK4 required", COLOR_WARN);
+      } else if (app.selectedPlayField == 0) {
+        sendCommand("set play_mode=" + app.play.playMode);
+      } else if (app.selectedPlayField == 1) {
+        sendCommand("set boot_mode=" + app.play.bootMode);
+      } else if (app.selectedPlayField == 2) {
+        sendCommand(String("set autoplay=") + (app.settings.autoplayEnabled ? "1" : "0"));
+      } else {
+        sendCommand("set autoplay_interval=" + String(app.settings.autoplayIntervalSeconds));
+      }
+      break;
+    case Card::Sync:
+      if (app.protocolMode != ProtocolMode::Nk4) {
+        setStatus("NK4 required", COLOR_WARN);
+      } else if (app.selectedSyncField == 0) {
+        sendCommand(String("set sync_enabled=") + (app.sync.enabled ? "1" : "0"));
+      } else if (app.selectedSyncField == 1) {
+        sendCommand("set sync_group=" + String(app.sync.group));
+      } else if (app.selectedSyncField == 2) {
+        sendCommand("set sync_role=" + app.sync.role);
+      } else if (app.selectedSyncField == 5) {
+        sendCommand("set sync_loss_behavior=" + app.sync.lossBehavior);
+      }
+      break;
+    case Card::Wireless:
+      if (app.protocolMode != ProtocolMode::Nk4) {
+        setStatus("NK4 required", COLOR_WARN);
+      } else if (app.selectedWirelessField == 0) {
+        sendCommand(String("set wireless_enabled=") + (app.wireless.enabled ? "1" : "0"));
+      } else {
+        sendCommand("set wireless_profile=" + app.wireless.profile);
+      }
       break;
     case Card::Brightness:
       sendCommand(NightKiteCommands::setBrightness(editValue.toInt()));
@@ -2419,14 +3421,16 @@ void applyPatternDetail()
 {
   ensurePatternModel();
   auto& pattern = app.settings.patterns[app.selectedPatternIndex];
-  if (detailCycle != pattern.cycleEnabled) {
-    sendCommand(NightKiteCommands::setPatternCycle(pattern.id, detailCycle));
-  }
-  if (detailInvert != pattern.inverted) {
-    sendCommand(NightKiteCommands::setPatternInvert(pattern.id, detailInvert));
-  }
+  bool cycleChanged = detailCycle != pattern.cycleEnabled;
+  bool invertChanged = detailInvert != pattern.inverted;
   pattern.cycleEnabled = detailCycle;
   pattern.inverted = detailInvert;
+  if (cycleChanged) {
+    sendCommand(NightKiteCommands::setPatternCycle(pattern.id, detailCycle));
+  }
+  if (invertChanged) {
+    sendCommand(NightKiteCommands::setPatternInvert(pattern.id, detailInvert));
+  }
   setStatus("Pattern update sent", COLOR_OK);
   mode = Mode::Cards;
   app.dirty = true;
@@ -2465,23 +3469,23 @@ void runBulkAction()
       break;
     case 1:
       markTransferCompleteSoundPending();
-      sendCommand(NightKiteCommands::setAllCycle(true));
       applyPatternMasks(ALL_PATTERN_MASK, 0, true, false);
+      sendCommand(NightKiteCommands::setAllCycle(true));
       break;
     case 2:
       markTransferCompleteSoundPending();
-      sendCommand(NightKiteCommands::setAllCycle(false));
       applyPatternMasks(0, 0, true, false);
+      sendCommand(NightKiteCommands::setAllCycle(false));
       break;
     case 3:
       markTransferCompleteSoundPending();
-      sendCommand(NightKiteCommands::setAllInvert(true));
       applyPatternMasks(0, ALL_PATTERN_MASK, false, true);
+      sendCommand(NightKiteCommands::setAllInvert(true));
       break;
     case 4:
       markTransferCompleteSoundPending();
-      sendCommand(NightKiteCommands::setAllInvert(false));
       applyPatternMasks(0, 0, false, true);
+      sendCommand(NightKiteCommands::setAllInvert(false));
       break;
   }
   mode = Mode::Cards;
@@ -2515,6 +3519,29 @@ void handleWordChar(char c)
 
   if ((c == 'c' || c == 'C') && static_cast<Card>(app.selectedCard) == Card::Config) {
     app.selectedConfigField = (app.selectedConfigField + 1) % 6;
+    app.dirty = true;
+    return;
+  }
+  if ((c == 'c' || c == 'C') && static_cast<Card>(app.selectedCard) == Card::Play) {
+    app.selectedPlayField = (app.selectedPlayField + 1) % 4;
+    app.dirty = true;
+    return;
+  }
+  if ((c == 'c' || c == 'C') && static_cast<Card>(app.selectedCard) == Card::Sync) {
+    const int editable[] = {0, 1, 2, 5};
+    int current = 0;
+    for (int i = 0; i < 4; ++i) {
+      if (app.selectedSyncField == editable[i]) {
+        current = i;
+        break;
+      }
+    }
+    app.selectedSyncField = editable[(current + 1) % 4];
+    app.dirty = true;
+    return;
+  }
+  if ((c == 'c' || c == 'C') && static_cast<Card>(app.selectedCard) == Card::Wireless) {
+    app.selectedWirelessField = app.selectedWirelessField == 0 ? 1 : 0;
     app.dirty = true;
     return;
   }

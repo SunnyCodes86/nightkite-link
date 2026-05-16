@@ -3,16 +3,19 @@
 NightKite Link is an open-source handheld configurator and service device for
 [NightKite Multi](https://github.com/SunnyCodes86/nightkite-multi). It runs on an
 M5Stack Cardputer-Adv / StampS3 target and uses USB host communication to talk to
-the existing NightKite USB CLI. The current UI is card-based and optimized for
-the small 240 x 135 px display.
+NightKite Multi controllers. Firmware 4.0 controllers are detected with USB NK4
+first; older Firmware 3.x controllers fall back to the existing USB legacy CLI.
+The current UI is card-based and optimized for the small 240 x 135 px display.
 
 Full English documentation: [docs/README.en.md](docs/README.en.md)
 
 NightKite Link ist ein Open-Source-Handheld zum Konfigurieren und Warten von
 [NightKite Multi](https://github.com/SunnyCodes86/nightkite-multi). Es läuft auf
-einem M5Stack Cardputer-Adv / StampS3 und nutzt USB-Host-Kommunikation zur
-vorhandenen NightKite-USB-CLI. Die aktuelle Oberfläche ist kartenbasiert und auf
-das kleine 240 x 135 px Display ausgelegt.
+einem M5Stack Cardputer-Adv / StampS3 und nutzt USB-Host-Kommunikation zu
+NightKite-Multi-Controllern. Firmware-4.0-Controller werden zuerst per USB-NK4
+erkannt; ältere Firmware-3.x-Controller fallen auf die bestehende USB-Legacy-CLI
+zurück. Die aktuelle Oberfläche ist kartenbasiert und auf das kleine 240 x 135 px
+Display ausgelegt.
 
 Ausführliche deutsche Dokumentation: [docs/README.de.md](docs/README.de.md)
 
@@ -21,6 +24,8 @@ Ausführliche deutsche Dokumentation: [docs/README.de.md](docs/README.de.md)
 - Card-based UI with compact status bar
 - WAV/PCM-style startup and UI key sounds
 - Cardputer battery, USB and controller/CLI status display
+- USB NK4 detection for Firmware 4.0 with legacy CLI fallback for Firmware 3.x
+- Device, play mode, sync and wireless/beacon diagnostic cards
 - Brightness, strip length, active pattern, smoothing and autoplay settings
 - Pattern list with cycle and invert state
 - Pattern detail and bulk actions
@@ -50,9 +55,13 @@ pio device monitor
 ## Current Status
 
 The project is functional but still evolving. The USB CLI configuration workflow
-and card UI are the main operating path. The UF2 Mass Storage flasher is present
-as an experimental service/recovery workflow and expects the controller to be
-manually placed into BOOTSEL/Mass Storage mode.
+and card UI remain the stable operating path. USB NK4 support adds Firmware 4.0
+identity, play mode, sync and wireless configuration without requiring BLE. The
+BLE NK4 firmware transport exists on compatible controllers, but NightKite Link
+does not include a BLE client yet. Link configures sync; it is not a real-time
+sync relay. The UF2 Mass Storage flasher is present as an experimental
+service/recovery workflow and expects the controller to be manually placed into
+BOOTSEL/Mass Storage mode.
 
 ## Links
 
