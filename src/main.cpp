@@ -41,6 +41,7 @@ constexpr unsigned long AUTO_STATUS_POLL_MS = 4000;
 constexpr unsigned long AUTO_REFRESH_IDLE_MS = 1800;
 constexpr unsigned long SYNC_TEST_STATUS_POLL_MS = 1800;
 constexpr unsigned long SYNC_TEST_WIRELESS_POLL_MS = 5000;
+constexpr unsigned long USB_RECONNECT_STABLE_MS = 600;
 constexpr unsigned long NK4_COMMAND_TIMEOUT_MS = 1400;
 constexpr unsigned long NK4_PROBE_TIMEOUT_MS = 1600;
 constexpr unsigned long NK4_MACHINE_DELAY_MS = 120;
@@ -214,6 +215,7 @@ struct CommandQueueEntry {
   bool nk4Raw = false;
   uint16_t seq = 0;
   unsigned long sentAt = 0;
+  uint32_t generation = 0;
 };
 
 enum class Card : uint8_t {
@@ -334,12 +336,15 @@ unsigned long lastControllerBatteryReadMs = 0;
 unsigned long lastUserInputMs = 0;
 unsigned long lastSyncTestStatusPollMs = 0;
 unsigned long lastSyncTestWirelessPollMs = 0;
+unsigned long usbConnectedSinceMs = 0;
 bool lastUsbConnected = false;
+bool usbProbePending = false;
 String rxLine;
 std::vector<CommandQueueEntry> commandQueue;
 bool nk4Pending = false;
 CommandQueueEntry pendingNk4;
 uint16_t nextNk4Seq = 1;
+uint32_t connectionGeneration = 0;
 bool nk4MachineSent = false;
 bool nk4HelloSent = false;
 unsigned long nk4ProbeStartMs = 0;
@@ -433,6 +438,7 @@ public:
   virtual bool connected() = 0;
   virtual void sendLine(const String& line) = 0;
   virtual bool readLine(String& line) = 0;
+  virtual void clearBuffers() {}
 };
 
 class DebugSerialTransport : public NightKiteTransport {
@@ -466,6 +472,14 @@ public:
       }
     }
     return false;
+  }
+
+  void clearBuffers() override
+  {
+    buffer = "";
+    while (Serial.available() > 0) {
+      Serial.read();
+    }
   }
 
 private:
@@ -522,6 +536,15 @@ public:
       }
     }
     return false;
+  }
+
+  void clearBuffers() override
+  {
+    begin();
+    buffer = "";
+    while (hostSerial.available() > 0) {
+      hostSerial.read();
+    }
   }
 
 private:
@@ -595,6 +618,17 @@ const char* protocolToken()
 const char* transportToken()
 {
   return app.transportMode == TransportMode::Ble ? "BLE" : "USB";
+}
+
+String connectionToken()
+{
+  if (!app.usbConnected) {
+    return "NO USB";
+  }
+  if (usbProbePending || app.protocolMode == ProtocolMode::Probing) {
+    return "USB DET";
+  }
+  return String(transportToken()) + " " + protocolToken();
 }
 
 String controllerLabel()
@@ -1040,6 +1074,7 @@ void enqueueCommandEntry(const String& command, bool nk4Raw = false)
   CommandQueueEntry entry;
   entry.command = command;
   entry.nk4Raw = nk4Raw;
+  entry.generation = connectionGeneration;
   commandQueue.push_back(entry);
   app.lastCommand = command;
 }
@@ -1177,6 +1212,8 @@ void playTransferCompleteIfPending(const String& statusText)
   soundManager.playTransferComplete();
 }
 
+void fallbackToLegacy();
+
 void requestControllerBattery(bool force = false)
 {
   unsigned long now = millis();
@@ -1191,11 +1228,15 @@ void requestControllerBattery(bool force = false)
 void pollCommandQueue()
 {
   if (nk4Pending) {
-    if (!app.usbConnected) {
+    if (!app.usbConnected || pendingNk4.generation != connectionGeneration) {
       nk4Pending = false;
     } else if (millis() - pendingNk4.sentAt > NK4_COMMAND_TIMEOUT_MS) {
       String timedOut = pendingNk4.command;
       nk4Pending = false;
+      if (app.protocolMode == ProtocolMode::Probing) {
+        fallbackToLegacy();
+        return;
+      }
       app.controllerError = true;
       setStatus("NK4 timeout", COLOR_ERR);
       Serial.print("NK4 timeout: ");
@@ -1218,11 +1259,16 @@ void pollCommandQueue()
     return;
   }
   if (!app.usbConnected) {
-    setStatus("USB disconnected", COLOR_ERR);
     commandQueue.clear();
     patternSyncInProgress = false;
     transferCompleteSoundPending = false;
     app.dirty = true;
+    return;
+  }
+  while (!commandQueue.empty() && commandQueue.front().generation != connectionGeneration) {
+    commandQueue.erase(commandQueue.begin());
+  }
+  if (commandQueue.empty()) {
     return;
   }
   CommandQueueEntry entry = commandQueue.front();
@@ -1460,7 +1506,7 @@ void drawStatusBar()
   auto& d = uiCanvas;
   d.fillRect(0, 0, SCREEN_W, STATUS_H, COLOR_PANEL_DARK);
   String cp = app.cardputerBatteryPercent >= 0 ? String(app.cardputerBatteryPercent) + "%" : "--";
-  String text = String(transportToken()) + " " + protocolToken();
+  String text = connectionToken();
   String name = app.controllerConnected ? shortText(controllerLabel(), 8) : "--";
   String play = app.protocolMode == ProtocolMode::Nk4 ? playToken() + "/" + roleToken() : "CTRL";
   String nk = "NK:--";
@@ -1584,6 +1630,9 @@ String optionWithDelta(const char* const* options, int count, const String& valu
 void drawPlayCard()
 {
   drawTextFit(String("Play") + (playDirtyMask ? "*" : ""), 8, CONTENT_Y + 5, 70, playDirtyMask ? COLOR_WARN : COLOR_MUTED);
+  String unavailable = !app.usbConnected ? "No controller"
+                       : (usbProbePending || app.protocolMode == ProtocolMode::Probing) ? "Detecting..."
+                                                                                        : "NK4 required";
   String labels[] = {"Mode", "Boot", "Auto", "Interval"};
   String values[] = {
       (playDirtyMask & PLAY_DIRTY_MODE) ? draftPlayMode : app.play.playMode,
@@ -1604,7 +1653,7 @@ void drawPlayCard()
     drawTextFit(values[i], x + 48, y + 6, 55, active ? COLOR_TEXT : COLOR_ACCENT, bg);
   }
   drawFooter(app.protocolMode == ProtocolMode::Nk4 ? (playDirtyMask ? "PEND  ENTER set  DEL cancel" : "C field  W/S edit")
-                                                   : "NK4 required");
+                                                   : unavailable);
 }
 
 const char* const SYNC_ROLES[] = {"standalone", "master", "follower"};
@@ -1615,6 +1664,9 @@ constexpr int SYNC_LOSS_COUNT = sizeof(SYNC_LOSS) / sizeof(SYNC_LOSS[0]);
 void drawSyncCard()
 {
   drawTextFit(String("Sync") + (syncDirtyMask ? "*" : ""), 8, CONTENT_Y + 5, 80, syncDirtyMask ? COLOR_WARN : COLOR_MUTED);
+  String unavailable = !app.usbConnected ? "No controller"
+                       : (usbProbePending || app.protocolMode == ProtocolMode::Probing) ? "Detecting..."
+                                                                                        : "NK4 required";
   String labels[] = {"Enable", "Group", "Role", "State", "Lock", "Loss"};
   String values[] = {((syncDirtyMask & SYNC_DIRTY_ENABLED) ? draftSyncEnabled : app.sync.enabled) ? "ON" : "OFF",
                      showInt((syncDirtyMask & SYNC_DIRTY_GROUP) ? draftSyncGroup : app.sync.group),
@@ -1638,7 +1690,7 @@ void drawSyncCard()
     drawTextFit(values[i], x + 5, y + 18, 60, active ? COLOR_TEXT : COLOR_ACCENT, bg);
   }
   drawFooter(app.protocolMode == ProtocolMode::Nk4 ? (syncDirtyMask ? "PEND  ENTER set  DEL cancel" : "C field  W/S edit")
-                                                   : "NK4 required");
+                                                   : unavailable);
 }
 
 const char* const WIRELESS_PROFILES[] = {"long_range", "balanced", "fast_sync"};
@@ -1707,10 +1759,26 @@ int selectedSyncTestGroup()
   return syncTestGroup >= 1 ? syncTestGroup : 1;
 }
 
-void queueSyncTestRefresh()
+bool requireNk4Controller()
 {
+  if (!app.usbConnected) {
+    setStatus("No controller", COLOR_WARN);
+    return false;
+  }
+  if (usbProbePending || app.protocolMode == ProtocolMode::Probing) {
+    setStatus("Detecting protocol...", COLOR_ACCENT);
+    return false;
+  }
   if (app.protocolMode != ProtocolMode::Nk4) {
     setStatus("Firmware 4.0 / NK4 required", COLOR_WARN);
+    return false;
+  }
+  return true;
+}
+
+void queueSyncTestRefresh()
+{
+  if (!requireNk4Controller()) {
     return;
   }
   enqueueCommandEntry("cmd=get section=sync", true);
@@ -1722,8 +1790,7 @@ void queueSyncTestRefresh()
 
 void queueSyncTestRoleSetup(const char* role, const char* name)
 {
-  if (app.protocolMode != ProtocolMode::Nk4) {
-    setStatus("Firmware 4.0 / NK4 required", COLOR_WARN);
+  if (!requireNk4Controller()) {
     return;
   }
   int group = selectedSyncTestGroup();
@@ -1740,6 +1807,18 @@ void drawSyncTestCard()
   drawTextFit("Sync Test", 8, CONTENT_Y + 4, 88, COLOR_MUTED);
   drawTextFit("G" + String(selectedSyncTestGroup()) + " " + shortText(selectedSyncTestProfile(), 9), 124, CONTENT_Y + 4,
               108, COLOR_ACCENT);
+  if (!app.usbConnected) {
+    drawTextFit("No controller", 12, CONTENT_Y + 34, 160, COLOR_WARN);
+    drawTextFit("Connect USB", 12, CONTENT_Y + 52, 120, COLOR_MUTED);
+    drawFooter("Disconnected");
+    return;
+  }
+  if (usbProbePending || app.protocolMode == ProtocolMode::Probing) {
+    drawTextFit("Detecting...", 12, CONTENT_Y + 34, 150, COLOR_ACCENT);
+    drawTextFit("Please wait", 12, CONTENT_Y + 52, 120, COLOR_MUTED);
+    drawFooter("USB protocol detect");
+    return;
+  }
   if (app.protocolMode != ProtocolMode::Nk4) {
     drawTextFit("Firmware 4.0 / NK4", 12, CONTENT_Y + 34, 180, COLOR_WARN);
     drawTextFit("required", 12, CONTENT_Y + 52, 120, COLOR_WARN);
@@ -1792,6 +1871,9 @@ void drawWirelessCard()
 {
   drawTextFit(String("Wireless") + (wirelessDirtyMask ? "*" : ""), 8, CONTENT_Y + 5, 90,
               wirelessDirtyMask ? COLOR_WARN : COLOR_MUTED);
+  String unavailable = !app.usbConnected ? "No controller"
+                       : (usbProbePending || app.protocolMode == ProtocolMode::Probing) ? "Detecting..."
+                                                                                        : "NK4 required";
   String labels[] = {"Enable", "Profile", "Radio", "TX", "RX", "CRC"};
   String values[] = {((wirelessDirtyMask & WIRELESS_DIRTY_ENABLED) ? draftWirelessEnabled : app.wireless.enabled) ? "ON" : "OFF",
                      (wirelessDirtyMask & WIRELESS_DIRTY_PROFILE) ? draftWirelessProfile : app.wireless.profile, app.sync.radioMode,
@@ -1812,7 +1894,7 @@ void drawWirelessCard()
               CONTENT_Y + 82, 218, COLOR_TEXT);
   drawFooter(app.protocolMode == ProtocolMode::Nk4
                  ? (wirelessDirtyMask ? "PEND  ENTER set  DEL cancel" : "C field  W/S edit")
-                 : "NK4 required");
+                 : unavailable);
 }
 
 void drawValueCard(const String& title, const String& value, const String& sub, const String& help)
@@ -3133,11 +3215,6 @@ bool parseNk4Line(const String& parsed)
     return false;
   }
 
-  app.controllerConnected = true;
-  app.controllerError = false;
-  lastRxMs = millis();
-  app.lastResponse = parsed;
-
   bool isEvent = parsed.indexOf(" event=") >= 0;
   int seq = -1;
   String seqText = valueForKey(parsed, "seq");
@@ -3153,6 +3230,17 @@ bool parseNk4Line(const String& parsed)
     matchedCommand = pendingNk4.command;
     nk4Pending = false;
   }
+
+  if (seq >= 0 && !isEvent && matchedCommand.length() == 0) {
+    Serial.print("Ignoring stale NK4 response: ");
+    Serial.println(parsed);
+    return true;
+  }
+
+  app.controllerConnected = true;
+  app.controllerError = false;
+  lastRxMs = millis();
+  app.lastResponse = parsed;
 
   if (isOk || isEvent) {
     if (matchedCommand.length() > 0) {
@@ -3290,6 +3378,9 @@ void updateCardputerBattery(bool force = false)
 
 void resetControllerSession()
 {
+  ++connectionGeneration;
+  transport.clearBuffers();
+  rxLine = "";
   app.controllerConnected = false;
   app.controllerError = false;
   app.settings.hasControllerBattery = false;
@@ -3312,8 +3403,17 @@ void resetControllerSession()
   app.patternEditsPending = false;
   commandQueue.clear();
   nk4Pending = false;
+  pendingNk4 = CommandQueueEntry{};
   nk4MachineSent = false;
   nk4HelloSent = false;
+  patternSyncInProgress = false;
+  transferCompleteSoundPending = false;
+  app.lastCommand = "";
+  app.lastResponse = "";
+  lastCommandSendMs = 0;
+  lastPollMs = millis();
+  lastRxMs = millis();
+  lastControllerBatteryReadMs = 0;
   lastSyncTestStatusPollMs = 0;
   lastSyncTestWirelessPollMs = 0;
 }
@@ -3322,9 +3422,10 @@ void beginNk4Probe()
 {
   resetControllerSession();
   app.protocolMode = ProtocolMode::Probing;
+  usbProbePending = false;
   nk4ProbeStartMs = millis();
   nk4MachineSentMs = 0;
-  setStatus("USB probing NK4", COLOR_ACCENT);
+  setStatus("Detecting protocol...", COLOR_ACCENT);
 }
 
 void fallbackToLegacy()
@@ -3355,6 +3456,7 @@ void pollNk4Probe()
     pendingNk4.nk4Raw = true;
     pendingNk4.seq = nextNk4Seq++;
     pendingNk4.sentAt = now;
+    pendingNk4.generation = connectionGeneration;
     nk4Pending = true;
     nk4HelloSent = true;
     transport.sendLine("NK4 seq=" + String(pendingNk4.seq) +
@@ -3375,13 +3477,24 @@ void pollTransport()
   if (app.usbConnected != wasUsbConnected) {
     if (!app.usbConnected) {
       resetControllerSession();
-      app.controllerError = true;
+      usbProbePending = false;
       transferCompleteSoundPending = false;
-      setStatus("USB disconnected", COLOR_ERR);
+      setStatus("Disconnected", COLOR_WARN);
     } else {
-      beginNk4Probe();
+      resetControllerSession();
+      usbProbePending = true;
+      usbConnectedSinceMs = millis();
+      setStatus("Connecting...", COLOR_ACCENT);
     }
     app.dirty = true;
+  }
+
+  if (app.usbConnected && usbProbePending) {
+    if (millis() - usbConnectedSinceMs < USB_RECONNECT_STABLE_MS) {
+      transport.clearBuffers();
+      return;
+    }
+    beginNk4Probe();
   }
 
   String line;
@@ -3392,11 +3505,16 @@ void pollTransport()
   pollNk4Probe();
 
   if (app.controllerConnected && millis() - lastRxMs > LINK_STALE_MS) {
-    app.controllerConnected = false;
-    app.controllerError = true;
-    app.settings.hasControllerBattery = false;
-    setStatus("Controller timeout", COLOR_ERR);
+    resetControllerSession();
+    if (app.usbConnected) {
+      usbProbePending = true;
+      usbConnectedSinceMs = millis();
+      setStatus("Reconnecting...", COLOR_WARN);
+    } else {
+      setStatus("Disconnected", COLOR_WARN);
+    }
     app.dirty = true;
+    return;
   }
 
   if (app.usbConnected && app.controllerConnected) {
@@ -3788,8 +3906,8 @@ void applyCurrentCard()
       refreshCurrentCard();
       break;
     case Card::Play:
-      if (app.protocolMode != ProtocolMode::Nk4) {
-        setStatus("NK4 required", COLOR_WARN);
+      if (!requireNk4Controller()) {
+        break;
       } else if (playDirtyMask == 0) {
         setStatus("No edit pending", COLOR_MUTED);
       } else {
@@ -3808,8 +3926,8 @@ void applyCurrentCard()
       }
       break;
     case Card::Sync:
-      if (app.protocolMode != ProtocolMode::Nk4) {
-        setStatus("NK4 required", COLOR_WARN);
+      if (!requireNk4Controller()) {
+        break;
       } else if (syncDirtyMask == 0) {
         setStatus("No edit pending", COLOR_MUTED);
       } else {
@@ -3828,8 +3946,8 @@ void applyCurrentCard()
       }
       break;
     case Card::Wireless:
-      if (app.protocolMode != ProtocolMode::Nk4) {
-        setStatus("NK4 required", COLOR_WARN);
+      if (!requireNk4Controller()) {
+        break;
       } else if (wirelessDirtyMask == 0) {
         setStatus("No edit pending", COLOR_MUTED);
       } else {
@@ -3842,8 +3960,14 @@ void applyCurrentCard()
       }
       break;
     case Card::SyncTest:
-      if (app.protocolMode != ProtocolMode::Nk4) {
-        setStatus("Firmware 4.0 / NK4 required", COLOR_WARN);
+      if (app.selectedSyncTestAction == 4) {
+        syncTestGroup = wrapRange(selectedSyncTestGroup(), 1, 4, 1, 1);
+        setStatus("Sync group " + String(syncTestGroup), COLOR_ACCENT);
+      } else if (app.selectedSyncTestAction == 5) {
+        syncTestProfile = optionWithDelta(WIRELESS_PROFILES, WIRELESS_PROFILE_COUNT, selectedSyncTestProfile(), 1);
+        setStatus("Wireless " + syncTestProfile, COLOR_ACCENT);
+      } else if (!requireNk4Controller()) {
+        break;
       } else if (app.selectedSyncTestAction == 0) {
         queueSyncTestRoleSetup("master", "NK-Master");
       } else if (app.selectedSyncTestAction == 1) {
@@ -3853,12 +3977,6 @@ void applyCurrentCard()
         setStatus("Save queued", COLOR_ACCENT);
       } else if (app.selectedSyncTestAction == 3) {
         queueSyncTestRefresh();
-      } else if (app.selectedSyncTestAction == 4) {
-        syncTestGroup = wrapRange(selectedSyncTestGroup(), 1, 4, 1, 1);
-        setStatus("Sync group " + String(syncTestGroup), COLOR_ACCENT);
-      } else if (app.selectedSyncTestAction == 5) {
-        syncTestProfile = optionWithDelta(WIRELESS_PROFILES, WIRELESS_PROFILE_COUNT, selectedSyncTestProfile(), 1);
-        setStatus("Wireless " + syncTestProfile, COLOR_ACCENT);
       } else if (app.selectedSyncTestAction == 6) {
         sendCommand("set name=NK-Master");
         setStatus("Name Master sent", COLOR_ACCENT);
