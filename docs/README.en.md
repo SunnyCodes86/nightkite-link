@@ -31,6 +31,7 @@ Implemented or present in the current code:
 - Autoplay enabled state and autoplay interval configuration
 - Pattern list with cycle and invert state
 - Pattern detail configuration with cycle and invert toggles
+- Sync Test card for preparing Firmware 4.0 master/follower beacon tests
 - Bulk pattern actions:
   - save all current pattern states
   - enable all patterns for cycle
@@ -324,6 +325,65 @@ Bulk invert currently maps to comma-separated `invert_pattern` /
 `normal_pattern` commands. A code comment marks a future dedicated
 `set all_patterns_invert` style command as a TODO if the controller firmware
 adds one later.
+
+## Two-Controller Sync Test
+
+For Firmware 4.0 USB NK4 controllers, the Sync Test card provides a compact
+setup and diagnostic workflow for the first master/follower beacon tests. It is
+only a configurator and USB diagnostic view; it is not a BLE client and does not
+relay real-time sync traffic.
+
+Typical master setup:
+
+1. Connect controller A over USB and confirm `USB NK4`.
+2. Open Sync Test.
+3. Select the group, usually `Group 1`, and wireless profile, usually
+   `balanced`.
+4. Run `Configure Master`.
+5. Run `Save`.
+
+`Configure Master` queues:
+
+- `set name=NK-Master`
+- `set play_mode=sync`
+- `set sync_enabled=1 sync_group=<group> sync_role=master`
+- `set wireless_enabled=1 wireless_profile=<profile>`
+
+Typical follower setup:
+
+1. Connect controller B over USB and confirm `USB NK4`.
+2. Open Sync Test.
+3. Use the same group and wireless profile as the master.
+4. Run `Configure Follower`.
+5. Run `Save`.
+
+`Configure Follower` queues:
+
+- `set name=NK-Follower`
+- `set play_mode=sync`
+- `set sync_enabled=1 sync_group=<group> sync_role=follower`
+- `set wireless_enabled=1 wireless_profile=<profile>`
+
+`Refresh Sync` queues `get section=sync`, `sync_status`, `get section=wireless`
+and `status`. While the Sync Test card is open, Link polls `sync_status` about
+every 1.8 seconds and `get section=wireless` about every 5 seconds, but the
+existing dirty/draft protection still prevents active edits from being
+overwritten.
+
+Diagnostic fields are intentionally short for the Cardputer display:
+
+- `radio_mode`: expected `beacon_master` on the master or `beacon_follower` on
+  the follower when beacon sync is active.
+- `beacon_tx_count`: transmitted beacon count; should rise on the master.
+- `beacon_rx_count`: received beacon count; should rise on the follower.
+- `beacon_crc_errors`: malformed beacon count; should stay low.
+- `beacon_group_mismatch`: beacons ignored because the group differs.
+- `beacon_age_ms`: age of the last received beacon, shown as `A...`.
+
+If `radio_mode=gatt` is shown, a BLE GATT client is connected to the controller
+and beacon sync is not active. Disconnect the BLE client before judging the
+beacon test. Keeping USB connected to NightKite Link for configuration and
+diagnostics is fine.
 
 ## Firmware Flasher
 

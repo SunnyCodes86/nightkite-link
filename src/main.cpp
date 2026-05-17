@@ -39,6 +39,8 @@ constexpr unsigned long LINK_STALE_MS = 9000;
 constexpr unsigned long COMMAND_SEND_INTERVAL_MS = 160;
 constexpr unsigned long AUTO_STATUS_POLL_MS = 4000;
 constexpr unsigned long AUTO_REFRESH_IDLE_MS = 1800;
+constexpr unsigned long SYNC_TEST_STATUS_POLL_MS = 1800;
+constexpr unsigned long SYNC_TEST_WIRELESS_POLL_MS = 5000;
 constexpr unsigned long NK4_COMMAND_TIMEOUT_MS = 1400;
 constexpr unsigned long NK4_PROBE_TIMEOUT_MS = 1600;
 constexpr unsigned long NK4_MACHINE_DELAY_MS = 120;
@@ -220,6 +222,7 @@ enum class Card : uint8_t {
   Play,
   Sync,
   Wireless,
+  SyncTest,
   Brightness,
   Config,
   Calibration,
@@ -230,7 +233,7 @@ enum class Card : uint8_t {
   Profiles,
 };
 
-constexpr int CARD_COUNT = 13;
+constexpr int CARD_COUNT = 14;
 
 enum class Mode : uint8_t {
   Cards,
@@ -305,6 +308,7 @@ struct AppState {
   int selectedPlayField = 0;
   int selectedSyncField = 0;
   int selectedWirelessField = 0;
+  int selectedSyncTestAction = 0;
   int selectedCalAction = 0;
   int selectedBulkAction = 0;
   int selectedFirmwareTarget = 0;
@@ -328,6 +332,8 @@ unsigned long lastRxMs = 0;
 unsigned long lastCommandSendMs = 0;
 unsigned long lastControllerBatteryReadMs = 0;
 unsigned long lastUserInputMs = 0;
+unsigned long lastSyncTestStatusPollMs = 0;
+unsigned long lastSyncTestWirelessPollMs = 0;
 bool lastUsbConnected = false;
 String rxLine;
 std::vector<CommandQueueEntry> commandQueue;
@@ -370,6 +376,8 @@ String draftSyncRole = "unknown";
 String draftSyncLossBehavior = "unknown";
 bool draftWirelessEnabled = false;
 String draftWirelessProfile = "unknown";
+int syncTestGroup = 1;
+String syncTestProfile = "balanced";
 uint8_t configDirtyMask = 0;
 uint8_t playDirtyMask = 0;
 uint8_t syncDirtyMask = 0;
@@ -1075,6 +1083,9 @@ void enqueueNk4RefreshForSet(const String& command)
     enqueueCommandEntry("cmd=sync_status", true);
   } else if (command.indexOf("wireless_enabled=") >= 0 || command.indexOf("wireless_profile=") >= 0) {
     enqueueCommandEntry("cmd=get section=wireless", true);
+  } else if (command.indexOf("name=") >= 0) {
+    enqueueCommandEntry("cmd=info", true);
+    enqueueCommandEntry("cmd=status", true);
   } else if (command.indexOf("enabled_mask=") >= 0 || command.indexOf("inverted_mask=") >= 0) {
     enqueueCommandEntry("cmd=get section=patterns", true);
   } else if (command.indexOf("pattern=") >= 0) {
@@ -1090,6 +1101,10 @@ void enqueueNk4RefreshForSet(const String& command)
 
 void handleNk4CommandOk(const String& command)
 {
+  if (command == "cmd=save") {
+    setStatus("Saved", COLOR_OK);
+    return;
+  }
   if (!command.startsWith("cmd=set ")) {
     return;
   }
@@ -1629,6 +1644,136 @@ void drawSyncCard()
 const char* const WIRELESS_PROFILES[] = {"long_range", "balanced", "fast_sync"};
 constexpr int WIRELESS_PROFILE_COUNT = sizeof(WIRELESS_PROFILES) / sizeof(WIRELESS_PROFILES[0]);
 
+const char* const SYNC_TEST_ACTIONS[] = {"Configure Master", "Configure Follower", "Save", "Refresh Sync",
+                                         "Group", "Profile", "Name Master", "Name Follower", "Play SYNC"};
+constexpr int SYNC_TEST_ACTION_COUNT = sizeof(SYNC_TEST_ACTIONS) / sizeof(SYNC_TEST_ACTIONS[0]);
+
+String boolShort(bool value)
+{
+  return value ? "ON" : "OFF";
+}
+
+String lockedText()
+{
+  return app.sync.locked ? "LOCK" : "--";
+}
+
+String beaconStateText()
+{
+  return String(app.sync.beaconTx ? "T" : "-") + String(app.sync.beaconRx ? "R" : "-");
+}
+
+String beaconAgeText()
+{
+  return app.sync.beaconAgeMs >= 0 ? String(app.sync.beaconAgeMs) : "--";
+}
+
+String wirelessProfileText()
+{
+  return app.wireless.profile == "unknown" ? "--" : shortText(app.wireless.profile, 5);
+}
+
+String wifiStateText()
+{
+  return app.wireless.wifi == "unknown" ? "Wi--" : "Wi" + shortText(app.wireless.wifi, 4);
+}
+
+String selectedSyncTestProfile()
+{
+  if (syncTestProfile == "unknown" || syncTestProfile.length() == 0) {
+    return "balanced";
+  }
+  return syncTestProfile;
+}
+
+int selectedSyncTestGroup()
+{
+  return syncTestGroup >= 1 ? syncTestGroup : 1;
+}
+
+void queueSyncTestRefresh()
+{
+  if (app.protocolMode != ProtocolMode::Nk4) {
+    setStatus("Firmware 4.0 / NK4 required", COLOR_WARN);
+    return;
+  }
+  enqueueCommandEntry("cmd=get section=sync", true);
+  enqueueCommandEntry("cmd=sync_status", true);
+  enqueueCommandEntry("cmd=get section=wireless", true);
+  enqueueCommandEntry("cmd=status", true);
+  setStatus("Sync refresh queued", COLOR_ACCENT);
+}
+
+void queueSyncTestRoleSetup(const char* role, const char* name)
+{
+  if (app.protocolMode != ProtocolMode::Nk4) {
+    setStatus("Firmware 4.0 / NK4 required", COLOR_WARN);
+    return;
+  }
+  int group = selectedSyncTestGroup();
+  String profile = selectedSyncTestProfile();
+  sendCommand(String("set name=") + name);
+  sendCommand("set play_mode=sync");
+  sendCommand(String("set sync_enabled=1 sync_group=") + group + " sync_role=" + role);
+  sendCommand("set wireless_enabled=1 wireless_profile=" + profile);
+  setStatus(String(role[0] == 'm' ? "Master" : "Follower") + " setup sent", COLOR_ACCENT);
+}
+
+void drawSyncTestCard()
+{
+  drawTextFit("Sync Test", 8, CONTENT_Y + 4, 88, COLOR_MUTED);
+  drawTextFit("G" + String(selectedSyncTestGroup()) + " " + shortText(selectedSyncTestProfile(), 9), 124, CONTENT_Y + 4,
+              108, COLOR_ACCENT);
+  if (app.protocolMode != ProtocolMode::Nk4) {
+    drawTextFit("Firmware 4.0 / NK4", 12, CONTENT_Y + 34, 180, COLOR_WARN);
+    drawTextFit("required", 12, CONTENT_Y + 52, 120, COLOR_WARN);
+    drawFooter("USB NK4 required");
+    return;
+  }
+
+  int visible = 4;
+  int start = 0;
+  if (app.selectedSyncTestAction >= visible) {
+    start = app.selectedSyncTestAction - visible + 1;
+  }
+  for (int row = 0; row < visible && start + row < SYNC_TEST_ACTION_COUNT; ++row) {
+    int idx = start + row;
+    int y = CONTENT_Y + 18 + row * 18;
+    bool active = idx == app.selectedSyncTestAction;
+    uint16_t bg = active ? COLOR_ACCENT_DARK : COLOR_PANEL_DARK;
+    uiCanvas.fillRoundRect(6, y, 112, 16, 2, bg);
+    String label = SYNC_TEST_ACTIONS[idx];
+    if (idx == 4) {
+      label += " " + String(selectedSyncTestGroup());
+    } else if (idx == 5) {
+      label += " " + shortText(selectedSyncTestProfile(), 8);
+    }
+    drawTextFit(String(active ? "> " : "  ") + label, 10, y + 5, 104, active ? COLOR_TEXT : COLOR_MUTED, bg);
+  }
+
+  drawTextFit(shortText(controllerLabel(), 12) + " " + shortText(app.identity.shortId, 7), 124, CONTENT_Y + 18, 108,
+              COLOR_TEXT);
+  drawTextFit("Play " + playToken() + " " + roleToken() + " G" + showInt(app.sync.group), 124, CONTENT_Y + 32, 108,
+              COLOR_ACCENT);
+  drawTextFit("Sync " + boolShort(app.sync.enabled) + " " + shortText(app.sync.state, 8) + " " + lockedText(), 124,
+              CONTENT_Y + 46, 108, app.sync.locked ? COLOR_OK : COLOR_MUTED);
+  drawTextFit("Radio " + shortText(app.sync.radioMode, 12), 124, CONTENT_Y + 62, 108,
+              app.sync.radioMode == "gatt" ? COLOR_WARN : COLOR_TEXT);
+  drawTextFit("B " + beaconStateText() + " T" + String(app.sync.beaconTxCount) + " R" + String(app.sync.beaconRxCount),
+              124, CONTENT_Y + 76, 108, COLOR_TEXT);
+  drawTextFit("E " + String(app.sync.beaconCrcErrors) + "/" + String(app.sync.beaconGroupMismatch) + " A" +
+                  beaconAgeText(),
+              124, CONTENT_Y + 90, 108, (app.sync.beaconCrcErrors || app.sync.beaconGroupMismatch) ? COLOR_WARN : COLOR_MUTED);
+  drawTextFit("W " + boolShort(app.wireless.enabled) + " " + wirelessProfileText() + " " + wifiStateText(), 124,
+              CONTENT_Y + 104, 108, app.wireless.bleGatt ? COLOR_WARN : COLOR_MUTED);
+
+  String hint = app.sync.radioMode == "gatt" ? "GATT active - beacon off"
+                : app.sync.role == "master" ? "Master: no BLE client"
+                : app.sync.role == "follower" ? "Follower: expect RX"
+                                              : "USB config only";
+  drawFooter(hint);
+}
+
 void drawWirelessCard()
 {
   drawTextFit(String("Wireless") + (wirelessDirtyMask ? "*" : ""), 8, CONTENT_Y + 5, 90,
@@ -2166,6 +2311,9 @@ void render()
         break;
       case Card::Wireless:
         drawWirelessCard();
+        break;
+      case Card::SyncTest:
+        drawSyncTestCard();
         break;
       case Card::Brightness:
         drawBrightnessCard();
@@ -3003,6 +3151,8 @@ bool parseNk4Line(const String& parsed)
       commandQueue.clear();
       setStatus("USB NK4 detected", COLOR_OK);
       sendCommand(NightKiteCommands::refreshAll(), false);
+    } else if (matchedCommand == "cmd=save") {
+      setStatus("Saved", COLOR_OK);
     } else if (isEvent) {
       setStatus(shortText(parsed, 34), COLOR_MUTED);
     } else {
@@ -3150,6 +3300,8 @@ void resetControllerSession()
   nk4Pending = false;
   nk4MachineSent = false;
   nk4HelloSent = false;
+  lastSyncTestStatusPollMs = 0;
+  lastSyncTestWirelessPollMs = 0;
 }
 
 void beginNk4Probe()
@@ -3235,6 +3387,19 @@ void pollTransport()
 
   if (app.usbConnected && app.controllerConnected) {
     requestControllerBattery();
+  }
+
+  if (app.usbConnected && app.protocolMode == ProtocolMode::Nk4 && static_cast<Card>(app.selectedCard) == Card::SyncTest &&
+      !autoRefreshPaused()) {
+    unsigned long now = millis();
+    if (now - lastSyncTestStatusPollMs > SYNC_TEST_STATUS_POLL_MS) {
+      lastSyncTestStatusPollMs = now;
+      enqueueCommandEntry("cmd=sync_status", true);
+    }
+    if (now - lastSyncTestWirelessPollMs > SYNC_TEST_WIRELESS_POLL_MS) {
+      lastSyncTestWirelessPollMs = now;
+      enqueueCommandEntry("cmd=get section=wireless", true);
+    }
   }
 
   if (millis() - lastPollMs > AUTO_STATUS_POLL_MS) {
@@ -3367,6 +3532,8 @@ void refreshCurrentCard()
     } else if (static_cast<Card>(app.selectedCard) == Card::Wireless) {
       enqueueCommandEntry("cmd=get section=wireless", true);
       enqueueCommandEntry("cmd=ble_status", true);
+    } else if (static_cast<Card>(app.selectedCard) == Card::SyncTest) {
+      queueSyncTestRefresh();
     } else if (static_cast<Card>(app.selectedCard) == Card::PatternList ||
                static_cast<Card>(app.selectedCard) == Card::PatternBulk) {
       enqueueCommandEntry("cmd=get section=patterns", true);
@@ -3515,6 +3682,9 @@ void changeValue(int delta)
         wirelessDirtyMask |= WIRELESS_DIRTY_PROFILE;
       }
       break;
+    case Card::SyncTest:
+      app.selectedSyncTestAction = constrain(app.selectedSyncTestAction + delta, 0, SYNC_TEST_ACTION_COUNT - 1);
+      break;
     case Card::Brightness:
       if (!brightnessDirty) {
         draftBrightness = app.settings.brightness;
@@ -3655,6 +3825,35 @@ void applyCurrentCard()
         if (wirelessDirtyMask & WIRELESS_DIRTY_PROFILE) {
           sendCommand("set wireless_profile=" + draftWirelessProfile);
         }
+      }
+      break;
+    case Card::SyncTest:
+      if (app.protocolMode != ProtocolMode::Nk4) {
+        setStatus("Firmware 4.0 / NK4 required", COLOR_WARN);
+      } else if (app.selectedSyncTestAction == 0) {
+        queueSyncTestRoleSetup("master", "NK-Master");
+      } else if (app.selectedSyncTestAction == 1) {
+        queueSyncTestRoleSetup("follower", "NK-Follower");
+      } else if (app.selectedSyncTestAction == 2) {
+        sendCommand("save");
+        setStatus("Save queued", COLOR_ACCENT);
+      } else if (app.selectedSyncTestAction == 3) {
+        queueSyncTestRefresh();
+      } else if (app.selectedSyncTestAction == 4) {
+        syncTestGroup = wrapRange(selectedSyncTestGroup(), 1, 4, 1, 1);
+        setStatus("Sync group " + String(syncTestGroup), COLOR_ACCENT);
+      } else if (app.selectedSyncTestAction == 5) {
+        syncTestProfile = optionWithDelta(WIRELESS_PROFILES, WIRELESS_PROFILE_COUNT, selectedSyncTestProfile(), 1);
+        setStatus("Wireless " + syncTestProfile, COLOR_ACCENT);
+      } else if (app.selectedSyncTestAction == 6) {
+        sendCommand("set name=NK-Master");
+        setStatus("Name Master sent", COLOR_ACCENT);
+      } else if (app.selectedSyncTestAction == 7) {
+        sendCommand("set name=NK-Follower");
+        setStatus("Name Follower sent", COLOR_ACCENT);
+      } else if (app.selectedSyncTestAction == 8) {
+        sendCommand("set play_mode=sync");
+        setStatus("Play SYNC sent", COLOR_ACCENT);
       }
       break;
     case Card::Brightness:

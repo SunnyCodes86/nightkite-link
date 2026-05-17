@@ -26,6 +26,7 @@ Ausführliche deutsche Dokumentation: [docs/README.de.md](docs/README.de.md)
 - Cardputer battery, USB and controller/CLI status display
 - USB NK4 detection for Firmware 4.0 with legacy CLI fallback for Firmware 3.x
 - Device, play mode, sync and wireless/beacon diagnostic cards
+- Sync Test card for preparing master/follower two-controller beacon tests
 - Brightness, strip length, active pattern, smoothing and autoplay settings
 - Pattern list with cycle and invert state
 - Pattern detail and bulk actions
@@ -62,6 +63,12 @@ does not include a BLE client yet. Link configures sync; it is not a real-time
 sync relay. The UF2 Mass Storage flasher is present as an experimental
 service/recovery workflow and expects the controller to be manually placed into
 BOOTSEL/Mass Storage mode.
+
+For Firmware 4.0 sync bring-up, the Sync Test card can configure the connected
+USB NK4 controller as `NK-Master` or `NK-Follower`, set play mode `sync`, enable
+sync and wireless, choose group 1-4 and select `long_range`, `balanced` or
+`fast_sync`. Save is a separate visible action. Beacon diagnostics are shown for
+USB inspection only; Link does not relay real-time sync traffic.
 
 ## Links
 

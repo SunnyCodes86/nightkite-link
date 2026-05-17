@@ -33,6 +33,7 @@ Im aktuellen Code vorhanden:
 - Autoplay-Status und Autoplay-Intervall konfigurieren
 - Pattern-Liste mit Cycle- und Invert-Status
 - Pattern-Detailansicht mit Cycle- und Invert-Toggles
+- Sync-Test-Card zum Vorbereiten von Firmware-4.0-Master/Follower-Beacon-Tests
 - Bulk-Aktionen für Patterns:
   - aktuelle Pattern-Zustände speichern
   - alle Patterns für Cycle aktivieren
@@ -335,6 +336,66 @@ Bulk-Invert wird aktuell über kommaseparierte `invert_pattern`- bzw.
 `normal_pattern`-Befehle umgesetzt. Im Code ist ein zukünftiger dedizierter
 Befehl im Stil von `set all_patterns_invert` als TODO markiert, falls die
 Controller-Firmware so etwas später anbietet.
+
+## Zwei-Controller-Sync-Test
+
+Für Firmware-4.0-Controller mit USB NK4 bietet die Sync-Test-Card einen
+kompakten Setup- und Diagnoseablauf für die ersten Master/Follower-Beacon-Tests.
+Sie ist nur Konfigurator und USB-Diagnoseansicht. Sie ist kein BLE-Client und
+leitet keinen Echtzeit-Sync weiter.
+
+Typischer Master-Ablauf:
+
+1. Controller A per USB verbinden und `USB NK4` prüfen.
+2. Sync Test öffnen.
+3. Gruppe wählen, meist `Group 1`, und Wireless-Profil wählen, meist
+   `balanced`.
+4. `Configure Master` ausführen.
+5. `Save` ausführen.
+
+`Configure Master` stellt folgende Befehle in die Queue:
+
+- `set name=NK-Master`
+- `set play_mode=sync`
+- `set sync_enabled=1 sync_group=<group> sync_role=master`
+- `set wireless_enabled=1 wireless_profile=<profile>`
+
+Typischer Follower-Ablauf:
+
+1. Controller B per USB verbinden und `USB NK4` prüfen.
+2. Sync Test öffnen.
+3. Dieselbe Gruppe und dasselbe Wireless-Profil wie beim Master wählen.
+4. `Configure Follower` ausführen.
+5. `Save` ausführen.
+
+`Configure Follower` stellt folgende Befehle in die Queue:
+
+- `set name=NK-Follower`
+- `set play_mode=sync`
+- `set sync_enabled=1 sync_group=<group> sync_role=follower`
+- `set wireless_enabled=1 wireless_profile=<profile>`
+
+`Refresh Sync` fragt `get section=sync`, `sync_status`,
+`get section=wireless` und `status` ab. Solange die Sync-Test-Card geöffnet ist,
+pollt Link `sync_status` ungefähr alle 1,8 Sekunden und
+`get section=wireless` ungefähr alle 5 Sekunden. Die bestehende
+Dirty-/Draft-Logik verhindert weiterhin, dass aktive Eingaben überschrieben
+werden.
+
+Die Diagnosefelder sind für das Cardputer-Display bewusst kurz:
+
+- `radio_mode`: erwartet `beacon_master` beim Master oder `beacon_follower` beim
+  Follower, wenn Beacon-Sync aktiv ist.
+- `beacon_tx_count`: gesendete Beacons; sollte beim Master steigen.
+- `beacon_rx_count`: empfangene Beacons; sollte beim Follower steigen.
+- `beacon_crc_errors`: fehlerhafte Beacons; sollte niedrig bleiben.
+- `beacon_group_mismatch`: ignorierte Beacons mit anderer Gruppe.
+- `beacon_age_ms`: Alter des letzten empfangenen Beacons, in der UI als `A...`.
+
+Wenn `radio_mode=gatt` erscheint, ist ein BLE-GATT-Client mit dem Controller
+verbunden und Beacon-Sync ist nicht aktiv. Den BLE-Client vor der Bewertung des
+Beacon-Tests trennen. USB an NightKite Link darf für Konfiguration und Diagnose
+verbunden bleiben.
 
 ## Firmware-Flasher
 
