@@ -403,6 +403,33 @@ and beacon sync is not active. Disconnect the BLE client before judging the
 beacon test. Keeping USB connected to NightKite Link for configuration and
 diagnostics is fine.
 
+## Save And Factory Reset
+
+Live changes such as brightness or active pattern are sent to the controller
+immediately, but they are only persistent after `save`. On the Device card,
+`S save` is the explicit persistence action.
+
+`C reset USB` only resets Link's USB/protocol session. It is not a controller
+factory reset.
+
+`F defaults` opens a confirmation for controller factory defaults. After
+confirmation, Link sends in USB NK4 mode:
+
+- `defaults confirm=1`
+- `save`
+- `info`, `status`, `get section=config`, `get section=play`,
+  `get section=sync`, `get section=wireless`, `get section=patterns`
+
+Persistent Firmware 4.0 fields are: device name, brightness, active pattern,
+strip length, smoothing, accel/gyro range, boot calibration, autoplay on/off,
+autoplay interval, play mode, boot mode, enabled/inverted masks, sync enabled,
+sync group, sync role, sync master UID, sync loss behavior, wireless enabled and
+wireless profile.
+
+Runtime diagnostics such as PatternClock phase, beacon counters/age, lock state,
+apply counts, apply reason, pattern latency, battery status and connection state
+are not persistent settings.
+
 ## Firmware Flasher
 
 The firmware flasher works with UF2 files on the SD card and USB Mass Storage

@@ -79,6 +79,21 @@ counts/skips, apply reason, pattern latency, and master-autoplay state. NightKit
 Link still uses USB NK4 only for this workflow; the firmware BLE transport exists
 but Link has no BLE client yet.
 
+The Device card separates Link-side USB recovery from controller configuration:
+`C reset USB` only restarts Link's USB/protocol session, while `F defaults`
+opens a confirmation for controller factory defaults. Confirmed defaults send
+`defaults confirm=1`, then `save`, then reload controller state. `S save` writes
+the current live controller settings persistently.
+
+Live changes such as brightness or active pattern are applied immediately but are
+not persistent until `save` is sent. Firmware 4.0 persistent fields include
+device name, brightness, active pattern, strip length, smoothing, accel/gyro
+range, boot calibration, autoplay state/interval, play mode, boot mode,
+enabled/inverted pattern masks, sync enabled/group/role/master/loss behavior,
+and wireless enabled/profile. Runtime diagnostics such as PatternClock phase,
+beacon counters, lock state, apply counts and battery readings are not
+persistent settings.
+
 ## Links
 
 - NightKite Multi: https://github.com/SunnyCodes86/nightkite-multi

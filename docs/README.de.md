@@ -416,6 +416,33 @@ verbunden und Beacon-Sync ist nicht aktiv. Den BLE-Client vor der Bewertung des
 Beacon-Tests trennen. USB an NightKite Link darf für Konfiguration und Diagnose
 verbunden bleiben.
 
+## Speichern und Werkreset
+
+Live-Änderungen wie Brightness oder aktives Pattern werden sofort an den
+Controller gesendet, sind aber erst nach `save` persistent. Auf der Device-Card
+ist `S save` die klare Persistenz-Aktion.
+
+`C reset USB` setzt nur den Link-seitigen USB-/Protokollzustand zurück. Das ist
+kein Controller-Werkreset.
+
+`F defaults` öffnet eine Bestätigung für Controller-Werkseinstellungen. Nach
+Bestätigung sendet Link im USB-NK4-Modus:
+
+- `defaults confirm=1`
+- `save`
+- `info`, `status`, `get section=config`, `get section=play`,
+  `get section=sync`, `get section=wireless`, `get section=patterns`
+
+Persistente Firmware-4.0-Felder sind: Gerätename, Brightness, aktives Pattern,
+Strip Length, Smoothing, Accel-/Gyro-Range, Boot Calibration, Autoplay an/aus,
+Autoplay-Intervall, Play Mode, Boot Mode, Enabled-/Inverted-Masks, Sync Enabled,
+Sync Group, Sync Role, Sync Master UID, Sync Loss Behavior, Wireless Enabled und
+Wireless Profile.
+
+Nicht persistent sind Laufzeitdiagnosen wie PatternClock-Phase,
+Beacon-Zähler/-Alter, Lock-State, Apply-Zähler, Apply-Reason, Pattern-Latenz,
+Battery-Status und Verbindungszustände.
+
 ## Firmware-Flasher
 
 Der Firmware-Flasher arbeitet mit UF2-Dateien auf der SD-Karte und dem

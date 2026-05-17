@@ -265,6 +265,7 @@ enum class Mode : uint8_t {
   ProfileNameInput,
   ConfirmProfileOverwrite,
   ConfirmProfileApply,
+  ConfirmFactoryReset,
 };
 
 enum class FlashUiState : uint8_t {
@@ -429,6 +430,7 @@ UsbMscUf2Flasher uf2Flasher;
 
 bool ensureSdReady();
 void syncEditFromCard();
+void discardAllDrafts();
 
 bool flashCopyAudioQuiet()
 {
@@ -1086,6 +1088,9 @@ String legacyCommandToNk4Payload(String command)
   if (command == "save") {
     return "cmd=save";
   }
+  if (command == "defaults confirm=1") {
+    return "cmd=defaults confirm=1";
+  }
   if (command == "calibrate quick") {
     return "cmd=calibrate mode=quick";
   }
@@ -1207,6 +1212,11 @@ void enqueueNk4RefreshForSet(const String& command)
 
 void handleNk4CommandOk(const String& command)
 {
+  if (command == "cmd=defaults confirm=1") {
+    discardAllDrafts();
+    setStatus("Defaults sent", COLOR_OK);
+    return;
+  }
   if (command == "cmd=save") {
     setStatus("Saved", COLOR_OK);
     return;
@@ -1555,6 +1565,36 @@ void discardCurrentDraft()
   setStatus("Edit cancelled", COLOR_WARN);
 }
 
+void discardAllDrafts()
+{
+  brightnessDirty = false;
+  patternDirty = false;
+  configDirtyMask = 0;
+  playDirtyMask = 0;
+  syncDirtyMask = 0;
+  wirelessDirtyMask = 0;
+  app.patternEditsPending = false;
+  draftBrightness = app.settings.brightness;
+  draftActivePattern = app.settings.activePattern;
+  draftStripLength = app.settings.stripLength;
+  draftSmoothing = app.settings.smoothing;
+  draftAccelRange = app.settings.accelRange;
+  draftGyroRange = app.settings.gyroRange;
+  draftAutoplayEnabled = app.settings.autoplayEnabled;
+  draftAutoplayIntervalSeconds = app.settings.autoplayIntervalSeconds;
+  draftPlayMode = app.play.playMode;
+  draftBootMode = app.play.bootMode;
+  draftPlayAutoplayEnabled = app.settings.autoplayEnabled;
+  draftPlayAutoplayIntervalSeconds = app.settings.autoplayIntervalSeconds;
+  draftSyncEnabled = app.sync.enabled;
+  draftSyncGroup = app.sync.group;
+  draftSyncRole = app.sync.role;
+  draftSyncLossBehavior = app.sync.lossBehavior;
+  draftWirelessEnabled = app.wireless.enabled;
+  draftWirelessProfile = app.wireless.profile;
+  editValue = "";
+}
+
 String shortText(String text, int chars)
 {
   if (static_cast<int>(text.length()) > chars) {
@@ -1676,7 +1716,7 @@ void drawDeviceCard()
               COLOR_TEXT);
   drawTextFit("Cfg " + app.diagnostics.configValid, 125, CONTENT_Y + 74, 105,
               app.diagnostics.configValid == "1" || app.diagnostics.configValid == "true" ? COLOR_OK : COLOR_MUTED);
-  drawFooter("R refresh  C reset USB");
+  drawFooter("R read  S save  C USB  F defaults");
 }
 
 const char* const PLAY_MODES[] = {"manual", "autoplay", "sync"};
@@ -2438,6 +2478,15 @@ void drawConfirmProfileApply()
   drawFooter("ENTER apply  ESC cancel");
 }
 
+void drawConfirmFactoryReset()
+{
+  drawTextFit("Factory reset?", 14, CONTENT_Y + 24, 180, COLOR_WARN);
+  drawTextFit("Controller defaults", 14, CONTENT_Y + 46, 190, COLOR_TEXT);
+  drawTextFit("Defaults + save", 14, CONTENT_Y + 64, 170, COLOR_ERR);
+  drawTextFit("USB reset is C", 14, CONTENT_Y + 82, 150, COLOR_MUTED);
+  drawFooter("ENTER reset  ESC cancel");
+}
+
 void drawSplashScreen()
 {
   auto& d = uiCanvas;
@@ -2530,6 +2579,8 @@ void render()
     drawConfirmProfileOverwrite();
   } else if (mode == Mode::ConfirmProfileApply) {
     drawConfirmProfileApply();
+  } else if (mode == Mode::ConfirmFactoryReset) {
+    drawConfirmFactoryReset();
   } else {
     switch (static_cast<Card>(app.selectedCard)) {
       case Card::Status:
@@ -3432,7 +3483,12 @@ bool parseNk4Line(const String& parsed)
   } else if (isErr) {
     String code = valueForKey(parsed, "code");
     String msg = valueForKey(parsed, "msg");
-    setStatus(msg.length() > 0 ? msg : nk4FriendlyError(code), code == "unsupported" ? COLOR_WARN : COLOR_ERR);
+    if (matchedCommand == "cmd=defaults confirm=1") {
+      commandQueue.clear();
+      setStatus("Factory reset failed", COLOR_ERR);
+    } else {
+      setStatus(msg.length() > 0 ? msg : nk4FriendlyError(code), code == "unsupported" ? COLOR_WARN : COLOR_ERR);
+    }
     app.controllerError = code != "unsupported";
   } else {
     applyNk4Fields(parsed);
@@ -3615,6 +3671,57 @@ void manualUsbReconnect()
     usbProbePending = false;
     setStatus("No USB", COLOR_WARN);
   }
+  app.dirty = true;
+}
+
+void enqueuePostDefaultsRefresh()
+{
+  if (app.protocolMode == ProtocolMode::Nk4) {
+    enqueueCommandEntry("cmd=info", true);
+    enqueueCommandEntry("cmd=status", true);
+    enqueueCommandEntry("cmd=get section=config", true);
+    enqueueCommandEntry("cmd=get section=play", true);
+    enqueueCommandEntry("cmd=get section=sync", true);
+    enqueueCommandEntry("cmd=get section=wireless", true);
+    enqueueCommandEntry("cmd=get section=patterns", true);
+  } else {
+    sendCommand(NightKiteCommands::refreshAll(), false);
+    sendCommand(NightKiteCommands::refreshPatterns(), false);
+    sendCommand("get inverted_patterns", false);
+  }
+}
+
+void queueControllerFactoryReset()
+{
+  discardAllDrafts();
+  if (!app.usbConnected) {
+    setStatus("No controller", COLOR_WARN);
+    return;
+  }
+  if (usbProbePending || app.protocolMode == ProtocolMode::Probing) {
+    setStatus("Detecting protocol...", COLOR_ACCENT);
+    return;
+  }
+  commandQueue.clear();
+  if (app.protocolMode == ProtocolMode::Nk4) {
+    enqueueCommandEntry("cmd=defaults confirm=1", true);
+    enqueueCommandEntry("cmd=save", true);
+    enqueuePostDefaultsRefresh();
+    setStatus("Defaults queued", COLOR_ACCENT);
+  } else if (app.protocolMode == ProtocolMode::Legacy) {
+    sendCommand("defaults", false);
+    sendCommand("save", false);
+    enqueuePostDefaultsRefresh();
+    setStatus("Defaults queued", COLOR_ACCENT);
+  } else {
+    setStatus("No controller", COLOR_WARN);
+  }
+  app.dirty = true;
+}
+
+void startFactoryResetConfirm()
+{
+  mode = Mode::ConfirmFactoryReset;
   app.dirty = true;
 }
 
@@ -4547,6 +4654,10 @@ void handleWordChar(char c)
     return;
   }
 
+  if (mode == Mode::ConfirmFactoryReset) {
+    return;
+  }
+
   if ((c == 'c' || c == 'C') && static_cast<Card>(app.selectedCard) == Card::Config) {
     app.selectedConfigField = (app.selectedConfigField + 1) % 6;
     app.dirty = true;
@@ -4577,6 +4688,21 @@ void handleWordChar(char c)
   }
   if ((c == 'c' || c == 'C') && static_cast<Card>(app.selectedCard) == Card::Device) {
     manualUsbReconnect();
+    return;
+  }
+  if ((c == 'f' || c == 'F') && static_cast<Card>(app.selectedCard) == Card::Device) {
+    startFactoryResetConfirm();
+    return;
+  }
+  if ((c == 's' || c == 'S') && static_cast<Card>(app.selectedCard) == Card::Device) {
+    if (!app.usbConnected) {
+      setStatus("No controller", COLOR_WARN);
+    } else if (usbProbePending || app.protocolMode == ProtocolMode::Probing) {
+      setStatus("Detecting protocol...", COLOR_ACCENT);
+    } else {
+      sendCommand("save");
+      setStatus("Save queued", COLOR_ACCENT);
+    }
     return;
   }
   if ((c == 'c' || c == 'C') && static_cast<Card>(app.selectedCard) == Card::Firmware) {
@@ -4780,22 +4906,28 @@ void handleKeyboard()
       applyLoadedProfile();
       mode = Mode::Cards;
       app.dirty = true;
+    } else if (mode == Mode::ConfirmFactoryReset) {
+      queueControllerFactoryReset();
+      mode = Mode::Cards;
+      app.dirty = true;
     } else {
       applyCurrentCard();
     }
     return;
   }
 
-  if (status.del || (status.opt && profileModalActive())) {
+  if (status.del || (status.opt && (profileModalActive() || mode == Mode::ConfirmFactoryReset))) {
     if (mode == Mode::ProfileNameInput && status.del && app.profileNameInput.length() > 0) {
       app.profileNameInput.remove(app.profileNameInput.length() - 1);
     } else if (mode == Mode::PatternDetail || mode == Mode::ConfirmBulk || mode == Mode::ConfirmProfileDelete ||
                mode == Mode::ProfileNameInput || mode == Mode::ConfirmProfileOverwrite ||
-               mode == Mode::ConfirmProfileApply) {
+               mode == Mode::ConfirmProfileApply || mode == Mode::ConfirmFactoryReset) {
       if (mode == Mode::ProfileNameInput || mode == Mode::ConfirmProfileOverwrite) {
         setStatus("Save cancelled", COLOR_WARN);
       } else if (mode == Mode::ConfirmProfileApply) {
         setStatus("Apply cancelled", COLOR_WARN);
+      } else if (mode == Mode::ConfirmFactoryReset) {
+        setStatus("Factory reset cancelled", COLOR_WARN);
       }
       mode = Mode::Cards;
     } else if (currentCardHasDirtyDraft()) {
