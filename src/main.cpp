@@ -42,7 +42,7 @@ constexpr unsigned long AUTO_STATUS_POLL_MS = 4000;
 constexpr unsigned long AUTO_REFRESH_IDLE_MS = 1800;
 constexpr unsigned long SYNC_TEST_STATUS_POLL_MS = 1800;
 constexpr unsigned long SYNC_TEST_WIRELESS_POLL_MS = 5000;
-constexpr unsigned long USB_RECONNECT_STABLE_MS = 1100;
+constexpr unsigned long USB_RECONNECT_STABLE_MS = 800;
 constexpr unsigned long USB_REPROBE_IDLE_MS = 2200;
 constexpr unsigned long LEGACY_PROBE_TIMEOUT_MS = 2600;
 constexpr unsigned long NK4_COMMAND_TIMEOUT_MS = 1400;
@@ -349,7 +349,6 @@ unsigned long legacyProbeStartMs = 0;
 bool lastUsbConnected = false;
 bool usbProbePending = false;
 bool legacyProbePending = false;
-bool usbRetryAllowed = false;
 String rxLine;
 std::vector<CommandQueueEntry> commandQueue;
 bool nk4Pending = false;
@@ -454,7 +453,6 @@ public:
   virtual bool readLine(String& line) = 0;
   virtual void clearBuffers() {}
   virtual uint32_t consumeEvents() { return 0; }
-  virtual bool canProbeWithoutOpenEvent() { return true; }
 };
 
 class DebugSerialTransport : public NightKiteTransport {
@@ -570,11 +568,6 @@ public:
     uint32_t events = eventFlags;
     eventFlags = 0;
     return events;
-  }
-
-  bool canProbeWithoutOpenEvent() override
-  {
-    return false;
   }
 
 private:
@@ -3500,7 +3493,6 @@ void resetControllerSession(const String& reason = "reset")
   nk4MachineSent = false;
   nk4HelloSent = false;
   legacyProbePending = false;
-  usbRetryAllowed = false;
   consecutiveNk4Timeouts = 0;
   patternSyncInProgress = false;
   transferCompleteSoundPending = false;
@@ -3515,12 +3507,11 @@ void resetControllerSession(const String& reason = "reset")
   logUsbSession("reset", reason);
 }
 
-void markNoController(const String& reason, const String& status, bool allowRetry)
+void markNoController(const String& reason, const String& status)
 {
   resetControllerSession(reason);
   app.usbConnected = false;
   usbProbePending = false;
-  usbRetryAllowed = allowRetry;
   nextUsbProbeAllowedMs = millis() + USB_REPROBE_IDLE_MS;
   lastProbeResult = "no controller";
   setStatus(status, COLOR_WARN);
@@ -3532,7 +3523,6 @@ void startUsbDetection(const String& reason, const String& status)
   resetControllerSession(reason);
   app.usbConnected = true;
   usbProbePending = true;
-  usbRetryAllowed = true;
   usbConnectedSinceMs = millis();
   nextUsbProbeAllowedMs = 0;
   lastProbeResult = "stabilizing";
@@ -3601,26 +3591,26 @@ void pollTransport()
   bool hostConnected = transport.connected();
   unsigned long now = millis();
 
+  if ((transportEvents & TRANSPORT_EVENT_OPENED) != 0) {
+    startUsbDetection("usb device opened", "Connecting...");
+    hostConnected = true;
+  }
+
   if (!hostConnected) {
     if (app.usbConnected || usbProbePending || app.controllerConnected || app.protocolMode != ProtocolMode::Unknown) {
-      markNoController("usb disconnect", "Disconnected", false);
+      markNoController("usb disconnect", "Disconnected");
     }
     return;
   }
   if ((transportEvents & TRANSPORT_EVENT_DISCONNECTED) != 0 && (transportEvents & TRANSPORT_EVENT_OPENED) == 0) {
-    markNoController("usb disconnect", "Disconnected", false);
+    markNoController("usb disconnect", "Disconnected");
     return;
   }
   if ((transportEvents & TRANSPORT_EVENT_WRITE_ERROR) != 0) {
     startUsbDetection("usb write error", "Reconnecting...");
     return;
   }
-  if ((transportEvents & TRANSPORT_EVENT_OPENED) != 0) {
-    startUsbDetection("usb device opened", "Connecting...");
-  }
-
-  if (!app.usbConnected && hostConnected && now >= nextUsbProbeAllowedMs &&
-      (usbRetryAllowed || transport.canProbeWithoutOpenEvent())) {
+  if (!app.usbConnected && hostConnected && now >= nextUsbProbeAllowedMs) {
     startUsbDetection("periodic probe", "Detecting...");
   }
   if (!app.usbConnected) {
@@ -3644,7 +3634,7 @@ void pollTransport()
   pollNk4Probe();
 
   if (legacyProbePending && now - legacyProbeStartMs > LEGACY_PROBE_TIMEOUT_MS) {
-    markNoController("legacy probe timeout", "No controller", true);
+    markNoController("legacy probe timeout", "No controller");
     return;
   }
 
