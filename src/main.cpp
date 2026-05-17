@@ -1,7 +1,6 @@
 #include <Arduino.h>
 #include <SD.h>
 #include <SPI.h>
-#include <cstring>
 #include <math.h>
 #include <vector>
 #include "M5Cardputer.h"
@@ -42,9 +41,7 @@ constexpr unsigned long AUTO_STATUS_POLL_MS = 4000;
 constexpr unsigned long AUTO_REFRESH_IDLE_MS = 1800;
 constexpr unsigned long SYNC_TEST_STATUS_POLL_MS = 1800;
 constexpr unsigned long SYNC_TEST_WIRELESS_POLL_MS = 5000;
-constexpr unsigned long USB_RECONNECT_STABLE_MS = 800;
-constexpr unsigned long USB_REPROBE_IDLE_MS = 2200;
-constexpr unsigned long LEGACY_PROBE_TIMEOUT_MS = 2600;
+constexpr unsigned long USB_RECONNECT_STABLE_MS = 600;
 constexpr unsigned long NK4_COMMAND_TIMEOUT_MS = 1400;
 constexpr unsigned long NK4_PROBE_TIMEOUT_MS = 1600;
 constexpr unsigned long NK4_MACHINE_DELAY_MS = 120;
@@ -56,10 +53,6 @@ constexpr int SD_SPI_MISO_PIN = 39;
 constexpr int SD_SPI_MOSI_PIN = 14;
 constexpr int SD_SPI_CS_PIN = 12;
 constexpr uint32_t ALL_PATTERN_MASK = (1UL << 22) - 1UL;
-constexpr uint32_t TRANSPORT_EVENT_OPENED = 1 << 0;
-constexpr uint32_t TRANSPORT_EVENT_DISCONNECTED = 1 << 1;
-constexpr uint32_t TRANSPORT_EVENT_WRITE_ERROR = 1 << 2;
-constexpr int MAX_NK4_TIMEOUTS_BEFORE_RECONNECT = 2;
 const char* const ALL_PATTERN_LIST = "1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22";
 
 const char* const PATTERN_NAMES[] = {
@@ -344,24 +337,18 @@ unsigned long lastUserInputMs = 0;
 unsigned long lastSyncTestStatusPollMs = 0;
 unsigned long lastSyncTestWirelessPollMs = 0;
 unsigned long usbConnectedSinceMs = 0;
-unsigned long nextUsbProbeAllowedMs = 0;
-unsigned long legacyProbeStartMs = 0;
 bool lastUsbConnected = false;
 bool usbProbePending = false;
-bool legacyProbePending = false;
 String rxLine;
 std::vector<CommandQueueEntry> commandQueue;
 bool nk4Pending = false;
 CommandQueueEntry pendingNk4;
 uint16_t nextNk4Seq = 1;
 uint32_t connectionGeneration = 0;
-int consecutiveNk4Timeouts = 0;
 bool nk4MachineSent = false;
 bool nk4HelloSent = false;
 unsigned long nk4ProbeStartMs = 0;
 unsigned long nk4MachineSentMs = 0;
-String lastSessionReason = "boot";
-String lastProbeResult = "--";
 bool patternSyncInProgress = false;
 bool transferCompleteSoundPending = false;
 bool canvasReady = false;
@@ -452,7 +439,6 @@ public:
   virtual void sendLine(const String& line) = 0;
   virtual bool readLine(String& line) = 0;
   virtual void clearBuffers() {}
-  virtual uint32_t consumeEvents() { return 0; }
 };
 
 class DebugSerialTransport : public NightKiteTransport {
@@ -505,7 +491,6 @@ class UsbHostSerialTransport : public NightKiteTransport {
 public:
   UsbHostSerialTransport() : hostSerial(0x2E8A, CDC_HOST_ANY_PID)
   {
-    instance = this;
   }
 
   void begin()
@@ -513,7 +498,6 @@ public:
     if (started) {
       return;
     }
-    hostSerial.setLogger(&UsbHostSerialTransport::usbLog);
     started = hostSerial.begin(SERIAL_BAUD, 0, 0, 8);
   }
 
@@ -563,38 +547,11 @@ public:
     }
   }
 
-  uint32_t consumeEvents() override
-  {
-    uint32_t events = eventFlags;
-    eventFlags = 0;
-    return events;
-  }
-
 private:
-  static void usbLog(const char* msg)
-  {
-    Serial.print("[USBHostSerial] ");
-    Serial.println(msg);
-    if (instance == nullptr || msg == nullptr) {
-      return;
-    }
-    if (std::strstr(msg, "device opened") != nullptr) {
-      instance->eventFlags |= TRANSPORT_EVENT_OPENED;
-    } else if (std::strstr(msg, "disconnected") != nullptr) {
-      instance->eventFlags |= TRANSPORT_EVENT_DISCONNECTED;
-    } else if (std::strstr(msg, "Error writing") != nullptr) {
-      instance->eventFlags |= TRANSPORT_EVENT_WRITE_ERROR;
-    }
-  }
-
   USBHostSerial hostSerial;
   bool started = false;
   String buffer;
-  uint32_t eventFlags = 0;
-  static UsbHostSerialTransport* instance;
 };
-
-UsbHostSerialTransport* UsbHostSerialTransport::instance = nullptr;
 
 UsbHostSerialTransport transport;
 #else
@@ -668,7 +625,7 @@ String connectionToken()
   if (!app.usbConnected) {
     return "NO USB";
   }
-  if (usbProbePending || legacyProbePending || app.protocolMode == ProtocolMode::Probing) {
+  if (usbProbePending || app.protocolMode == ProtocolMode::Probing) {
     return "USB DET";
   }
   return String(transportToken()) + " " + protocolToken();
@@ -1128,10 +1085,6 @@ void sendCommand(const String& command, bool announce = true)
     setStatus("Command missing", COLOR_WARN);
     return;
   }
-  if (!app.usbConnected || usbProbePending || legacyProbePending || app.protocolMode == ProtocolMode::Probing) {
-    setStatus(!app.usbConnected ? "No controller" : "Detecting protocol...", COLOR_WARN);
-    return;
-  }
   bool wasEmpty = commandQueue.empty();
   if (app.protocolMode == ProtocolMode::Nk4 && command == NightKiteCommands::refreshAll()) {
     enqueueCommandEntry("cmd=info", true);
@@ -1260,7 +1213,6 @@ void playTransferCompleteIfPending(const String& statusText)
 }
 
 void fallbackToLegacy();
-void startUsbDetection(const String& reason, const String& status);
 
 void requestControllerBattery(bool force = false)
 {
@@ -1283,13 +1235,6 @@ void pollCommandQueue()
       nk4Pending = false;
       if (app.protocolMode == ProtocolMode::Probing) {
         fallbackToLegacy();
-        return;
-      }
-      ++consecutiveNk4Timeouts;
-      if (consecutiveNk4Timeouts >= MAX_NK4_TIMEOUTS_BEFORE_RECONNECT) {
-        Serial.print("[usb-session] NK4 timeout reconnect after ");
-        Serial.println(timedOut);
-        startUsbDetection("nk4 command timeouts", "Reconnecting...");
         return;
       }
       app.controllerError = true;
@@ -1650,7 +1595,7 @@ void drawDeviceCard()
               COLOR_TEXT);
   drawTextFit("Cfg " + app.diagnostics.configValid, 125, CONTENT_Y + 74, 105,
               app.diagnostics.configValid == "1" || app.diagnostics.configValid == "true" ? COLOR_OK : COLOR_MUTED);
-  drawFooter("R refresh");
+  drawFooter("R refresh  C reset USB");
 }
 
 const char* const PLAY_MODES[] = {"manual", "autoplay", "sync"};
@@ -1686,8 +1631,8 @@ void drawPlayCard()
 {
   drawTextFit(String("Play") + (playDirtyMask ? "*" : ""), 8, CONTENT_Y + 5, 70, playDirtyMask ? COLOR_WARN : COLOR_MUTED);
   String unavailable = !app.usbConnected ? "No controller"
-                       : (usbProbePending || legacyProbePending || app.protocolMode == ProtocolMode::Probing) ? "Detecting..."
-                                                                                                             : "NK4 required";
+                       : (usbProbePending || app.protocolMode == ProtocolMode::Probing) ? "Detecting..."
+                                                                                        : "NK4 required";
   String labels[] = {"Mode", "Boot", "Auto", "Interval"};
   String values[] = {
       (playDirtyMask & PLAY_DIRTY_MODE) ? draftPlayMode : app.play.playMode,
@@ -1720,8 +1665,8 @@ void drawSyncCard()
 {
   drawTextFit(String("Sync") + (syncDirtyMask ? "*" : ""), 8, CONTENT_Y + 5, 80, syncDirtyMask ? COLOR_WARN : COLOR_MUTED);
   String unavailable = !app.usbConnected ? "No controller"
-                       : (usbProbePending || legacyProbePending || app.protocolMode == ProtocolMode::Probing) ? "Detecting..."
-                                                                                                             : "NK4 required";
+                       : (usbProbePending || app.protocolMode == ProtocolMode::Probing) ? "Detecting..."
+                                                                                        : "NK4 required";
   String labels[] = {"Enable", "Group", "Role", "State", "Lock", "Loss"};
   String values[] = {((syncDirtyMask & SYNC_DIRTY_ENABLED) ? draftSyncEnabled : app.sync.enabled) ? "ON" : "OFF",
                      showInt((syncDirtyMask & SYNC_DIRTY_GROUP) ? draftSyncGroup : app.sync.group),
@@ -1820,7 +1765,7 @@ bool requireNk4Controller()
     setStatus("No controller", COLOR_WARN);
     return false;
   }
-  if (usbProbePending || legacyProbePending || app.protocolMode == ProtocolMode::Probing) {
+  if (usbProbePending || app.protocolMode == ProtocolMode::Probing) {
     setStatus("Detecting protocol...", COLOR_ACCENT);
     return false;
   }
@@ -1868,7 +1813,7 @@ void drawSyncTestCard()
     drawFooter("Disconnected");
     return;
   }
-  if (usbProbePending || legacyProbePending || app.protocolMode == ProtocolMode::Probing) {
+  if (usbProbePending || app.protocolMode == ProtocolMode::Probing) {
     drawTextFit("Detecting...", 12, CONTENT_Y + 34, 150, COLOR_ACCENT);
     drawTextFit("Please wait", 12, CONTENT_Y + 52, 120, COLOR_MUTED);
     drawFooter("USB protocol detect");
@@ -1927,8 +1872,8 @@ void drawWirelessCard()
   drawTextFit(String("Wireless") + (wirelessDirtyMask ? "*" : ""), 8, CONTENT_Y + 5, 90,
               wirelessDirtyMask ? COLOR_WARN : COLOR_MUTED);
   String unavailable = !app.usbConnected ? "No controller"
-                       : (usbProbePending || legacyProbePending || app.protocolMode == ProtocolMode::Probing) ? "Detecting..."
-                                                                                                             : "NK4 required";
+                       : (usbProbePending || app.protocolMode == ProtocolMode::Probing) ? "Detecting..."
+                                                                                        : "NK4 required";
   String labels[] = {"Enable", "Profile", "Radio", "TX", "RX", "CRC"};
   String values[] = {((wirelessDirtyMask & WIRELESS_DIRTY_ENABLED) ? draftWirelessEnabled : app.wireless.enabled) ? "ON" : "OFF",
                      (wirelessDirtyMask & WIRELESS_DIRTY_PROFILE) ? draftWirelessProfile : app.wireless.profile, app.sync.radioMode,
@@ -3294,8 +3239,6 @@ bool parseNk4Line(const String& parsed)
 
   app.controllerConnected = true;
   app.controllerError = false;
-  consecutiveNk4Timeouts = 0;
-  legacyProbePending = false;
   lastRxMs = millis();
   app.lastResponse = parsed;
 
@@ -3308,7 +3251,6 @@ bool parseNk4Line(const String& parsed)
       app.protocolMode = ProtocolMode::Nk4;
       app.controllerError = false;
       commandQueue.clear();
-      lastProbeResult = "nk4 ok";
       setStatus("USB NK4 detected", COLOR_OK);
       sendCommand(NightKiteCommands::refreshAll(), false);
     } else if (matchedCommand == "cmd=save") {
@@ -3350,8 +3292,6 @@ void parseNightKiteLine(const String& line)
     }
     app.controllerConnected = true;
     app.controllerError = false;
-    legacyProbePending = false;
-    lastProbeResult = "legacy ok";
     lastRxMs = millis();
 
     parseIntField(parsed, "pattern", app.settings.activePattern);
@@ -3393,8 +3333,6 @@ void parseNightKiteLine(const String& line)
     }
     app.controllerConnected = true;
     app.controllerError = true;
-    legacyProbePending = false;
-    lastProbeResult = "legacy err";
     lastRxMs = millis();
     setStatus(shortText(parsed, 34), COLOR_ERR);
   } else if (parsed.startsWith("INFO") || parsed.startsWith("[NightKite CLI]")) {
@@ -3402,14 +3340,10 @@ void parseNightKiteLine(const String& line)
       app.protocolMode = ProtocolMode::Legacy;
     }
     app.controllerConnected = true;
-    legacyProbePending = false;
-    lastProbeResult = "legacy info";
     lastRxMs = millis();
     setStatus(shortText(parsed, 34), COLOR_MUTED);
   } else if (parsed.indexOf("battery") >= 0 || parsed.indexOf("Battery") >= 0 || parsed.indexOf("BATTERY") >= 0) {
     app.controllerConnected = true;
-    legacyProbePending = false;
-    lastProbeResult = "battery";
     lastRxMs = millis();
     parseControllerBattery(parsed);
   }
@@ -3442,29 +3376,9 @@ void updateCardputerBattery(bool force = false)
   app.dirty = true;
 }
 
-void logUsbSession(const String& action, const String& reason)
-{
-  Serial.print("[usb-session] ");
-  Serial.print(action);
-  Serial.print(" gen=");
-  Serial.print(connectionGeneration);
-  Serial.print(" reason=");
-  Serial.print(reason);
-  Serial.print(" protocol=");
-  Serial.print(protocolToken());
-  Serial.print(" queue=");
-  Serial.print(commandQueue.size());
-  Serial.print(" probe=");
-  Serial.print(lastProbeResult);
-  Serial.print(" pending=");
-  Serial.println(nk4Pending ? pendingNk4.command : "--");
-}
-
-void resetControllerSession(const String& reason = "reset")
+void resetControllerSession()
 {
   ++connectionGeneration;
-  lastSessionReason = reason;
-  lastProbeResult = "--";
   transport.clearBuffers();
   rxLine = "";
   app.controllerConnected = false;
@@ -3492,8 +3406,6 @@ void resetControllerSession(const String& reason = "reset")
   pendingNk4 = CommandQueueEntry{};
   nk4MachineSent = false;
   nk4HelloSent = false;
-  legacyProbePending = false;
-  consecutiveNk4Timeouts = 0;
   patternSyncInProgress = false;
   transferCompleteSoundPending = false;
   app.lastCommand = "";
@@ -3504,41 +3416,32 @@ void resetControllerSession(const String& reason = "reset")
   lastControllerBatteryReadMs = 0;
   lastSyncTestStatusPollMs = 0;
   lastSyncTestWirelessPollMs = 0;
-  logUsbSession("reset", reason);
-}
-
-void markNoController(const String& reason, const String& status)
-{
-  resetControllerSession(reason);
-  app.usbConnected = false;
-  usbProbePending = false;
-  nextUsbProbeAllowedMs = millis() + USB_REPROBE_IDLE_MS;
-  lastProbeResult = "no controller";
-  setStatus(status, COLOR_WARN);
-  app.dirty = true;
-}
-
-void startUsbDetection(const String& reason, const String& status)
-{
-  resetControllerSession(reason);
-  app.usbConnected = true;
-  usbProbePending = true;
-  usbConnectedSinceMs = millis();
-  nextUsbProbeAllowedMs = 0;
-  lastProbeResult = "stabilizing";
-  setStatus(status, COLOR_ACCENT);
-  app.dirty = true;
 }
 
 void beginNk4Probe()
 {
+  resetControllerSession();
   app.protocolMode = ProtocolMode::Probing;
   usbProbePending = false;
   nk4ProbeStartMs = millis();
   nk4MachineSentMs = 0;
-  lastProbeResult = "nk4 probe";
   setStatus("Detecting protocol...", COLOR_ACCENT);
-  logUsbSession("probe", lastSessionReason);
+}
+
+void manualUsbReconnect()
+{
+  bool connected = transport.connected();
+  resetControllerSession();
+  app.usbConnected = connected;
+  if (connected) {
+    usbProbePending = true;
+    usbConnectedSinceMs = millis();
+    setStatus("USB reset", COLOR_ACCENT);
+  } else {
+    usbProbePending = false;
+    setStatus("No USB", COLOR_WARN);
+  }
+  app.dirty = true;
 }
 
 void fallbackToLegacy()
@@ -3546,11 +3449,9 @@ void fallbackToLegacy()
   app.protocolMode = ProtocolMode::Legacy;
   nk4Pending = false;
   commandQueue.clear();
-  lastProbeResult = "legacy probe";
   setStatus("USB legacy mode", COLOR_WARN);
   sendCommand(NightKiteCommands::refreshAll(), false);
-  legacyProbePending = true;
-  legacyProbeStartMs = millis();
+  requestControllerBattery(true);
 }
 
 void pollNk4Probe()
@@ -3587,39 +3488,25 @@ void pollNk4Probe()
 
 void pollTransport()
 {
-  uint32_t transportEvents = transport.consumeEvents();
-  bool hostConnected = transport.connected();
-  unsigned long now = millis();
-
-  if ((transportEvents & TRANSPORT_EVENT_OPENED) != 0) {
-    startUsbDetection("usb device opened", "Connecting...");
-    hostConnected = true;
-  }
-
-  if (!hostConnected) {
-    if (app.usbConnected || usbProbePending || app.controllerConnected || app.protocolMode != ProtocolMode::Unknown) {
-      markNoController("usb disconnect", "Disconnected");
+  bool wasUsbConnected = app.usbConnected;
+  app.usbConnected = transport.connected();
+  if (app.usbConnected != wasUsbConnected) {
+    if (!app.usbConnected) {
+      resetControllerSession();
+      usbProbePending = false;
+      transferCompleteSoundPending = false;
+      setStatus("Disconnected", COLOR_WARN);
+    } else {
+      resetControllerSession();
+      usbProbePending = true;
+      usbConnectedSinceMs = millis();
+      setStatus("Connecting...", COLOR_ACCENT);
     }
-    return;
-  }
-  if ((transportEvents & TRANSPORT_EVENT_DISCONNECTED) != 0 && (transportEvents & TRANSPORT_EVENT_OPENED) == 0) {
-    markNoController("usb disconnect", "Disconnected");
-    return;
-  }
-  if ((transportEvents & TRANSPORT_EVENT_WRITE_ERROR) != 0) {
-    startUsbDetection("usb write error", "Reconnecting...");
-    return;
-  }
-  if (!app.usbConnected && hostConnected && now >= nextUsbProbeAllowedMs) {
-    startUsbDetection("periodic probe", "Detecting...");
-  }
-  if (!app.usbConnected) {
-    transport.clearBuffers();
-    return;
+    app.dirty = true;
   }
 
   if (app.usbConnected && usbProbePending) {
-    if (now - usbConnectedSinceMs < USB_RECONNECT_STABLE_MS) {
+    if (millis() - usbConnectedSinceMs < USB_RECONNECT_STABLE_MS) {
       transport.clearBuffers();
       return;
     }
@@ -3633,13 +3520,15 @@ void pollTransport()
 
   pollNk4Probe();
 
-  if (legacyProbePending && now - legacyProbeStartMs > LEGACY_PROBE_TIMEOUT_MS) {
-    markNoController("legacy probe timeout", "No controller");
-    return;
-  }
-
-  if (app.controllerConnected && now - lastRxMs > LINK_STALE_MS) {
-    startUsbDetection("controller timeout", "Reconnecting...");
+  if (app.controllerConnected && millis() - lastRxMs > LINK_STALE_MS) {
+    resetControllerSession();
+    if (app.usbConnected) {
+      usbProbePending = true;
+      usbConnectedSinceMs = millis();
+      setStatus("Reconnecting...", COLOR_WARN);
+    } else {
+      setStatus("Disconnected", COLOR_WARN);
+    }
     app.dirty = true;
     return;
   }
@@ -3648,8 +3537,8 @@ void pollTransport()
     requestControllerBattery();
   }
 
-  if (app.usbConnected && !usbProbePending && !legacyProbePending && app.protocolMode == ProtocolMode::Nk4 &&
-      static_cast<Card>(app.selectedCard) == Card::SyncTest && !autoRefreshPaused()) {
+  if (app.usbConnected && app.protocolMode == ProtocolMode::Nk4 && static_cast<Card>(app.selectedCard) == Card::SyncTest &&
+      !autoRefreshPaused()) {
     unsigned long now = millis();
     if (now - lastSyncTestStatusPollMs > SYNC_TEST_STATUS_POLL_MS) {
       lastSyncTestStatusPollMs = now;
@@ -3661,10 +3550,9 @@ void pollTransport()
     }
   }
 
-  if (now - lastPollMs > AUTO_STATUS_POLL_MS) {
-    lastPollMs = now;
-    if (app.usbConnected && !usbProbePending && !legacyProbePending && app.protocolMode != ProtocolMode::Probing &&
-        !autoRefreshPaused()) {
+  if (millis() - lastPollMs > AUTO_STATUS_POLL_MS) {
+    lastPollMs = millis();
+    if (app.usbConnected && app.protocolMode != ProtocolMode::Probing && !autoRefreshPaused()) {
       if (app.protocolMode == ProtocolMode::Nk4) {
         enqueueCommandEntry("cmd=status", true);
       } else {
@@ -4481,6 +4369,10 @@ void handleWordChar(char c)
     app.dirty = true;
     return;
   }
+  if ((c == 'c' || c == 'C') && static_cast<Card>(app.selectedCard) == Card::Device) {
+    manualUsbReconnect();
+    return;
+  }
   if ((c == 'c' || c == 'C') && static_cast<Card>(app.selectedCard) == Card::Firmware) {
     app.selectedFirmwareTarget = (app.selectedFirmwareTarget + 1) % FIRMWARE_TARGET_COUNT;
     app.dirty = true;
@@ -4764,7 +4656,7 @@ void loop()
     if (elapsed >= SPLASH_DURATION_MS) {
       splashActive = false;
       Serial.println("startup: done");
-      nextUsbProbeAllowedMs = 0;
+      sendCommand(NightKiteCommands::refreshAll());
       app.dirty = true;
     }
     render();
