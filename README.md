@@ -27,8 +27,9 @@ Ausführliche deutsche Dokumentation: [docs/README.de.md](docs/README.de.md)
 - USB NK4 detection for Firmware 4.0 with legacy CLI fallback for Firmware 3.x
 - Device, play mode, sync and wireless/beacon diagnostic cards
 - Sync Test card for preparing master/follower two-controller beacon tests
+- Sync Diag card for Firmware 4.0 PatternClock and beacon apply diagnostics
 - Brightness, strip length, active pattern, smoothing and autoplay settings
-- Pattern list with cycle and invert state
+- Pattern list with cycle, invert and Firmware 4.0 sync classification state
 - Pattern detail and bulk actions
 - SD card profiles under `/profiles/`
 - UF2 firmware selection from `/firmware/`
@@ -69,6 +70,14 @@ USB NK4 controller as `NK-Master` or `NK-Follower`, set play mode `sync`, enable
 sync and wireless, choose group 1-4 and select `long_range`, `balanced` or
 `fast_sync`. Save is a separate visible action. Beacon diagnostics are shown for
 USB inspection only; Link does not relay real-time sync traffic.
+
+Firmware 4.0 diagnostics now include PatternClock and pattern classification
+fields. The pattern list marks patterns as `S` sync-ready, `P` partial-sync, `L`
+local/reactive, or `?` unknown. The Sync Diag card shows compact sync runtime
+values such as drift, phase, beacon phase, last beacon/applied sequence, apply
+counts/skips, apply reason, pattern latency, and master-autoplay state. NightKite
+Link still uses USB NK4 only for this workflow; the firmware BLE transport exists
+but Link has no BLE client yet.
 
 ## Links
 

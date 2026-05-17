@@ -116,6 +116,10 @@ struct ControllerSettings {
   bool hasControllerBattery = false;
   uint32_t enabledPatternMask = 0;
   uint32_t invertedPatternMask = 0;
+  uint32_t syncReadyPatternMask = 0;
+  uint32_t partialSyncPatternMask = 0;
+  uint32_t localReactivePatternMask = 0;
+  bool hasPatternClassification = false;
   String deviceName;
   String playMode = "unknown";
   String bootMode = "unknown";
@@ -183,6 +187,21 @@ struct SyncState {
   unsigned long beaconGroupMismatch = 0;
   int beaconAgeMs = -1;
   String radioMode = "unknown";
+  bool syncAutoplay = false;
+  bool masterAutoplay = false;
+  int autoplayNextMs = -1;
+  int lastBeaconSeq = -1;
+  int lastAppliedSeq = -1;
+  int phaseMs = -1;
+  int beaconPhaseMs = -1;
+  int patternTimeMs = -1;
+  unsigned long syncApplyCount = 0;
+  unsigned long syncApplySkipped = 0;
+  String syncApplyReason = "unknown";
+  unsigned long patternChangeCount = 0;
+  int lastPatternChangeLatencyMs = -1;
+  int syncReadyPattern = -1;
+  int partialSyncPattern = -1;
 };
 
 struct WirelessState {
@@ -225,6 +244,7 @@ enum class Card : uint8_t {
   Sync,
   Wireless,
   SyncTest,
+  SyncDiag,
   Brightness,
   Config,
   Calibration,
@@ -235,7 +255,7 @@ enum class Card : uint8_t {
   Profiles,
 };
 
-constexpr int CARD_COUNT = 14;
+constexpr int CARD_COUNT = 15;
 
 enum class Mode : uint8_t {
   Cards,
@@ -898,6 +918,43 @@ void applyPatternMasks(uint32_t enabledMask, uint32_t invertedMask, bool updateE
     }
   }
   app.dirty = true;
+}
+
+void applyPatternClassificationMasks(const String& syncReady, const String& partialSync, const String& localReactive)
+{
+  if (syncReady.length() > 0) {
+    app.settings.syncReadyPatternMask = parseUint32Text(syncReady, app.settings.syncReadyPatternMask);
+    app.settings.hasPatternClassification = true;
+  }
+  if (partialSync.length() > 0) {
+    app.settings.partialSyncPatternMask = parseUint32Text(partialSync, app.settings.partialSyncPatternMask);
+    app.settings.hasPatternClassification = true;
+  }
+  if (localReactive.length() > 0) {
+    app.settings.localReactivePatternMask = parseUint32Text(localReactive, app.settings.localReactivePatternMask);
+    app.settings.hasPatternClassification = true;
+  }
+  if (syncReady.length() > 0 || partialSync.length() > 0 || localReactive.length() > 0) {
+    app.dirty = true;
+  }
+}
+
+char patternClassTag(int patternId)
+{
+  if (!app.settings.hasPatternClassification || patternId < 1 || patternId > PATTERN_COUNT) {
+    return '?';
+  }
+  uint32_t bit = 1UL << (patternId - 1);
+  if (app.settings.syncReadyPatternMask & bit) {
+    return 'S';
+  }
+  if (app.settings.partialSyncPatternMask & bit) {
+    return 'P';
+  }
+  if (app.settings.localReactivePatternMask & bit) {
+    return 'L';
+  }
+  return '?';
 }
 
 uint32_t currentEnabledMask()
@@ -1652,6 +1709,10 @@ void drawPlayCard()
     drawTextFit(String(labels[i]) + (dirtyField ? "*" : ""), x + 5, y + 6, 48, dirtyField ? COLOR_WARN : COLOR_MUTED, bg);
     drawTextFit(values[i], x + 48, y + 6, 55, active ? COLOR_TEXT : COLOR_ACCENT, bg);
   }
+  drawTextFit("SyncAuto " + String(app.sync.syncAutoplay ? "ON" : "OFF") + " M " +
+                  String(app.sync.masterAutoplay ? "ON" : "OFF") + " Next " +
+                  (app.sync.autoplayNextMs >= 0 ? String(app.sync.autoplayNextMs) + "ms" : "--"),
+              10, CONTENT_Y + 92, 218, app.sync.masterAutoplay ? COLOR_OK : COLOR_MUTED);
   drawFooter(app.protocolMode == ProtocolMode::Nk4 ? (playDirtyMask ? "PEND  ENTER set  DEL cancel" : "C field  W/S edit")
                                                    : unavailable);
 }
@@ -1713,6 +1774,16 @@ String lockedText()
 String beaconAgeText()
 {
   return app.sync.beaconAgeMs >= 0 ? String(app.sync.beaconAgeMs) + "ms" : "--";
+}
+
+String msText(int value)
+{
+  return value >= 0 ? String(value) + "ms" : "--";
+}
+
+String seqText(int value)
+{
+  return value >= 0 ? String(value) : "--";
 }
 
 String wirelessProfileText()
@@ -1867,6 +1938,48 @@ void drawSyncTestCard()
   drawFooter(hint);
 }
 
+void drawSyncDiagCard()
+{
+  drawTextFit("Sync Diag", 8, CONTENT_Y + 4, 90, COLOR_MUTED);
+  if (!app.usbConnected) {
+    drawTextFit("No controller", 12, CONTENT_Y + 34, 160, COLOR_WARN);
+    drawFooter("Disconnected");
+    return;
+  }
+  if (usbProbePending || app.protocolMode == ProtocolMode::Probing) {
+    drawTextFit("Detecting...", 12, CONTENT_Y + 34, 150, COLOR_ACCENT);
+    drawFooter("USB protocol detect");
+    return;
+  }
+  if (app.protocolMode != ProtocolMode::Nk4) {
+    drawTextFit("Firmware 4.0 / NK4", 12, CONTENT_Y + 34, 180, COLOR_WARN);
+    drawFooter("USB NK4 required");
+    return;
+  }
+
+  drawTextFit(roleToken() + String(" G") + showInt(app.sync.group) + " " + radioModeText(), 112, CONTENT_Y + 4, 120,
+              COLOR_ACCENT);
+  drawTextFit("State " + shortText(app.sync.state, 8) + " " + lockedText(), 8, CONTENT_Y + 20, 108,
+              app.sync.locked ? COLOR_OK : COLOR_MUTED);
+  drawTextFit("TX " + String(app.sync.beaconTxCount) + " RX " + String(app.sync.beaconRxCount), 124, CONTENT_Y + 20, 108,
+              COLOR_TEXT);
+  drawTextFit("Drift " + String(app.sync.driftMs) + "ms", 8, CONTENT_Y + 34, 108, COLOR_TEXT);
+  drawTextFit("Age " + beaconAgeText(), 124, CONTENT_Y + 34, 108, COLOR_TEXT);
+  drawTextFit("Ph " + msText(app.sync.phaseMs), 8, CONTENT_Y + 48, 108, COLOR_TEXT);
+  drawTextFit("BPh " + msText(app.sync.beaconPhaseMs), 124, CONTENT_Y + 48, 108, COLOR_TEXT);
+  drawTextFit("Seq " + seqText(app.sync.lastBeaconSeq) + "/" + seqText(app.sync.lastAppliedSeq), 8, CONTENT_Y + 62, 108,
+              COLOR_TEXT);
+  drawTextFit("Apply " + String(app.sync.syncApplyCount), 124, CONTENT_Y + 62, 108, COLOR_TEXT);
+  drawTextFit("Skip " + String(app.sync.syncApplySkipped) + " " + shortText(app.sync.syncApplyReason, 8), 8,
+              CONTENT_Y + 76, 108, app.sync.syncApplySkipped > 0 ? COLOR_WARN : COLOR_MUTED);
+  drawTextFit("Lat " + msText(app.sync.lastPatternChangeLatencyMs), 124, CONTENT_Y + 76, 108, COLOR_TEXT);
+  drawTextFit("Auto " + boolShort(app.sync.syncAutoplay) + " M " + boolShort(app.sync.masterAutoplay), 8, CONTENT_Y + 90,
+              108, app.sync.masterAutoplay ? COLOR_OK : COLOR_MUTED);
+  drawTextFit("Pat S" + seqText(app.sync.syncReadyPattern) + " P" + seqText(app.sync.partialSyncPattern), 124,
+              CONTENT_Y + 90, 108, COLOR_TEXT);
+  drawFooter("R refresh  USB config only");
+}
+
 void drawWirelessCard()
 {
   drawTextFit(String("Wireless") + (wirelessDirtyMask ? "*" : ""), 8, CONTENT_Y + 5, 90,
@@ -2007,8 +2120,8 @@ void drawPatternListCard()
     uint16_t bg = active ? COLOR_ACCENT_DARK : COLOR_PANEL_DARK;
     uiCanvas.fillRoundRect(5, y, SCREEN_W - 10, rowH - 2, 2, bg);
     char line[40];
-    snprintf(line, sizeof(line), "%02d %c %c %s", pattern.id, pattern.cycleEnabled ? '+' : '-',
-             pattern.inverted ? 'I' : 'N', pattern.name.c_str());
+    snprintf(line, sizeof(line), "%02d %c %c %c %s", pattern.id, patternClassTag(pattern.id),
+             pattern.cycleEnabled ? '+' : '-', pattern.inverted ? 'I' : 'N', pattern.name.c_str());
     uiCanvas.setFont(&fonts::Font2);
     uiCanvas.setTextSize(1);
     drawTextFit(active ? String("> ") + line : String("  ") + line, 10, y + 3, 220, active ? COLOR_TEXT : COLOR_MUTED, bg);
@@ -2410,6 +2523,9 @@ void render()
         break;
       case Card::SyncTest:
         drawSyncTestCard();
+        break;
+      case Card::SyncDiag:
+        drawSyncDiagCard();
         break;
       case Card::Brightness:
         drawBrightnessCard();
@@ -3124,6 +3240,8 @@ void applyNk4Fields(const String& parsed)
                       parseUint32Text(invertedMask, app.settings.invertedPatternMask), enabledMask.length() > 0,
                       invertedMask.length() > 0);
   }
+  applyPatternClassificationMasks(valueForKey(parsed, "sync_ready_mask"), valueForKey(parsed, "partial_sync_mask"),
+                                  valueForKey(parsed, "local_reactive_mask"));
   parsePatternStates(parsed);
   parseControllerBattery(parsed);
 
@@ -3149,8 +3267,22 @@ void applyNk4Fields(const String& parsed)
   if (hasBoolKey(parsed, "sync_locked", boolValue)) {
     app.sync.locked = boolValue;
   }
+  if (hasBoolKey(parsed, "sync_autoplay", boolValue)) {
+    app.sync.syncAutoplay = boolValue;
+  }
+  if (hasBoolKey(parsed, "master_autoplay", boolValue)) {
+    app.sync.masterAutoplay = boolValue;
+  }
   parseIntField(parsed, "last_seq", app.sync.lastSeq);
   parseIntField(parsed, "drift_ms", app.sync.driftMs);
+  parseIntField(parsed, "autoplay_next_ms", app.sync.autoplayNextMs);
+  parseIntField(parsed, "last_beacon_seq", app.sync.lastBeaconSeq);
+  parseIntField(parsed, "last_applied_seq", app.sync.lastAppliedSeq);
+  parseIntField(parsed, "phase_ms", app.sync.phaseMs);
+  parseIntField(parsed, "beacon_phase_ms", app.sync.beaconPhaseMs);
+  parseIntField(parsed, "pattern_time_ms", app.sync.patternTimeMs);
+  parseIntField(parsed, "sync_ready_pattern", app.sync.syncReadyPattern);
+  parseIntField(parsed, "partial_sync_pattern", app.sync.partialSyncPattern);
   if (hasBoolKey(parsed, "beacon_tx", boolValue)) {
     app.sync.beaconTx = boolValue;
   }
@@ -3162,6 +3294,11 @@ void applyNk4Fields(const String& parsed)
   app.sync.beaconCrcErrors = parseUlongText(valueForKey(parsed, "beacon_crc_errors"), app.sync.beaconCrcErrors);
   app.sync.beaconGroupMismatch =
       parseUlongText(valueForKey(parsed, "beacon_group_mismatch"), app.sync.beaconGroupMismatch);
+  app.sync.syncApplyCount = parseUlongText(valueForKey(parsed, "sync_apply_count"), app.sync.syncApplyCount);
+  app.sync.syncApplySkipped = parseUlongText(valueForKey(parsed, "sync_apply_skipped"), app.sync.syncApplySkipped);
+  app.sync.patternChangeCount = parseUlongText(valueForKey(parsed, "pattern_change_count"), app.sync.patternChangeCount);
+  parseStringField(parsed, "sync_apply_reason", app.sync.syncApplyReason);
+  parseIntField(parsed, "last_pattern_change_latency_ms", app.sync.lastPatternChangeLatencyMs);
   parseIntField(parsed, "beacon_age_ms", app.sync.beaconAgeMs);
   parseIntField(parsed, "last_beacon_ms", app.sync.beaconAgeMs);
   parseStringField(parsed, "radio_mode", app.sync.radioMode);
@@ -3386,6 +3523,10 @@ void resetControllerSession()
   app.settings.hasControllerBattery = false;
   app.settings.controllerBatteryPercent = -1;
   app.settings.controllerBatteryVoltage = NAN;
+  app.settings.syncReadyPatternMask = 0;
+  app.settings.partialSyncPatternMask = 0;
+  app.settings.localReactivePatternMask = 0;
+  app.settings.hasPatternClassification = false;
   app.protocolMode = ProtocolMode::Unknown;
   app.transportMode = TransportMode::Usb;
   app.identity = ControllerIdentity{};
@@ -3537,8 +3678,9 @@ void pollTransport()
     requestControllerBattery();
   }
 
-  if (app.usbConnected && app.protocolMode == ProtocolMode::Nk4 && static_cast<Card>(app.selectedCard) == Card::SyncTest &&
-      !autoRefreshPaused()) {
+  bool syncDiagnosticsVisible = static_cast<Card>(app.selectedCard) == Card::SyncTest ||
+                                static_cast<Card>(app.selectedCard) == Card::SyncDiag;
+  if (app.usbConnected && app.protocolMode == ProtocolMode::Nk4 && syncDiagnosticsVisible && !autoRefreshPaused()) {
     unsigned long now = millis();
     if (now - lastSyncTestStatusPollMs > SYNC_TEST_STATUS_POLL_MS) {
       lastSyncTestStatusPollMs = now;
@@ -3682,6 +3824,11 @@ void refreshCurrentCard()
       enqueueCommandEntry("cmd=ble_status", true);
     } else if (static_cast<Card>(app.selectedCard) == Card::SyncTest) {
       queueSyncTestRefresh();
+    } else if (static_cast<Card>(app.selectedCard) == Card::SyncDiag) {
+      enqueueCommandEntry("cmd=get section=sync", true);
+      enqueueCommandEntry("cmd=sync_status", true);
+      enqueueCommandEntry("cmd=get section=patterns", true);
+      enqueueCommandEntry("cmd=status", true);
     } else if (static_cast<Card>(app.selectedCard) == Card::PatternList ||
                static_cast<Card>(app.selectedCard) == Card::PatternBulk) {
       enqueueCommandEntry("cmd=get section=patterns", true);

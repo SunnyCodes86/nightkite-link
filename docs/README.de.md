@@ -382,6 +382,25 @@ pollt Link `sync_status` ungefähr alle 1,8 Sekunden und
 Dirty-/Draft-Logik verhindert weiterhin, dass aktive Eingaben überschrieben
 werden.
 
+Die Pattern-Liste zeigt bei Firmware 4.0 zusätzlich eine kompakte
+Pattern-Klassifizierung:
+
+- `S`: sync-ready
+- `P`: partial-sync
+- `L`: lokal/reaktiv
+- `?`: Klassifizierung nicht bekannt
+
+Die separate Sync-Diag-Card zeigt PatternClock- und Apply-Diagnosewerte wie
+`drift_ms`, `phase_ms`, `beacon_phase_ms`, `last_beacon_seq`,
+`last_applied_seq`, `sync_apply_count`, `sync_apply_skipped`,
+`sync_apply_reason`, `last_pattern_change_latency_ms`, `sync_ready_pattern`,
+`partial_sync_pattern`, `sync_autoplay`, `master_autoplay` und
+`autoplay_next_ms`.
+
+Damit ist sichtbar, ob Master-Autoplay im Sync-Modus aktiv ist und ob ein
+Follower Beacons tatsächlich anwendet. NightKite Link nutzt dafür weiterhin USB
+NK4 als Diagnosepfad; ein BLE-Client ist in Link noch nicht enthalten.
+
 Die Diagnosefelder sind für das Cardputer-Display bewusst kurz:
 
 - `radio_mode`: erwartet `beacon_master` beim Master oder `beacon_follower` beim

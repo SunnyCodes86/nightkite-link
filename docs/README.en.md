@@ -370,6 +370,24 @@ every 1.8 seconds and `get section=wireless` about every 5 seconds, but the
 existing dirty/draft protection still prevents active edits from being
 overwritten.
 
+The pattern list also shows compact Firmware 4.0 pattern classification:
+
+- `S`: sync-ready
+- `P`: partial-sync
+- `L`: local/reactive
+- `?`: classification unknown
+
+The separate Sync Diag card shows PatternClock and apply diagnostics such as
+`drift_ms`, `phase_ms`, `beacon_phase_ms`, `last_beacon_seq`,
+`last_applied_seq`, `sync_apply_count`, `sync_apply_skipped`,
+`sync_apply_reason`, `last_pattern_change_latency_ms`, `sync_ready_pattern`,
+`partial_sync_pattern`, `sync_autoplay`, `master_autoplay` and
+`autoplay_next_ms`.
+
+This makes master autoplay in sync mode visible and helps verify whether a
+follower is applying received beacons. NightKite Link still uses USB NK4 for this
+diagnostic path; Link does not include a BLE client yet.
+
 Diagnostic fields are intentionally short for the Cardputer display:
 
 - `radio_mode`: expected `beacon_master` on the master or `beacon_follower` on
