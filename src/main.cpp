@@ -719,6 +719,13 @@ void parseIntField(const String& line, const char* key, int& target)
   }
 }
 
+void parseIntFieldUnlessDirty(const String& line, const char* key, int& target, bool dirty)
+{
+  if (!dirty) {
+    parseIntField(line, key, target);
+  }
+}
+
 bool parseFloatField(const String& line, const char* key, float& target)
 {
   String value = valueForKey(line, key);
@@ -749,6 +756,13 @@ void parseStringField(const String& line, const char* key, String& target)
   String value = valueForKey(line, key);
   if (value.length() > 0) {
     target = value;
+  }
+}
+
+void parseStringFieldUnlessDirty(const String& line, const char* key, String& target, bool dirty)
+{
+  if (!dirty) {
+    parseStringField(line, key, target);
   }
 }
 
@@ -1214,7 +1228,11 @@ void handleNk4CommandOk(const String& command)
     configDirtyMask &= ~CONFIG_DIRTY_AUTOPLAY;
   }
   if (command.indexOf("brightness=") >= 0) {
-    brightnessDirty = false;
+    int acknowledged = valueForKey(command, "brightness").toInt();
+    if (acknowledged == draftBrightness) {
+      app.settings.brightness = draftBrightness;
+      brightnessDirty = false;
+    }
   }
   if (command.indexOf("strip_length=") >= 0) {
     configDirtyMask &= ~CONFIG_DIRTY_STRIP;
@@ -1230,7 +1248,11 @@ void handleNk4CommandOk(const String& command)
   }
   if (command.indexOf("pattern=") >= 0 && command.indexOf("enabled_mask=") < 0 &&
       command.indexOf("inverted_mask=") < 0) {
-    patternDirty = false;
+    int acknowledged = valueForKey(command, "pattern").toInt();
+    if (acknowledged == draftActivePattern) {
+      app.settings.activePattern = draftActivePattern;
+      patternDirty = false;
+    }
   }
   if (command.indexOf("sync_enabled=") >= 0) {
     syncDirtyMask &= ~SYNC_DIRTY_ENABLED;
@@ -1443,6 +1465,7 @@ bool currentCardHasDirtyDraft()
     case Card::Brightness:
       return brightnessDirty;
     case Card::ActivePattern:
+    case Card::PatternList:
       return patternDirty;
     case Card::Config:
       return configDirtyMask != 0;
@@ -1487,6 +1510,7 @@ void discardDraftForCard(Card card)
       editValue = showInt(app.settings.brightness);
       break;
     case Card::ActivePattern:
+    case Card::PatternList:
       patternDirty = false;
       draftActivePattern = app.settings.activePattern;
       editValue = showInt(app.settings.activePattern);
@@ -2034,7 +2058,7 @@ void drawBrightnessCard()
   d.drawString("/255", 92, CONTENT_Y + 38);
   d.setFont(&fonts::Font0);
   drawBar(10, CONTENT_Y + 75, 150, 9, value, 0, 255, COLOR_ACCENT);
-  drawFooter(brightnessDirty ? "PEND  ENTER set  DEL cancel" : "W/S edit  ENTER set");
+  drawFooter(brightnessDirty ? "PEND live  DEL cancel" : "W/S live");
 }
 
 void drawPatternCard()
@@ -2043,14 +2067,16 @@ void drawPatternCard()
   ensurePatternModel();
   bool cycle = value >= 1 && value <= PATTERN_COUNT ? app.settings.patterns[value - 1].cycleEnabled : false;
   bool inverted = value >= 1 && value <= PATTERN_COUNT ? app.settings.patterns[value - 1].inverted : false;
+  char classTag = patternClassTag(value);
   drawTitle(String("Pattern") + (patternDirty ? "*" : ""));
   char num[8];
   snprintf(num, sizeof(num), "%02d", value > 0 ? value : 0);
   drawBigValue(value > 0 ? String(num) : "--", CONTENT_Y + 27);
-  drawTextFit(patternName(value), 10, CONTENT_Y + 69, 145, COLOR_TEXT);
-  drawTextFit(String("Cycle ") + (cycle ? "ON" : "OFF"), 158, CONTENT_Y + 57, 72, cycle ? COLOR_OK : COLOR_MUTED);
+  drawTextFit(String(classTag) + " " + patternName(value), 10, CONTENT_Y + 69, 145, COLOR_TEXT);
+  drawTextFit(String("Cls ") + classTag, 158, CONTENT_Y + 42, 72, classTag == '?' ? COLOR_MUTED : COLOR_ACCENT);
+  drawTextFit(String("Cyc ") + (cycle ? "ON" : "OFF"), 158, CONTENT_Y + 57, 72, cycle ? COLOR_OK : COLOR_MUTED);
   drawTextFit(String("Inv ") + (inverted ? "ON" : "OFF"), 158, CONTENT_Y + 72, 72, inverted ? COLOR_WARN : COLOR_MUTED);
-  drawFooter(patternDirty ? "PEND  ENTER set  DEL cancel" : "W/S edit  C cycle  I invert");
+  drawFooter(patternDirty ? "PEND live  DEL cancel" : "W/S live  C cycle  I invert");
 }
 
 void drawConfigCard()
@@ -3207,13 +3233,14 @@ void applyNk4Fields(const String& parsed)
     app.capabilities.syncRadio = app.identity.caps.indexOf("sync_radio") >= 0 || app.identity.caps.indexOf("beacon") >= 0;
   }
 
-  parseIntField(parsed, "pattern", app.settings.activePattern);
-  parseIntField(parsed, "brightness", app.settings.brightness);
-  parseIntField(parsed, "strip_length", app.settings.stripLength);
-  parseIntField(parsed, "smoothing", app.settings.smoothing);
-  parseIntField(parsed, "accel_range", app.settings.accelRange);
-  parseIntField(parsed, "gyro_range", app.settings.gyroRange);
-  parseIntField(parsed, "autoplay_interval", app.settings.autoplayIntervalSeconds);
+  parseIntFieldUnlessDirty(parsed, "pattern", app.settings.activePattern, patternDirty);
+  parseIntFieldUnlessDirty(parsed, "brightness", app.settings.brightness, brightnessDirty);
+  parseIntFieldUnlessDirty(parsed, "strip_length", app.settings.stripLength, configDirtyMask & CONFIG_DIRTY_STRIP);
+  parseIntFieldUnlessDirty(parsed, "smoothing", app.settings.smoothing, configDirtyMask & CONFIG_DIRTY_SMOOTH);
+  parseIntFieldUnlessDirty(parsed, "accel_range", app.settings.accelRange, configDirtyMask & CONFIG_DIRTY_ACCEL);
+  parseIntFieldUnlessDirty(parsed, "gyro_range", app.settings.gyroRange, configDirtyMask & CONFIG_DIRTY_GYRO);
+  parseIntFieldUnlessDirty(parsed, "autoplay_interval", app.settings.autoplayIntervalSeconds,
+                           (configDirtyMask & CONFIG_DIRTY_INTERVAL) || (playDirtyMask & PLAY_DIRTY_INTERVAL));
   parseStringField(parsed, "boot_calibration", app.settings.bootCalibration);
   parseStringField(parsed, "fps", app.settings.fps);
   parseStringField(parsed, "imu", app.diagnostics.imu);
@@ -3224,11 +3251,12 @@ void applyNk4Fields(const String& parsed)
   hasBoolKey(parsed, "safe_boot", app.diagnostics.safeBoot);
 
   String autoplay = valueForKey(parsed, "autoplay");
-  if (autoplay.length() > 0) {
+  if (autoplay.length() > 0 && (configDirtyMask & CONFIG_DIRTY_AUTOPLAY) == 0 &&
+      (playDirtyMask & PLAY_DIRTY_AUTOPLAY) == 0) {
     app.settings.autoplayEnabled = parseBoolText(autoplay);
   }
-  parseStringField(parsed, "play_mode", app.play.playMode);
-  parseStringField(parsed, "boot_mode", app.play.bootMode);
+  parseStringFieldUnlessDirty(parsed, "play_mode", app.play.playMode, playDirtyMask & PLAY_DIRTY_MODE);
+  parseStringFieldUnlessDirty(parsed, "boot_mode", app.play.bootMode, playDirtyMask & PLAY_DIRTY_BOOT);
   app.settings.deviceName = app.identity.name;
   app.settings.playMode = app.play.playMode;
   app.settings.bootMode = app.play.bootMode;
@@ -3248,17 +3276,19 @@ void applyNk4Fields(const String& parsed)
   bool boolValue = false;
   if (hasBoolKey(parsed, "sync_enabled", boolValue)) {
     app.sync.supported = true;
-    app.sync.enabled = boolValue;
-    app.settings.syncEnabled = boolValue;
+    if ((syncDirtyMask & SYNC_DIRTY_ENABLED) == 0) {
+      app.sync.enabled = boolValue;
+      app.settings.syncEnabled = boolValue;
+    }
   }
-  parseIntField(parsed, "sync_group", app.sync.group);
-  parseIntField(parsed, "group", app.sync.group);
-  parseStringField(parsed, "sync_role", app.sync.role);
-  parseStringField(parsed, "role", app.sync.role);
+  parseIntFieldUnlessDirty(parsed, "sync_group", app.sync.group, syncDirtyMask & SYNC_DIRTY_GROUP);
+  parseIntFieldUnlessDirty(parsed, "group", app.sync.group, syncDirtyMask & SYNC_DIRTY_GROUP);
+  parseStringFieldUnlessDirty(parsed, "sync_role", app.sync.role, syncDirtyMask & SYNC_DIRTY_ROLE);
+  parseStringFieldUnlessDirty(parsed, "role", app.sync.role, syncDirtyMask & SYNC_DIRTY_ROLE);
   parseStringField(parsed, "sync_master_uid", app.sync.masterUid);
   parseStringField(parsed, "master_uid", app.sync.masterUid);
-  parseStringField(parsed, "sync_loss_behavior", app.sync.lossBehavior);
-  parseStringField(parsed, "loss_behavior", app.sync.lossBehavior);
+  parseStringFieldUnlessDirty(parsed, "sync_loss_behavior", app.sync.lossBehavior, syncDirtyMask & SYNC_DIRTY_LOSS);
+  parseStringFieldUnlessDirty(parsed, "loss_behavior", app.sync.lossBehavior, syncDirtyMask & SYNC_DIRTY_LOSS);
   app.settings.syncGroup = app.sync.group;
   app.settings.syncRole = app.sync.role;
   app.settings.syncMasterUid = app.sync.masterUid;
@@ -3305,10 +3335,12 @@ void applyNk4Fields(const String& parsed)
 
   if (hasBoolKey(parsed, "wireless_enabled", boolValue)) {
     app.wireless.supported = true;
-    app.wireless.enabled = boolValue;
-    app.settings.wirelessEnabled = boolValue;
+    if ((wirelessDirtyMask & WIRELESS_DIRTY_ENABLED) == 0) {
+      app.wireless.enabled = boolValue;
+      app.settings.wirelessEnabled = boolValue;
+    }
   }
-  parseStringField(parsed, "wireless_profile", app.wireless.profile);
+  parseStringFieldUnlessDirty(parsed, "wireless_profile", app.wireless.profile, wirelessDirtyMask & WIRELESS_DIRTY_PROFILE);
   app.settings.wirelessProfile = app.wireless.profile;
   if (hasBoolKey(parsed, "ble_supported", boolValue)) {
     app.wireless.bleSupported = boolValue;
@@ -3431,13 +3463,14 @@ void parseNightKiteLine(const String& line)
     app.controllerError = false;
     lastRxMs = millis();
 
-    parseIntField(parsed, "pattern", app.settings.activePattern);
-    parseIntField(parsed, "brightness", app.settings.brightness);
-    parseIntField(parsed, "strip_length", app.settings.stripLength);
-    parseIntField(parsed, "smoothing", app.settings.smoothing);
-    parseIntField(parsed, "accel_range", app.settings.accelRange);
-    parseIntField(parsed, "gyro_range", app.settings.gyroRange);
-    parseIntField(parsed, "autoplay_interval", app.settings.autoplayIntervalSeconds);
+    parseIntFieldUnlessDirty(parsed, "pattern", app.settings.activePattern, patternDirty);
+    parseIntFieldUnlessDirty(parsed, "brightness", app.settings.brightness, brightnessDirty);
+    parseIntFieldUnlessDirty(parsed, "strip_length", app.settings.stripLength, configDirtyMask & CONFIG_DIRTY_STRIP);
+    parseIntFieldUnlessDirty(parsed, "smoothing", app.settings.smoothing, configDirtyMask & CONFIG_DIRTY_SMOOTH);
+    parseIntFieldUnlessDirty(parsed, "accel_range", app.settings.accelRange, configDirtyMask & CONFIG_DIRTY_ACCEL);
+    parseIntFieldUnlessDirty(parsed, "gyro_range", app.settings.gyroRange, configDirtyMask & CONFIG_DIRTY_GYRO);
+    parseIntFieldUnlessDirty(parsed, "autoplay_interval", app.settings.autoplayIntervalSeconds,
+                             configDirtyMask & CONFIG_DIRTY_INTERVAL);
 
     String bootCalibration = valueForKey(parsed, "boot_calibration");
     if (bootCalibration.length() > 0) {
@@ -3449,7 +3482,7 @@ void parseNightKiteLine(const String& line)
     }
 
     String autoplay = valueForKey(parsed, "autoplay");
-    if (autoplay.length() > 0) {
+    if (autoplay.length() > 0 && (configDirtyMask & CONFIG_DIRTY_AUTOPLAY) == 0) {
       app.settings.autoplayEnabled = parseBoolText(autoplay);
     }
 
@@ -3898,6 +3931,15 @@ void togglePatternInvert(int patternIndex, bool sendNow)
 
 void startFirmwareFlash();
 
+void sendLiveEditCommand(const String& command, const String& status)
+{
+  if (!app.usbConnected || app.protocolMode == ProtocolMode::Probing || usbProbePending) {
+    return;
+  }
+  sendCommand(command, false);
+  setStatus(status, COLOR_ACCENT);
+}
+
 void changeValue(int delta)
 {
   switch (static_cast<Card>(app.selectedCard)) {
@@ -3987,6 +4029,11 @@ void changeValue(int delta)
       draftBrightness = wrappedValue(brightnessLevels, BRIGHTNESS_LEVEL_COUNT, draftBrightness, delta);
       editValue = String(draftBrightness);
       brightnessDirty = true;
+      sendLiveEditCommand(NightKiteCommands::setBrightness(draftBrightness), "Brightness sent");
+      if (app.protocolMode == ProtocolMode::Legacy) {
+        app.settings.brightness = draftBrightness;
+        brightnessDirty = false;
+      }
       break;
     case Card::Config:
       if (app.selectedConfigField == 0) {
@@ -4035,12 +4082,24 @@ void changeValue(int delta)
       draftActivePattern = wrapRange(draftActivePattern, 1, PATTERN_COUNT, 1, delta);
       editValue = String(draftActivePattern);
       patternDirty = true;
+      sendLiveEditCommand(NightKiteCommands::setPattern(draftActivePattern), "Pattern sent");
+      if (app.protocolMode == ProtocolMode::Legacy) {
+        app.settings.activePattern = draftActivePattern;
+        patternDirty = false;
+      }
       break;
     case Card::Calibration:
       app.selectedCalAction = constrain(app.selectedCalAction + delta, 0, CAL_ACTION_COUNT - 1);
       break;
     case Card::PatternList:
       app.selectedPatternIndex = constrain(app.selectedPatternIndex + delta, 0, PATTERN_COUNT - 1);
+      draftActivePattern = app.selectedPatternIndex + 1;
+      patternDirty = true;
+      sendLiveEditCommand(NightKiteCommands::setPattern(draftActivePattern), "Pattern sent");
+      app.settings.activePattern = draftActivePattern;
+      if (app.protocolMode == ProtocolMode::Legacy) {
+        patternDirty = false;
+      }
       break;
     case Card::PatternBulk:
       app.selectedBulkAction = constrain(app.selectedBulkAction + delta, 0, BULK_ACTION_COUNT - 1);
