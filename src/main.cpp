@@ -1658,24 +1658,40 @@ String lockedText()
   return app.sync.locked ? "LOCK" : "--";
 }
 
-String beaconStateText()
-{
-  return String(app.sync.beaconTx ? "T" : "-") + String(app.sync.beaconRx ? "R" : "-");
-}
-
 String beaconAgeText()
 {
-  return app.sync.beaconAgeMs >= 0 ? String(app.sync.beaconAgeMs) : "--";
+  return app.sync.beaconAgeMs >= 0 ? String(app.sync.beaconAgeMs) + "ms" : "--";
 }
 
 String wirelessProfileText()
 {
+  if (app.wireless.profile == "long_range") {
+    return "long";
+  }
+  if (app.wireless.profile == "balanced") {
+    return "bal";
+  }
+  if (app.wireless.profile == "fast_sync") {
+    return "fast";
+  }
   return app.wireless.profile == "unknown" ? "--" : shortText(app.wireless.profile, 5);
 }
 
-String wifiStateText()
+String radioModeText()
 {
-  return app.wireless.wifi == "unknown" ? "Wi--" : "Wi" + shortText(app.wireless.wifi, 4);
+  if (app.sync.radioMode == "beacon_master") {
+    return "master";
+  }
+  if (app.sync.radioMode == "beacon_follower") {
+    return "follower";
+  }
+  if (app.sync.radioMode == "gatt") {
+    return "gatt";
+  }
+  if (app.sync.radioMode == "off") {
+    return "off";
+  }
+  return app.sync.radioMode == "unknown" ? "--" : shortText(app.sync.radioMode, 8);
 }
 
 String selectedSyncTestProfile()
@@ -1753,19 +1769,17 @@ void drawSyncTestCard()
 
   drawTextFit(shortText(controllerLabel(), 12) + " " + shortText(app.identity.shortId, 7), 124, CONTENT_Y + 18, 108,
               COLOR_TEXT);
-  drawTextFit("Play " + playToken() + " " + roleToken() + " G" + showInt(app.sync.group), 124, CONTENT_Y + 32, 108,
+  drawTextFit("P " + playToken() + " " + roleToken() + " G" + showInt(app.sync.group), 124, CONTENT_Y + 32, 108,
               COLOR_ACCENT);
-  drawTextFit("Sync " + boolShort(app.sync.enabled) + " " + shortText(app.sync.state, 8) + " " + lockedText(), 124,
+  drawTextFit("S " + boolShort(app.sync.enabled) + " " + shortText(app.sync.state, 8) + " " + lockedText(), 124,
               CONTENT_Y + 46, 108, app.sync.locked ? COLOR_OK : COLOR_MUTED);
-  drawTextFit("Radio " + shortText(app.sync.radioMode, 12), 124, CONTENT_Y + 62, 108,
+  drawTextFit("R " + radioModeText() + " W " + wirelessProfileText(), 124, CONTENT_Y + 62, 108,
               app.sync.radioMode == "gatt" ? COLOR_WARN : COLOR_TEXT);
-  drawTextFit("B " + beaconStateText() + " T" + String(app.sync.beaconTxCount) + " R" + String(app.sync.beaconRxCount),
+  drawTextFit("TX " + String(app.sync.beaconTxCount) + " RX " + String(app.sync.beaconRxCount),
               124, CONTENT_Y + 76, 108, COLOR_TEXT);
   drawTextFit("E " + String(app.sync.beaconCrcErrors) + "/" + String(app.sync.beaconGroupMismatch) + " A" +
                   beaconAgeText(),
               124, CONTENT_Y + 90, 108, (app.sync.beaconCrcErrors || app.sync.beaconGroupMismatch) ? COLOR_WARN : COLOR_MUTED);
-  drawTextFit("W " + boolShort(app.wireless.enabled) + " " + wirelessProfileText() + " " + wifiStateText(), 124,
-              CONTENT_Y + 104, 108, app.wireless.bleGatt ? COLOR_WARN : COLOR_MUTED);
 
   String hint = app.sync.radioMode == "gatt" ? "GATT active - beacon off"
                 : app.sync.role == "master" ? "Master: no BLE client"
