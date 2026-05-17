@@ -1273,6 +1273,32 @@ String showInt(int value)
   return value >= 0 ? String(value) : "--";
 }
 
+String controllerBatteryVoltageText()
+{
+  if (isnan(app.settings.controllerBatteryVoltage)) {
+    return "";
+  }
+  char buffer[12];
+  snprintf(buffer, sizeof(buffer), "%.2fV", app.settings.controllerBatteryVoltage);
+  return String(buffer);
+}
+
+String controllerBatteryText()
+{
+  String percent = app.settings.controllerBatteryPercent >= 0 ? String(app.settings.controllerBatteryPercent) + "%" : "";
+  String voltage = controllerBatteryVoltageText();
+  if (percent.length() > 0 && voltage.length() > 0) {
+    return percent + " " + voltage;
+  }
+  if (percent.length() > 0) {
+    return percent;
+  }
+  if (voltage.length() > 0) {
+    return voltage;
+  }
+  return "--";
+}
+
 uint8_t configFieldMask(int field)
 {
   switch (field) {
@@ -1424,24 +1450,18 @@ void drawStatusBar()
   String play = app.protocolMode == ProtocolMode::Nk4 ? playToken() + "/" + roleToken() : "CTRL";
   String nk = "NK:--";
   if (app.controllerConnected && app.settings.hasControllerBattery) {
-    if (app.settings.controllerBatteryPercent >= 0) {
-      nk = "NK:" + String(app.settings.controllerBatteryPercent) + "%";
-    } else if (!isnan(app.settings.controllerBatteryVoltage)) {
-      char buffer[12];
-      snprintf(buffer, sizeof(buffer), "%.1fV", app.settings.controllerBatteryVoltage);
-      nk = String("NK:") + buffer;
-    }
+    nk = controllerBatteryText();
   }
   bool cliBusy = !commandQueue.empty() || patternSyncInProgress;
   String queueText = "Q:" + String(commandQueue.size());
   uint16_t queueColor = cliBusy ? COLOR_WARN : COLOR_MUTED;
-  drawTextFit(text, 3, 4, 45, app.controllerError ? COLOR_WARN : COLOR_TEXT, COLOR_PANEL_DARK);
-  drawTextFit(name, 51, 4, 50, app.controllerConnected ? COLOR_ACCENT : COLOR_MUTED, COLOR_PANEL_DARK);
-  drawTextFit(play, 105, 4, 50, app.protocolMode == ProtocolMode::Nk4 ? COLOR_OK : COLOR_MUTED, COLOR_PANEL_DARK);
-  drawTextFit(nk, 158, 4, 39, app.settings.hasControllerBattery ? COLOR_OK : COLOR_MUTED, COLOR_PANEL_DARK);
+  drawTextFit(text, 3, 4, 42, app.controllerError ? COLOR_WARN : COLOR_TEXT, COLOR_PANEL_DARK);
+  drawTextFit(name, 48, 4, 42, app.controllerConnected ? COLOR_ACCENT : COLOR_MUTED, COLOR_PANEL_DARK);
+  drawTextFit(play, 93, 4, 43, app.protocolMode == ProtocolMode::Nk4 ? COLOR_OK : COLOR_MUTED, COLOR_PANEL_DARK);
+  drawTextFit(nk, 139, 4, 60, app.settings.hasControllerBattery ? COLOR_OK : COLOR_MUTED, COLOR_PANEL_DARK);
   drawTextFit(String("L:") + cp, 201, 4, 36, app.cardputerCharging ? COLOR_OK : COLOR_ACCENT, COLOR_PANEL_DARK);
   if (cliBusy) {
-    drawTextFit(queueText, 130, 4, 25, queueColor, COLOR_PANEL_DARK);
+    drawTextFit(queueText, 115, 4, 22, queueColor, COLOR_PANEL_DARK);
   }
 }
 
@@ -1497,16 +1517,7 @@ void drawStatusCard()
 
 void drawDeviceCard()
 {
-  String battery = "--";
-  if (app.settings.hasControllerBattery) {
-    if (app.settings.controllerBatteryPercent >= 0) {
-      battery = String(app.settings.controllerBatteryPercent) + "%";
-    } else if (!isnan(app.settings.controllerBatteryVoltage)) {
-      char buffer[12];
-      snprintf(buffer, sizeof(buffer), "%.1fV", app.settings.controllerBatteryVoltage);
-      battery = buffer;
-    }
-  }
+  String battery = app.settings.hasControllerBattery ? controllerBatteryText() : "--";
   drawTextFit("Device", 8, CONTENT_Y + 5, 90, COLOR_MUTED);
   drawTextFit(String(transportToken()) + " " + protocolToken(), 160, CONTENT_Y + 5, 70,
               app.protocolMode == ProtocolMode::Nk4 ? COLOR_OK : COLOR_WARN);
