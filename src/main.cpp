@@ -389,6 +389,8 @@ bool brightnessDirty = false;
 bool patternDirty = false;
 int draftBrightness = -1;
 int draftActivePattern = -1;
+int activePatternSyncAfterCycleToggleFrom = -1;
+unsigned long activePatternSyncAfterCycleToggleMs = 0;
 int draftStripLength = -1;
 int draftSmoothing = -1;
 int draftAccelRange = -1;
@@ -428,6 +430,7 @@ constexpr uint8_t SYNC_DIRTY_ROLE = 1 << 2;
 constexpr uint8_t SYNC_DIRTY_LOSS = 1 << 3;
 constexpr uint8_t WIRELESS_DIRTY_ENABLED = 1 << 0;
 constexpr uint8_t WIRELESS_DIRTY_PROFILE = 1 << 1;
+constexpr unsigned long ACTIVE_PATTERN_SYNC_AFTER_TOGGLE_MS = 3500;
 
 UsbMscUf2Flasher uf2Flasher;
 
@@ -977,6 +980,77 @@ char patternClassTag(int patternId)
   return '?';
 }
 
+int displayedPatternId()
+{
+  if (draftActivePattern >= 1 && draftActivePattern <= PATTERN_COUNT) {
+    return draftActivePattern;
+  }
+  return app.settings.activePattern;
+}
+
+int syncDiagnosticPatternId()
+{
+  if (app.settings.activePattern >= 1 && app.settings.activePattern <= PATTERN_COUNT) {
+    return app.settings.activePattern;
+  }
+  return displayedPatternId();
+}
+
+char syncDiagnosticPatternClass(int patternId)
+{
+  if (patternId < 1 || patternId > PATTERN_COUNT) {
+    return '?';
+  }
+  if (app.settings.hasPatternClassification) {
+    return patternClassTag(patternId);
+  }
+  if (app.sync.syncReadyPattern == 1 || app.sync.syncReadyPattern == patternId) {
+    return 'S';
+  }
+  if (app.sync.partialSyncPattern == 1 || app.sync.partialSyncPattern == patternId) {
+    return 'P';
+  }
+  return '?';
+}
+
+String syncDiagnosticPatternText()
+{
+  int pattern = syncDiagnosticPatternId();
+  if (pattern < 1 || pattern > PATTERN_COUNT) {
+    return "Pat -- ?";
+  }
+  char line[16];
+  snprintf(line, sizeof(line), "Pat %02d %c", pattern, syncDiagnosticPatternClass(pattern));
+  return String(line);
+}
+
+void noteActivePatternMayFollowCycleToggle(int patternId)
+{
+  activePatternSyncAfterCycleToggleFrom = patternId;
+  activePatternSyncAfterCycleToggleMs = millis();
+}
+
+void syncVisiblePatternAfterCycleToggle()
+{
+  if (activePatternSyncAfterCycleToggleFrom < 1) {
+    return;
+  }
+  if (millis() - activePatternSyncAfterCycleToggleMs > ACTIVE_PATTERN_SYNC_AFTER_TOGGLE_MS) {
+    activePatternSyncAfterCycleToggleFrom = -1;
+    return;
+  }
+  if (patternDirty || static_cast<Card>(app.selectedCard) != Card::ActivePattern ||
+      app.settings.activePattern < 1 || app.settings.activePattern > PATTERN_COUNT) {
+    return;
+  }
+  draftActivePattern = app.settings.activePattern;
+  editValue = String(draftActivePattern);
+  if (app.settings.activePattern != activePatternSyncAfterCycleToggleFrom) {
+    activePatternSyncAfterCycleToggleFrom = -1;
+  }
+  app.dirty = true;
+}
+
 uint32_t currentEnabledMask()
 {
   ensurePatternModel();
@@ -1204,6 +1278,9 @@ void enqueueNk4RefreshForSet(const String& command)
     enqueueCommandEntry("cmd=status", true);
   } else if (command.indexOf("enabled_mask=") >= 0 || command.indexOf("inverted_mask=") >= 0) {
     enqueueCommandEntry("cmd=get section=patterns", true);
+    if (command.indexOf("enabled_mask=") >= 0) {
+      enqueueCommandEntry("cmd=status", true);
+    }
   } else if (command.indexOf("pattern=") >= 0) {
     enqueueCommandEntry("cmd=status", true);
     enqueueCommandEntry("cmd=get section=patterns", true);
@@ -2074,8 +2151,7 @@ void drawSyncDiagCard()
   drawTextFit("Lat " + msText(app.sync.lastPatternChangeLatencyMs), 124, CONTENT_Y + 76, 108, COLOR_TEXT);
   drawTextFit("Auto " + boolShort(app.sync.syncAutoplay) + " M " + boolShort(app.sync.masterAutoplay), 8, CONTENT_Y + 90,
               108, app.sync.masterAutoplay ? COLOR_OK : COLOR_MUTED);
-  drawTextFit("Pat S" + seqText(effectiveSyncReadyPattern()) + " P" + seqText(effectivePartialSyncPattern()), 124,
-              CONTENT_Y + 90, 108, COLOR_TEXT);
+  drawTextFit(syncDiagnosticPatternText(), 124, CONTENT_Y + 90, 108, COLOR_TEXT);
   drawFooter("R refresh  USB config only");
 }
 
@@ -2138,7 +2214,7 @@ void drawBrightnessCard()
 
 void drawPatternCard()
 {
-  int value = draftActivePattern >= 1 && draftActivePattern <= PATTERN_COUNT ? draftActivePattern : app.settings.activePattern;
+  int value = displayedPatternId();
   ensurePatternModel();
   bool cycle = value >= 1 && value <= PATTERN_COUNT ? app.settings.patterns[value - 1].cycleEnabled : false;
   bool inverted = value >= 1 && value <= PATTERN_COUNT ? app.settings.patterns[value - 1].inverted : false;
@@ -3320,6 +3396,8 @@ void applyNk4Fields(const String& parsed)
   }
 
   parseIntFieldUnlessDirty(parsed, "pattern", app.settings.activePattern, patternDirty);
+  parseIntFieldUnlessDirty(parsed, "active_pattern", app.settings.activePattern, patternDirty);
+  syncVisiblePatternAfterCycleToggle();
   parseIntFieldUnlessDirty(parsed, "brightness", app.settings.brightness, brightnessDirty);
   parseIntFieldUnlessDirty(parsed, "strip_length", app.settings.stripLength, configDirtyMask & CONFIG_DIRTY_STRIP);
   parseIntFieldUnlessDirty(parsed, "smoothing", app.settings.smoothing, configDirtyMask & CONFIG_DIRTY_SMOOTH);
@@ -3423,6 +3501,10 @@ void applyNk4Fields(const String& parsed)
   parseStringField(parsed, "sync_apply_reason", app.sync.syncApplyReason);
   parseIntField(parsed, "last_pattern_change_latency_ms", app.sync.lastPatternChangeLatencyMs);
   parseIntField(parsed, "beacon_age_ms", app.sync.beaconAgeMs);
+  parseIntField(parsed, "beacon_age", app.sync.beaconAgeMs);
+  parseIntField(parsed, "age_ms", app.sync.beaconAgeMs);
+  parseIntField(parsed, "rx_age_ms", app.sync.beaconAgeMs);
+  parseIntField(parsed, "last_beacon_age_ms", app.sync.beaconAgeMs);
   parseIntField(parsed, "last_beacon_ms", app.sync.beaconAgeMs);
   parseStringField(parsed, "radio_mode", app.sync.radioMode);
 
@@ -3562,6 +3644,8 @@ void parseNightKiteLine(const String& line)
     lastRxMs = millis();
 
     parseIntFieldUnlessDirty(parsed, "pattern", app.settings.activePattern, patternDirty);
+    parseIntFieldUnlessDirty(parsed, "active_pattern", app.settings.activePattern, patternDirty);
+    syncVisiblePatternAfterCycleToggle();
     parseIntFieldUnlessDirty(parsed, "brightness", app.settings.brightness, brightnessDirty);
     parseIntFieldUnlessDirty(parsed, "strip_length", app.settings.stripLength, configDirtyMask & CONFIG_DIRTY_STRIP);
     parseIntFieldUnlessDirty(parsed, "smoothing", app.settings.smoothing, configDirtyMask & CONFIG_DIRTY_SMOOTH);
@@ -4067,6 +4151,7 @@ void togglePatternCycle(int patternIndex, bool sendNow)
     editValue = String(selected);
   }
   if (sendNow) {
+    noteActivePatternMayFollowCycleToggle(pattern.id);
     sendCommand(NightKiteCommands::setPatternCycle(pattern.id, pattern.cycleEnabled));
   } else {
     setStatus("Cycle changed locally", COLOR_WARN);
@@ -4244,7 +4329,7 @@ void changeValue(int delta)
       }
       break;
     case Card::ActivePattern:
-      if (!patternDirty) {
+      if (!patternDirty && (draftActivePattern < 1 || draftActivePattern > PATTERN_COUNT)) {
         draftActivePattern = app.settings.activePattern;
       }
       draftActivePattern = wrapRange(draftActivePattern, 1, PATTERN_COUNT, 1, delta);
