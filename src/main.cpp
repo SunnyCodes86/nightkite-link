@@ -42,6 +42,7 @@ constexpr unsigned long CARDPUTER_BATTERY_POLL_MS = 3000;
 constexpr unsigned long CONTROLLER_BATTERY_POLL_MS = 60000;
 constexpr unsigned long LINK_STALE_MS = 9000;
 constexpr unsigned long COMMAND_SEND_INTERVAL_MS = 160;
+constexpr unsigned long BLE_COMMAND_SEND_INTERVAL_MS = 220;
 constexpr unsigned long AUTO_STATUS_POLL_MS = 4000;
 constexpr unsigned long AUTO_REFRESH_IDLE_MS = 1800;
 constexpr unsigned long SYNC_TEST_STATUS_POLL_MS = 1800;
@@ -414,6 +415,7 @@ unsigned long nk4ProbeStartMs = 0;
 unsigned long nk4MachineSentMs = 0;
 bool patternSyncInProgress = false;
 bool transferCompleteSoundPending = false;
+bool bleQueueWasActive = false;
 bool canvasReady = false;
 M5Canvas uiCanvas(&M5Cardputer.Display);
 SoundManager soundManager;
@@ -897,6 +899,8 @@ private:
         if (line.length() > 0) {
           Serial.print("ble: line=");
           Serial.println(line.substring(0, min(80, static_cast<int>(line.length()))));
+          Serial.print("bleq: line len=");
+          Serial.println(line.length());
           lines.push_back(line);
         }
       } else if (notifyBuffer.length() < MAX_CLI_LINE_CHARS) {
@@ -904,6 +908,7 @@ private:
       } else {
         notifyBuffer = "";
         status = "BLE RX overflow";
+        Serial.println("bleq: rx overflow");
       }
     }
   }
@@ -1798,6 +1803,42 @@ void requestControllerBattery(bool force = false)
   sendCommand(NightKiteCommands::refreshBattery(), false);
 }
 
+String nk4CommandLabel(const String& command)
+{
+  String payload = command;
+  if (payload.startsWith("cmd=")) {
+    payload = payload.substring(4);
+  }
+  if (payload.startsWith("get ")) {
+    String section = valueForKey(payload, "section");
+    if (section.length() > 0) {
+      return section;
+    }
+    return "get";
+  }
+  if (payload.startsWith("sync_radio_status")) {
+    return "radio";
+  }
+  if (payload.startsWith("sync_status")) {
+    return "sync";
+  }
+  if (payload.startsWith("status")) {
+    return "status";
+  }
+  if (payload.startsWith("patterns")) {
+    return "patterns";
+  }
+  if (payload.startsWith("battery")) {
+    return "battery";
+  }
+  if (payload.startsWith("set ")) {
+    return "set";
+  }
+  int space = payload.indexOf(' ');
+  String label = space >= 0 ? payload.substring(0, space) : payload;
+  return label.length() > 14 ? label.substring(0, 14) : label;
+}
+
 void pollCommandQueue()
 {
   if (nk4Pending) {
@@ -1806,16 +1847,33 @@ void pollCommandQueue()
     } else if (millis() - pendingNk4.sentAt >
                (app.transportMode == TransportMode::Ble ? BLE_NK4_COMMAND_TIMEOUT_MS : NK4_COMMAND_TIMEOUT_MS)) {
       String timedOut = pendingNk4.command;
+      String timeoutLabel = nk4CommandLabel(timedOut);
       nk4Pending = false;
       if (app.protocolMode == ProtocolMode::Probing) {
         if (app.transportMode == TransportMode::Ble) {
           Serial.println("ble: hello timeout");
+          Serial.print("bleq: timeout seq=");
+          Serial.print(pendingNk4.seq);
+          Serial.println(" cmd=hello");
         }
         fallbackToLegacy();
         return;
       }
       app.controllerError = true;
-      setStatus("NK4 timeout", COLOR_ERR);
+      if (app.transportMode == TransportMode::Ble) {
+        commandQueue.clear();
+        patternSyncInProgress = false;
+        transferCompleteSoundPending = false;
+        bleTransport.markError("timeout " + timeoutLabel);
+        syncBleUiStatus();
+        setStatus("BLE timeout " + timeoutLabel, COLOR_ERR);
+        Serial.print("bleq: timeout seq=");
+        Serial.print(pendingNk4.seq);
+        Serial.print(" cmd=");
+        Serial.println(timeoutLabel);
+      } else {
+        setStatus("NK4 timeout", COLOR_ERR);
+      }
       Serial.print("NK4 timeout: ");
       Serial.println(timedOut);
     }
@@ -1823,6 +1881,13 @@ void pollCommandQueue()
   }
 
   if (commandQueue.empty()) {
+    if (app.transportMode == TransportMode::Ble && bleQueueWasActive) {
+      Serial.println("bleq: queue done");
+      bleQueueWasActive = false;
+      if (bleTransport.clientState() == BleClientState::Ready) {
+        syncBleUiStatus();
+      }
+    }
     if (patternSyncInProgress) {
       patternSyncInProgress = false;
       app.patternEditsPending = false;
@@ -1832,7 +1897,9 @@ void pollCommandQueue()
     }
     return;
   }
-  if (millis() - lastCommandSendMs < COMMAND_SEND_INTERVAL_MS) {
+  unsigned long sendInterval =
+      app.transportMode == TransportMode::Ble ? BLE_COMMAND_SEND_INTERVAL_MS : COMMAND_SEND_INTERVAL_MS;
+  if (millis() - lastCommandSendMs < sendInterval) {
     return;
   }
   if (!app.usbConnected) {
@@ -1857,8 +1924,19 @@ void pollCommandQueue()
     entry.sentAt = millis();
     pendingNk4 = entry;
     nk4Pending = true;
+    if (app.transportMode == TransportMode::Ble) {
+      bleQueueWasActive = true;
+      Serial.print("bleq: send seq=");
+      Serial.print(entry.seq);
+      Serial.print(" cmd=");
+      Serial.println(nk4CommandLabel(entry.command));
+    }
   }
   activeTransport().sendLine(wireCommand);
+  if (app.transportMode == TransportMode::Ble && entry.nk4Raw) {
+    Serial.print("bleq: wait seq=");
+    Serial.println(entry.seq);
+  }
   lastCommandSendMs = millis();
   app.lastCommand = wireCommand;
   app.dirty = true;
@@ -4029,6 +4107,10 @@ bool parseNk4Line(const String& parsed)
       Serial.print(seq);
       Serial.print(" pending=");
       Serial.println(nk4Pending ? pendingNk4.seq : 0);
+      Serial.print("bleq: stale seq=");
+      Serial.print(seq);
+      Serial.print(" pending=");
+      Serial.println(nk4Pending ? pendingNk4.seq : 0);
     }
     return true;
   }
@@ -4044,6 +4126,10 @@ bool parseNk4Line(const String& parsed)
       Serial.print(seq);
       Serial.print(" matched=");
       Serial.println(matchedCommand.length() ? matchedCommand : String("--"));
+      Serial.print("bleq: resp seq=");
+      Serial.print(seq);
+      Serial.print(" ok cmd=");
+      Serial.println(matchedCommand.length() ? nk4CommandLabel(matchedCommand) : String("--"));
     }
     if (matchedCommand.length() > 0) {
       handleNk4CommandOk(matchedCommand);
@@ -4067,6 +4153,14 @@ bool parseNk4Line(const String& parsed)
       setStatus(shortText(parsed, 34), COLOR_OK);
     }
   } else if (isErr) {
+    if (app.transportMode == TransportMode::Ble) {
+      Serial.print("bleq: resp seq=");
+      Serial.print(seq);
+      Serial.print(" err cmd=");
+      Serial.print(matchedCommand.length() ? nk4CommandLabel(matchedCommand) : String("--"));
+      Serial.print(" code=");
+      Serial.println(valueForKey(parsed, "code"));
+    }
     String code = valueForKey(parsed, "code");
     String msg = valueForKey(parsed, "msg");
     if (matchedCommand == "cmd=defaults confirm=1") {
@@ -4227,6 +4321,7 @@ void resetControllerSession(TransportMode nextTransportMode = TransportMode::Usb
   pendingNk4 = CommandQueueEntry{};
   nk4MachineSent = false;
   nk4HelloSent = false;
+  bleQueueWasActive = false;
   patternSyncInProgress = false;
   transferCompleteSoundPending = false;
   app.lastCommand = "";
@@ -4282,6 +4377,18 @@ void startBleScan()
 
 void connectSelectedBleDevice()
 {
+  if (app.transportMode == TransportMode::Ble && app.protocolMode == ProtocolMode::Nk4 && app.controllerConnected) {
+    setStatus("Already BLE", COLOR_ACCENT);
+    app.bleStatus = "BLE NK4";
+    app.bleState = BleClientState::Ready;
+    app.dirty = true;
+    return;
+  }
+  if (app.transportMode == TransportMode::Ble && app.protocolMode == ProtocolMode::Probing) {
+    setStatus("BLE busy", COLOR_WARN);
+    syncBleUiStatus();
+    return;
+  }
   if (app.transportMode == TransportMode::Usb && app.usbConnected) {
     setStatus("Disconnect USB first", COLOR_WARN);
     app.bleStatus = "USB active";
