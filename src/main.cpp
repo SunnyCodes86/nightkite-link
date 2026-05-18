@@ -514,6 +514,8 @@ void playStatusSound(const String& text, uint16_t color)
   }
   if (color == COLOR_ERR) {
     soundManager.playError();
+  } else if (color == COLOR_OK && text.startsWith("NK4 ")) {
+    soundManager.playQueueTick();
   } else if (color == COLOR_OK && !text.startsWith("OK") && !text.startsWith("USB connected") &&
              !text.startsWith("Profiles:") && !text.startsWith("UF2 files:") && text != "SD ready" &&
              text != "Transfer complete" && text != "Pattern states sent") {
@@ -2374,23 +2376,56 @@ void drawStatusBar()
   auto& d = uiCanvas;
   d.fillRect(0, 0, SCREEN_W, STATUS_H, COLOR_PANEL_DARK);
   String cp = app.cardputerBatteryPercent >= 0 ? String(app.cardputerBatteryPercent) + "%" : "--";
-  String text = connectionToken();
-  String name = app.controllerConnected ? shortText(controllerLabel(), 8) : "--";
+  String transport = connectionToken();
   String play = app.protocolMode == ProtocolMode::Nk4 ? playToken() + "/" + roleToken() : "CTRL";
-  String nk = "NK:--";
+  String nk = "--";
   if (app.controllerConnected && app.settings.hasControllerBattery) {
     nk = controllerBatteryText();
   }
   bool cliBusy = !commandQueue.empty() || patternSyncInProgress;
-  String queueText = "Q:" + String(commandQueue.size());
+  int queueDepth = static_cast<int>(commandQueue.size()) + (nk4Pending ? 1 : 0);
+  String queueText = "Q" + String(queueDepth);
   uint16_t queueColor = cliBusy ? COLOR_WARN : COLOR_MUTED;
-  drawTextFit(text, 3, 4, 42, app.controllerError ? COLOR_WARN : COLOR_TEXT, COLOR_PANEL_DARK);
-  drawTextFit(name, 48, 4, 42, app.controllerConnected ? COLOR_ACCENT : COLOR_MUTED, COLOR_PANEL_DARK);
-  drawTextFit(play, 93, 4, 43, app.protocolMode == ProtocolMode::Nk4 ? COLOR_OK : COLOR_MUTED, COLOR_PANEL_DARK);
-  drawTextFit(nk, 139, 4, 60, app.settings.hasControllerBattery ? COLOR_OK : COLOR_MUTED, COLOR_PANEL_DARK);
-  drawTextFit(String("L:") + cp, 201, 4, 36, app.cardputerCharging ? COLOR_OK : COLOR_ACCENT, COLOR_PANEL_DARK);
-  if (cliBusy) {
-    drawTextFit(queueText, 115, 4, 22, queueColor, COLOR_PANEL_DARK);
+
+  String link = "L" + cp;
+  String parts[5] = {transport, queueText, nk, link, play};
+  uint16_t colors[5] = {
+      app.controllerError ? COLOR_WARN : COLOR_TEXT,
+      queueColor,
+      app.settings.hasControllerBattery ? COLOR_OK : COLOR_MUTED,
+      app.cardputerCharging ? COLOR_OK : COLOR_ACCENT,
+      app.protocolMode == ProtocolMode::Nk4 ? COLOR_OK : COLOR_MUTED,
+  };
+  bool show[5] = {true, true, app.controllerConnected && app.settings.hasControllerBattery, true,
+                  app.protocolMode == ProtocolMode::Nk4};
+  auto totalWidth = [&]() {
+    int total = 3;
+    for (int i = 0; i < 5; ++i) {
+      if (show[i]) {
+        total += d.textWidth(parts[i]) + 6;
+      }
+    }
+    return total;
+  };
+  if (totalWidth() > SCREEN_W && show[4]) {
+    show[4] = false;
+  }
+  if (totalWidth() > SCREEN_W && show[2]) {
+    show[2] = false;
+  }
+
+  int x = 3;
+  for (int i = 0; i < 5; ++i) {
+    if (!show[i]) {
+      continue;
+    }
+    int remaining = SCREEN_W - x - 2;
+    int w = min(static_cast<int>(d.textWidth(parts[i])) + 2, remaining);
+    if (w <= 0) {
+      break;
+    }
+    drawTextFit(parts[i], x, 4, w, colors[i], COLOR_PANEL_DARK);
+    x += w + 5;
   }
 }
 

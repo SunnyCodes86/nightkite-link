@@ -125,7 +125,12 @@ void SoundManager::playPageChange()
 
 void SoundManager::playTransferComplete()
 {
-  playClip(NightKiteSoundAssets::transferCompleteClip, true);
+  playQueueTick();
+}
+
+void SoundManager::playQueueTick()
+{
+  playClip(NightKiteSoundAssets::queueTickClip, true);
 }
 
 void SoundManager::playNavigate()

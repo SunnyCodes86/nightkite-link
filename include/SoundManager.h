@@ -18,6 +18,7 @@ public:
   void playTextKey();
   void playNavigate();
   void playPageChange();
+  void playQueueTick();
   void playTransferComplete();
   void playConfirm();
   void playCancel();

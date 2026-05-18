@@ -32,6 +32,7 @@ extern const SoundClip keyClips[KEY_VARIANT_COUNT];
 extern const SoundClip navigateClip;
 extern const SoundClip navigateClips[NAVIGATE_VARIANT_COUNT];
 extern const SoundClip pageChangeClip;
+extern const SoundClip queueTickClip;
 extern const SoundClip transferCompleteClip;
 extern const SoundClip confirmClip;
 extern const SoundClip cancelClip;
