@@ -41,14 +41,19 @@ constexpr int MAX_CLI_LINE_CHARS = 4096;
 constexpr unsigned long CARDPUTER_BATTERY_POLL_MS = 3000;
 constexpr unsigned long CONTROLLER_BATTERY_POLL_MS = 60000;
 constexpr unsigned long LINK_STALE_MS = 9000;
+constexpr unsigned long BLE_LINK_STALE_MS = 45000;
 constexpr unsigned long COMMAND_SEND_INTERVAL_MS = 160;
 constexpr unsigned long BLE_COMMAND_SEND_INTERVAL_MS = 220;
 constexpr unsigned long BLE_NOTIFY_IDLE_GRACE_MS = 1800;
 constexpr unsigned long AUTO_STATUS_POLL_MS = 4000;
+constexpr unsigned long BLE_AUTO_STATUS_POLL_MS = 12000;
 constexpr unsigned long AUTO_REFRESH_IDLE_MS = 1800;
 constexpr unsigned long SYNC_TEST_STATUS_POLL_MS = 1800;
 constexpr unsigned long SYNC_TEST_RADIO_POLL_MS = 1800;
 constexpr unsigned long SYNC_TEST_WIRELESS_POLL_MS = 5000;
+constexpr unsigned long BLE_SYNC_TEST_STATUS_POLL_MS = 7000;
+constexpr unsigned long BLE_SYNC_TEST_RADIO_POLL_MS = 9000;
+constexpr unsigned long BLE_SYNC_TEST_WIRELESS_POLL_MS = 12000;
 constexpr unsigned long USB_RECONNECT_STABLE_MS = 600;
 constexpr unsigned long NK4_COMMAND_TIMEOUT_MS = 1400;
 constexpr unsigned long BLE_NK4_COMMAND_TIMEOUT_MS = 5000;
@@ -268,12 +273,20 @@ struct BleDeviceEntry {
   bool serviceMatch = false;
 };
 
+enum class CommandClass : uint8_t {
+  User,
+  RequiredInit,
+  OptionalInit,
+  Poll,
+};
+
 struct CommandQueueEntry {
   String command;
   bool nk4Raw = false;
   uint16_t seq = 0;
   unsigned long sentAt = 0;
   uint32_t generation = 0;
+  CommandClass commandClass = CommandClass::User;
 };
 
 enum class Card : uint8_t {
@@ -419,6 +432,8 @@ unsigned long nk4MachineSentMs = 0;
 bool patternSyncInProgress = false;
 bool transferCompleteSoundPending = false;
 bool bleQueueWasActive = false;
+bool bleInitialRefreshActive = false;
+bool bleInitialBasisDone = false;
 bool canvasReady = false;
 M5Canvas uiCanvas(&M5Cardputer.Display);
 SoundManager soundManager;
@@ -811,6 +826,7 @@ public:
   {
     setPhase(BleClientState::Ready, "BLE NK4");
     Serial.println("ble: hello ok");
+    Serial.println("ble state: ready");
   }
 
   void markError(const String& reason)
@@ -818,12 +834,14 @@ public:
     setPhase(BleClientState::Error, "BLE err " + reason);
     Serial.print("ble: err ");
     Serial.println(reason);
+    Serial.println("ble state: error");
   }
 
   void markLost()
   {
     setPhase(BleClientState::Lost, "BLE lost");
     Serial.println("ble: lost");
+    Serial.println("ble state: lost");
   }
 
   bool isScanning() const
@@ -1640,14 +1658,44 @@ String legacyCommandToNk4Payload(String command)
   return "cmd=" + command;
 }
 
-void enqueueCommandEntry(const String& command, bool nk4Raw = false)
+String nk4CommandLabel(const String& command);
+
+void enqueueCommandEntry(const String& command, bool nk4Raw = false, CommandClass commandClass = CommandClass::User)
 {
   CommandQueueEntry entry;
   entry.command = command;
   entry.nk4Raw = nk4Raw;
+  entry.commandClass = commandClass;
   entry.generation = connectionGeneration;
+  if (app.transportMode == TransportMode::Ble && app.protocolMode == ProtocolMode::Nk4 &&
+      commandClass == CommandClass::User && bleInitialBasisDone && !commandQueue.empty()) {
+    for (auto it = commandQueue.begin(); it != commandQueue.end(); ++it) {
+      if (it->commandClass == CommandClass::OptionalInit || it->commandClass == CommandClass::Poll) {
+        commandQueue.insert(it, entry);
+        app.lastCommand = command;
+        Serial.print("bleq: user priority label=");
+        Serial.println(nk4CommandLabel(command));
+        return;
+      }
+    }
+  }
   commandQueue.push_back(entry);
   app.lastCommand = command;
+}
+
+void queueBleInitialRefresh()
+{
+  Serial.println("bleq: initial start");
+  bleInitialRefreshActive = true;
+  bleInitialBasisDone = false;
+  enqueueCommandEntry("cmd=info", true, CommandClass::RequiredInit);
+  enqueueCommandEntry("cmd=status", true, CommandClass::RequiredInit);
+  enqueueCommandEntry("cmd=get section=config", true, CommandClass::RequiredInit);
+  enqueueCommandEntry("cmd=get section=play", true, CommandClass::RequiredInit);
+  enqueueCommandEntry("cmd=caps", true, CommandClass::OptionalInit);
+  enqueueCommandEntry("cmd=get section=wireless", true, CommandClass::OptionalInit);
+  enqueueCommandEntry("cmd=get section=patterns", true, CommandClass::OptionalInit);
+  enqueueCommandEntry("cmd=get section=sync", true, CommandClass::OptionalInit);
 }
 
 void sendCommand(const String& command, bool announce = true)
@@ -1658,16 +1706,18 @@ void sendCommand(const String& command, bool announce = true)
   }
   bool wasEmpty = commandQueue.empty();
   if (app.protocolMode == ProtocolMode::Nk4 && command == NightKiteCommands::refreshAll()) {
-    enqueueCommandEntry("cmd=info", true);
-    enqueueCommandEntry("cmd=caps", true);
-    enqueueCommandEntry("cmd=status", true);
-    enqueueCommandEntry("cmd=get section=config", true);
-    enqueueCommandEntry("cmd=get section=play", true);
-    enqueueCommandEntry("cmd=get section=wireless", true);
-    enqueueCommandEntry("cmd=get section=patterns", true);
-    enqueueCommandEntry("cmd=get section=sync", true);
-    if (app.transportMode != TransportMode::Ble) {
+    if (app.transportMode == TransportMode::Ble) {
+      queueBleInitialRefresh();
+    } else {
+      enqueueCommandEntry("cmd=info", true);
+      enqueueCommandEntry("cmd=caps", true);
+      enqueueCommandEntry("cmd=status", true);
+      enqueueCommandEntry("cmd=get section=config", true);
+      enqueueCommandEntry("cmd=get section=play", true);
+      enqueueCommandEntry("cmd=get section=sync", true);
       enqueueCommandEntry("cmd=sync_radio_status", true);
+      enqueueCommandEntry("cmd=get section=wireless", true);
+      enqueueCommandEntry("cmd=get section=patterns", true);
     }
   } else if (app.protocolMode == ProtocolMode::Nk4) {
     enqueueCommandEntry(legacyCommandToNk4Payload(command), true);
@@ -1870,6 +1920,56 @@ bool bleNk4CommandOptional(const String& command)
          label == "get_patterns";
 }
 
+const char* commandClassLabel(CommandClass commandClass)
+{
+  switch (commandClass) {
+    case CommandClass::RequiredInit:
+      return "required_init";
+    case CommandClass::OptionalInit:
+      return "optional_init";
+    case CommandClass::Poll:
+      return "poll";
+    case CommandClass::User:
+    default:
+      return "user";
+  }
+}
+
+bool bleCommandTimeoutIsSoft(const CommandQueueEntry& entry)
+{
+  return entry.commandClass == CommandClass::OptionalInit || entry.commandClass == CommandClass::Poll ||
+         (entry.commandClass == CommandClass::User && bleNk4CommandOptional(entry.command));
+}
+
+void updateBleInitialProgress(CommandClass completedClass)
+{
+  if (app.transportMode != TransportMode::Ble || !bleInitialRefreshActive) {
+    return;
+  }
+  if (completedClass == CommandClass::RequiredInit && !bleInitialBasisDone) {
+    bool hasRequiredPending = false;
+    if (nk4Pending && pendingNk4.commandClass == CommandClass::RequiredInit) {
+      hasRequiredPending = true;
+    }
+    for (const auto& entry : commandQueue) {
+      if (entry.commandClass == CommandClass::RequiredInit) {
+        hasRequiredPending = true;
+        break;
+      }
+    }
+    if (!hasRequiredPending) {
+      bleInitialBasisDone = true;
+      Serial.println("bleq: initial basis done");
+      setStatus("BLE ready", COLOR_OK);
+    }
+  }
+  if (commandQueue.empty() && !nk4Pending) {
+    bleInitialRefreshActive = false;
+    bleInitialBasisDone = true;
+    Serial.println("bleq: initial done");
+  }
+}
+
 void pollCommandQueue()
 {
   if (nk4Pending) {
@@ -1887,6 +1987,7 @@ void pollCommandQueue()
       }
       String timedOut = pendingNk4.command;
       String timeoutLabel = nk4CommandLabel(timedOut);
+      CommandClass timedOutClass = pendingNk4.commandClass;
       nk4Pending = false;
       if (app.protocolMode == ProtocolMode::Probing) {
         if (app.transportMode == TransportMode::Ble) {
@@ -1900,16 +2001,18 @@ void pollCommandQueue()
       }
       app.controllerError = true;
       if (app.transportMode == TransportMode::Ble) {
-        bool optionalTimeout = bleNk4CommandOptional(timedOut);
+        bool optionalTimeout = bleCommandTimeoutIsSoft(pendingNk4);
         activeTransport().clearBuffers();
         if (!optionalTimeout) {
           commandQueue.clear();
           patternSyncInProgress = false;
           transferCompleteSoundPending = false;
+          bleInitialRefreshActive = false;
           bleTransport.markError("timeout " + timeoutLabel);
           app.controllerError = true;
         } else {
           app.controllerError = false;
+          updateBleInitialProgress(timedOutClass);
           app.bleStatus = timeoutLabel == "get_sync" || timeoutLabel == "sync_status" || timeoutLabel == "radio_status"
                               ? "Sync slow"
                               : "BLE slow " + timeoutLabel;
@@ -1920,10 +2023,15 @@ void pollCommandQueue()
         } else {
           app.dirty = true;
         }
-        setStatus("BLE timeout " + timeoutLabel, optionalTimeout ? COLOR_WARN : COLOR_ERR);
+        setStatus(optionalTimeout ? "Slow " + timeoutLabel : "BLE timeout " + timeoutLabel,
+                  optionalTimeout ? COLOR_WARN : COLOR_ERR);
         Serial.print("bleq: timeout seq=");
         Serial.print(pendingNk4.seq);
         Serial.print(" label=");
+        Serial.print(timeoutLabel);
+        Serial.print(" class=");
+        Serial.println(commandClassLabel(timedOutClass));
+        Serial.print(optionalTimeout ? "bleq: optional timeout label=" : "bleq: required timeout label=");
         Serial.println(timeoutLabel);
         Serial.print("bleq: timeout raw=\"NK4 seq=");
         Serial.print(pendingNk4.seq);
@@ -1942,7 +2050,13 @@ void pollCommandQueue()
   if (commandQueue.empty()) {
     if (app.transportMode == TransportMode::Ble && bleQueueWasActive) {
       Serial.println("bleq: queue done");
+      Serial.println("bleq: idle");
       bleQueueWasActive = false;
+      if (bleInitialRefreshActive) {
+        bleInitialRefreshActive = false;
+        bleInitialBasisDone = true;
+        Serial.println("bleq: initial done");
+      }
       if (bleTransport.clientState() == BleClientState::Ready) {
         syncBleUiStatus();
       }
@@ -1990,7 +2104,13 @@ void pollCommandQueue()
       Serial.print(" cmd=");
       Serial.print(entry.command);
       Serial.print(" label=");
-      Serial.println(nk4CommandLabel(entry.command));
+      Serial.print(nk4CommandLabel(entry.command));
+      Serial.print(" class=");
+      Serial.println(commandClassLabel(entry.commandClass));
+      if (entry.commandClass == CommandClass::Poll) {
+        Serial.print("bleq: poll send label=");
+        Serial.println(nk4CommandLabel(entry.command));
+      }
     }
   }
   activeTransport().sendLine(wireCommand);
@@ -4155,8 +4275,10 @@ bool parseNk4Line(const String& parsed)
   bool isErr = parsed.indexOf(" err") >= 0;
 
   String matchedCommand;
+  CommandClass matchedClass = CommandClass::User;
   if (nk4Pending && seq >= 0 && seq == pendingNk4.seq) {
     matchedCommand = pendingNk4.command;
+    matchedClass = pendingNk4.commandClass;
     nk4Pending = false;
   }
 
@@ -4190,7 +4312,9 @@ bool parseNk4Line(const String& parsed)
       Serial.print("bleq: resp seq=");
       Serial.print(seq);
       Serial.print(" ok cmd=");
-      Serial.println(matchedCommand.length() ? nk4CommandLabel(matchedCommand) : String("--"));
+      Serial.print(matchedCommand.length() ? nk4CommandLabel(matchedCommand) : String("--"));
+      Serial.print(" class=");
+      Serial.println(commandClassLabel(matchedClass));
     }
     if (matchedCommand.length() > 0) {
       handleNk4CommandOk(matchedCommand);
@@ -4213,12 +4337,17 @@ bool parseNk4Line(const String& parsed)
     } else {
       setStatus(shortText(parsed, 34), COLOR_OK);
     }
+    if (matchedCommand.length() > 0) {
+      updateBleInitialProgress(matchedClass);
+    }
   } else if (isErr) {
     if (app.transportMode == TransportMode::Ble) {
       Serial.print("bleq: resp seq=");
       Serial.print(seq);
       Serial.print(" err cmd=");
       Serial.print(matchedCommand.length() ? nk4CommandLabel(matchedCommand) : String("--"));
+      Serial.print(" class=");
+      Serial.print(commandClassLabel(matchedClass));
       Serial.print(" code=");
       Serial.println(valueForKey(parsed, "code"));
     }
@@ -4231,6 +4360,9 @@ bool parseNk4Line(const String& parsed)
       setStatus(msg.length() > 0 ? msg : nk4FriendlyError(code), code == "unsupported" ? COLOR_WARN : COLOR_ERR);
     }
     app.controllerError = code != "unsupported";
+    if (matchedCommand.length() > 0) {
+      updateBleInitialProgress(matchedClass);
+    }
   } else {
     applyNk4Fields(parsed);
   }
@@ -4383,6 +4515,8 @@ void resetControllerSession(TransportMode nextTransportMode = TransportMode::Usb
   nk4MachineSent = false;
   nk4HelloSent = false;
   bleQueueWasActive = false;
+  bleInitialRefreshActive = false;
+  bleInitialBasisDone = false;
   patternSyncInProgress = false;
   transferCompleteSoundPending = false;
   app.lastCommand = "";
@@ -4680,6 +4814,9 @@ void pollTransport()
   pollNk4Probe();
 
   if (app.controllerConnected && millis() - lastRxMs > LINK_STALE_MS) {
+    if (app.transportMode == TransportMode::Ble && millis() - lastRxMs <= BLE_LINK_STALE_MS) {
+      // BLE can sit idle between conservative polls; keep the session ready unless the link is truly stale.
+    } else {
     resetControllerSession();
     if (app.usbConnected) {
       usbProbePending = true;
@@ -4690,6 +4827,7 @@ void pollTransport()
     }
     app.dirty = true;
     return;
+    }
   }
 
   if (app.usbConnected && app.controllerConnected) {
@@ -4701,25 +4839,33 @@ void pollTransport()
                                 static_cast<Card>(app.selectedCard) == Card::SyncDiag;
   if (app.usbConnected && app.protocolMode == ProtocolMode::Nk4 && syncDiagnosticsVisible && !autoRefreshPaused()) {
     unsigned long now = millis();
-    if (now - lastSyncTestStatusPollMs > SYNC_TEST_STATUS_POLL_MS) {
+    unsigned long syncStatusPollMs =
+        app.transportMode == TransportMode::Ble ? BLE_SYNC_TEST_STATUS_POLL_MS : SYNC_TEST_STATUS_POLL_MS;
+    unsigned long syncRadioPollMs =
+        app.transportMode == TransportMode::Ble ? BLE_SYNC_TEST_RADIO_POLL_MS : SYNC_TEST_RADIO_POLL_MS;
+    unsigned long syncWirelessPollMs =
+        app.transportMode == TransportMode::Ble ? BLE_SYNC_TEST_WIRELESS_POLL_MS : SYNC_TEST_WIRELESS_POLL_MS;
+    if (now - lastSyncTestStatusPollMs > syncStatusPollMs) {
       lastSyncTestStatusPollMs = now;
-      enqueueCommandEntry("cmd=sync_status", true);
+      enqueueCommandEntry("cmd=sync_status", true, CommandClass::Poll);
     }
-    if (now - lastSyncTestRadioPollMs > SYNC_TEST_RADIO_POLL_MS) {
+    if (now - lastSyncTestRadioPollMs > syncRadioPollMs) {
       lastSyncTestRadioPollMs = now;
-      enqueueCommandEntry("cmd=sync_radio_status", true);
+      enqueueCommandEntry("cmd=sync_radio_status", true, CommandClass::Poll);
     }
-    if (now - lastSyncTestWirelessPollMs > SYNC_TEST_WIRELESS_POLL_MS) {
+    if (now - lastSyncTestWirelessPollMs > syncWirelessPollMs) {
       lastSyncTestWirelessPollMs = now;
-      enqueueCommandEntry("cmd=get section=wireless", true);
+      enqueueCommandEntry("cmd=get section=wireless", true, CommandClass::Poll);
     }
   }
 
-  if (millis() - lastPollMs > AUTO_STATUS_POLL_MS) {
+  unsigned long autoStatusPollMs = app.transportMode == TransportMode::Ble ? BLE_AUTO_STATUS_POLL_MS : AUTO_STATUS_POLL_MS;
+  if (millis() - lastPollMs > autoStatusPollMs) {
     lastPollMs = millis();
     if (app.usbConnected && app.protocolMode != ProtocolMode::Probing && !autoRefreshPaused()) {
       if (app.protocolMode == ProtocolMode::Nk4) {
-        enqueueCommandEntry("cmd=status", true);
+        enqueueCommandEntry("cmd=status", true, app.transportMode == TransportMode::Ble ? CommandClass::Poll
+                                                                                        : CommandClass::User);
       } else {
         sendCommand(NightKiteCommands::refreshAll(), false);
       }
