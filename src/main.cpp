@@ -155,6 +155,19 @@ enum class TransportMode : uint8_t {
   Ble,
 };
 
+enum class BleClientState : uint8_t {
+  Idle,
+  Scanning,
+  Found,
+  Connecting,
+  Discovering,
+  Subscribing,
+  Hello,
+  Ready,
+  Error,
+  Lost,
+};
+
 struct ControllerIdentity {
   String uid;
   String shortId;
@@ -364,6 +377,7 @@ struct AppState {
   std::vector<String> firmwareFiles;
   std::vector<BleDeviceEntry> bleDevices;
   String bleStatus = "BLE idle";
+  BleClientState bleState = BleClientState::Idle;
   bool bleScanning = false;
   String lastCommand;
   String lastResponse;
@@ -658,10 +672,12 @@ public:
     begin();
     if (connected()) {
       status = "Disconnect first";
+      state = BleClientState::Error;
       return false;
     }
     devices.clear();
     status = "Scanning";
+    state = BleClientState::Scanning;
     scanning = true;
     BLEScan* scan = BLEDevice::getScan();
     scan->setAdvertisedDeviceCallbacks(new ScanCallbacks(this), true);
@@ -672,6 +688,7 @@ public:
     scan->clearResults();
     scanning = false;
     status = devices.empty() ? "No NK BLE" : String("Found ") + devices.size();
+    state = devices.empty() ? BleClientState::Idle : BleClientState::Found;
     return !devices.empty();
   }
 
@@ -679,46 +696,66 @@ public:
   {
     if (index < 0 || index >= static_cast<int>(devices.size())) {
       status = "No BLE device";
+      state = BleClientState::Error;
       return false;
     }
     disconnect();
     begin();
-    status = "Connecting";
+    setPhase(BleClientState::Connecting, "Conn...");
+    Serial.println("ble: connect");
     client = BLEDevice::createClient();
     client->setClientCallbacks(new ClientCallbacks(this));
     if (client == nullptr || !client->connect(BLEAddress(devices[index].address.c_str()))) {
-      status = "Connect failed";
+      setPhase(BleClientState::Error, "BLE err conn");
+      Serial.println("ble: err connect");
       disconnect();
       return false;
     }
+    setPhase(BleClientState::Discovering, "Svc...");
+    Serial.println("ble: connected");
     BLERemoteService* service = client->getService(BLEUUID(NK_BLE_SERVICE_UUID));
     if (service == nullptr) {
-      status = "Service missing";
+      setPhase(BleClientState::Error, "BLE err no svc");
+      Serial.println("ble: err no svc");
       disconnect();
       return false;
     }
+    Serial.println("ble: service ok");
     rxCharacteristic = service->getCharacteristic(BLEUUID(NK_BLE_RX_UUID));
-    txCharacteristic = service->getCharacteristic(BLEUUID(NK_BLE_TX_UUID));
-    if (rxCharacteristic == nullptr || txCharacteristic == nullptr) {
-      status = "Chars missing";
+    if (rxCharacteristic == nullptr) {
+      setPhase(BleClientState::Error, "BLE err no rx");
+      Serial.println("ble: err no rx");
       disconnect();
       return false;
     }
+    Serial.println("ble: rx ok");
+    txCharacteristic = service->getCharacteristic(BLEUUID(NK_BLE_TX_UUID));
+    if (txCharacteristic == nullptr) {
+      setPhase(BleClientState::Error, "BLE err no tx");
+      Serial.println("ble: err no tx");
+      disconnect();
+      return false;
+    }
+    Serial.println("ble: tx ok");
     if (!rxCharacteristic->canWrite()) {
-      status = "RX not writable";
+      setPhase(BleClientState::Error, "BLE err rx write");
+      Serial.println("ble: err rx write");
       disconnect();
       return false;
     }
     if (!txCharacteristic->canNotify()) {
-      status = "TX no notify";
+      setPhase(BleClientState::Error, "BLE err no notify");
+      Serial.println("ble: err no notify");
       disconnect();
       return false;
     }
+    setPhase(BleClientState::Subscribing, "Notify...");
     activeInstance = this;
     txCharacteristic->registerForNotify(notifyCallback);
+    Serial.println("ble: notify ok");
     clearBuffers();
     connectedName = devices[index].name.length() ? devices[index].name : devices[index].address;
-    status = "Conn " + shortBleName(connectedName);
+    setPhase(BleClientState::Hello, "Hello...");
     return true;
   }
 
@@ -740,6 +777,31 @@ public:
     connectedName = "";
   }
 
+  void markHelloSent()
+  {
+    setPhase(BleClientState::Hello, "Hello...");
+    Serial.println("ble: hello sent");
+  }
+
+  void markReady()
+  {
+    setPhase(BleClientState::Ready, "BLE NK4");
+    Serial.println("ble: hello ok");
+  }
+
+  void markError(const String& reason)
+  {
+    setPhase(BleClientState::Error, "BLE err " + reason);
+    Serial.print("ble: err ");
+    Serial.println(reason);
+  }
+
+  void markLost()
+  {
+    setPhase(BleClientState::Lost, "BLE lost");
+    Serial.println("ble: lost");
+  }
+
   bool isScanning() const
   {
     return scanning;
@@ -748,6 +810,11 @@ public:
   String statusText() const
   {
     return status;
+  }
+
+  BleClientState clientState() const
+  {
+    return state;
   }
 
   String currentName() const
@@ -761,6 +828,12 @@ public:
   }
 
 private:
+  void setPhase(BleClientState nextState, const String& text)
+  {
+    state = nextState;
+    status = text;
+  }
+
   static String shortBleName(const String& text)
   {
     return text.length() > 12 ? text.substring(0, 12) : text;
@@ -829,7 +902,7 @@ private:
     void onConnect(BLEClient*) override {}
     void onDisconnect(BLEClient*) override
     {
-      owner->status = "BLE lost";
+      owner->markLost();
     }
   private:
     BleNk4Transport* owner;
@@ -851,6 +924,7 @@ private:
   String notifyBuffer;
   String status = "BLE idle";
   String connectedName;
+  BleClientState state = BleClientState::Idle;
   bool started = false;
   bool scanning = false;
 };
@@ -867,6 +941,13 @@ NightKiteTransport& activeTransport()
 bool controllerTransportConnected()
 {
   return app.transportMode == TransportMode::Ble ? bleTransport.connected() : usbTransport.connected();
+}
+
+void syncBleUiStatus()
+{
+  app.bleStatus = bleTransport.statusText();
+  app.bleState = bleTransport.clientState();
+  app.dirty = true;
 }
 
 void setStatus(const String& text, uint16_t color = COLOR_MUTED)
@@ -2090,7 +2171,7 @@ void drawDeviceCard()
               COLOR_TEXT);
   drawTextFit("Cfg " + app.diagnostics.configValid, 125, CONTENT_Y + 74, 105,
               app.diagnostics.configValid == "1" || app.diagnostics.configValid == "true" ? COLOR_OK : COLOR_MUTED);
-  drawFooter("R read  S save  C USB  F defaults");
+  drawFooter(app.transportMode == TransportMode::Ble ? "R read  S save  B BLE disc" : "R read  S save  C USB  F defaults");
 }
 
 void drawBleCard()
@@ -2124,7 +2205,7 @@ void drawBleCard()
       drawTextFit(shortText(device.address, 14), 148, y + 5, 82, COLOR_MUTED, bg);
     }
   }
-  drawFooter("S scan  ENTER conn  D disc");
+  drawFooter("S scan  ENTER conn  D disc  B reset");
 }
 
 const char* const PLAY_MODES[] = {"manual", "autoplay", "sync"};
@@ -3927,6 +4008,10 @@ bool parseNk4Line(const String& parsed)
       app.protocolMode = ProtocolMode::Nk4;
       app.controllerError = false;
       commandQueue.clear();
+      if (app.transportMode == TransportMode::Ble) {
+        bleTransport.markReady();
+        syncBleUiStatus();
+      }
       setStatus(String(transportToken()) + " NK4 detected", COLOR_OK);
       sendCommand(NightKiteCommands::refreshAll(), false);
     } else if (matchedCommand == "cmd=save") {
@@ -4139,13 +4224,14 @@ void manualUsbReconnect()
 void startBleScan()
 {
   app.bleStatus = "Scanning";
+  app.bleState = BleClientState::Scanning;
   app.dirty = true;
   bleTransport.scan();
   app.bleDevices = bleTransport.deviceList();
   if (app.selectedBleIndex >= static_cast<int>(app.bleDevices.size())) {
     app.selectedBleIndex = max(0, static_cast<int>(app.bleDevices.size()) - 1);
   }
-  app.bleStatus = bleTransport.statusText();
+  syncBleUiStatus();
   app.dirty = true;
 }
 
@@ -4163,8 +4249,8 @@ void connectSelectedBleDevice()
   }
   int index = constrain(app.selectedBleIndex, 0, static_cast<int>(app.bleDevices.size()) - 1);
   if (!bleTransport.connectIndex(index)) {
-    setStatus(bleTransport.statusText(), COLOR_ERR);
-    app.bleStatus = bleTransport.statusText();
+    syncBleUiStatus();
+    setStatus(app.bleStatus, COLOR_ERR);
     return;
   }
   resetControllerSession(TransportMode::Ble);
@@ -4175,7 +4261,7 @@ void connectSelectedBleDevice()
   usbProbePending = false;
   nk4ProbeStartMs = millis();
   nk4MachineSentMs = 0;
-  app.bleStatus = bleTransport.statusText();
+  syncBleUiStatus();
   setStatus("BLE detecting", COLOR_ACCENT);
 }
 
@@ -4187,7 +4273,23 @@ void disconnectBleDevice()
   usbProbePending = app.usbConnected;
   usbConnectedSinceMs = millis();
   app.bleStatus = "BLE disconnected";
+  app.bleState = BleClientState::Idle;
   setStatus("BLE disconnected", COLOR_WARN);
+}
+
+void failBleConnection(const String& reason)
+{
+  commandQueue.clear();
+  nk4Pending = false;
+  pendingNk4 = CommandQueueEntry{};
+  bleTransport.markError(reason);
+  bleTransport.disconnect();
+  resetControllerSession();
+  app.usbConnected = false;
+  usbProbePending = false;
+  app.bleStatus = "BLE err " + reason;
+  app.bleState = BleClientState::Error;
+  setStatus(app.bleStatus, COLOR_ERR);
 }
 
 void enqueuePostDefaultsRefresh()
@@ -4245,12 +4347,7 @@ void startFactoryResetConfirm()
 void fallbackToLegacy()
 {
   if (app.transportMode == TransportMode::Ble) {
-    app.protocolMode = ProtocolMode::Unknown;
-    nk4Pending = false;
-    commandQueue.clear();
-    bleTransport.disconnect();
-    app.usbConnected = false;
-    setStatus("BLE NK4 timeout", COLOR_ERR);
+    failBleConnection("hello");
     return;
   }
   app.protocolMode = ProtocolMode::Legacy;
@@ -4277,6 +4374,8 @@ void pollNk4Probe()
       pendingNk4.generation = connectionGeneration;
       nk4Pending = true;
       nk4HelloSent = true;
+      bleTransport.markHelloSent();
+      syncBleUiStatus();
       activeTransport().sendLine("NK4 seq=" + String(pendingNk4.seq) +
                                  " cmd=hello client=nightkite-link proto_min=4 proto_max=4");
       app.lastCommand = "BLE NK4 hello";
@@ -4319,12 +4418,17 @@ void pollTransport()
   if (app.transportMode == TransportMode::Ble) {
     app.usbConnected = bleTransport.connected();
     if (!app.usbConnected) {
+      String bleStatus = bleTransport.statusText();
+      BleClientState bleState = bleTransport.clientState();
       resetControllerSession();
       usbProbePending = false;
-      setStatus("BLE disconnected", COLOR_WARN);
+      app.bleStatus = bleStatus.length() ? bleStatus : "BLE lost";
+      app.bleState = bleState == BleClientState::Error ? BleClientState::Error : BleClientState::Lost;
+      setStatus(app.bleStatus, app.bleState == BleClientState::Error ? COLOR_ERR : COLOR_WARN);
       app.dirty = true;
       return;
     }
+    syncBleUiStatus();
   } else {
   bool wasUsbConnected = app.usbConnected;
   app.usbConnected = usbTransport.connected();
@@ -5251,10 +5355,15 @@ void handleWordChar(char c)
       startBleScan();
       return;
     }
-    if (c == 'd' || c == 'D') {
+    if (c == 'd' || c == 'D' || c == 'b' || c == 'B') {
       disconnectBleDevice();
       return;
     }
+  }
+  if ((c == 'b' || c == 'B') && static_cast<Card>(app.selectedCard) == Card::Device &&
+      app.transportMode == TransportMode::Ble) {
+    disconnectBleDevice();
+    return;
   }
 
   if ((c == 'c' || c == 'C') && static_cast<Card>(app.selectedCard) == Card::Config) {
