@@ -43,6 +43,7 @@ constexpr unsigned long CONTROLLER_BATTERY_POLL_MS = 60000;
 constexpr unsigned long LINK_STALE_MS = 9000;
 constexpr unsigned long COMMAND_SEND_INTERVAL_MS = 160;
 constexpr unsigned long BLE_COMMAND_SEND_INTERVAL_MS = 220;
+constexpr unsigned long BLE_NOTIFY_IDLE_GRACE_MS = 1800;
 constexpr unsigned long AUTO_STATUS_POLL_MS = 4000;
 constexpr unsigned long AUTO_REFRESH_IDLE_MS = 1800;
 constexpr unsigned long SYNC_TEST_STATUS_POLL_MS = 1800;
@@ -52,6 +53,8 @@ constexpr unsigned long USB_RECONNECT_STABLE_MS = 600;
 constexpr unsigned long NK4_COMMAND_TIMEOUT_MS = 1400;
 constexpr unsigned long BLE_NK4_COMMAND_TIMEOUT_MS = 5000;
 constexpr unsigned long BLE_NK4_HELLO_TIMEOUT_MS = 5000;
+constexpr unsigned long BLE_NK4_LONG_TIMEOUT_MS = 10000;
+constexpr unsigned long BLE_NK4_MEDIUM_TIMEOUT_MS = 8000;
 constexpr unsigned long NK4_PROBE_TIMEOUT_MS = 1600;
 constexpr unsigned long NK4_MACHINE_DELAY_MS = 120;
 constexpr unsigned long SPLASH_DURATION_MS = 1500;
@@ -838,6 +841,11 @@ public:
     return state;
   }
 
+  unsigned long lastNotifyAtMs() const
+  {
+    return lastNotifyAt;
+  }
+
   String currentName() const
   {
     return connectedName;
@@ -879,6 +887,7 @@ private:
 
   void onNotify(uint8_t* data, size_t length)
   {
+    lastNotifyAt = millis();
     Serial.print("ble: notify len=");
     Serial.println(length);
     Serial.print("ble: notify data=");
@@ -959,6 +968,7 @@ private:
   String status = "BLE idle";
   String connectedName;
   BleClientState state = BleClientState::Idle;
+  unsigned long lastNotifyAt = 0;
   bool started = false;
   bool scanning = false;
 };
@@ -1653,10 +1663,12 @@ void sendCommand(const String& command, bool announce = true)
     enqueueCommandEntry("cmd=status", true);
     enqueueCommandEntry("cmd=get section=config", true);
     enqueueCommandEntry("cmd=get section=play", true);
-    enqueueCommandEntry("cmd=get section=sync", true);
-    enqueueCommandEntry("cmd=sync_radio_status", true);
     enqueueCommandEntry("cmd=get section=wireless", true);
     enqueueCommandEntry("cmd=get section=patterns", true);
+    enqueueCommandEntry("cmd=get section=sync", true);
+    if (app.transportMode != TransportMode::Ble) {
+      enqueueCommandEntry("cmd=sync_radio_status", true);
+    }
   } else if (app.protocolMode == ProtocolMode::Nk4) {
     enqueueCommandEntry(legacyCommandToNk4Payload(command), true);
   } else {
@@ -1812,15 +1824,15 @@ String nk4CommandLabel(const String& command)
   if (payload.startsWith("get ")) {
     String section = valueForKey(payload, "section");
     if (section.length() > 0) {
-      return section;
+      return "get_" + section;
     }
     return "get";
   }
   if (payload.startsWith("sync_radio_status")) {
-    return "radio";
+    return "radio_status";
   }
   if (payload.startsWith("sync_status")) {
-    return "sync";
+    return "sync_status";
   }
   if (payload.startsWith("status")) {
     return "status";
@@ -1839,13 +1851,40 @@ String nk4CommandLabel(const String& command)
   return label.length() > 14 ? label.substring(0, 14) : label;
 }
 
+unsigned long bleNk4TimeoutForCommand(const String& command)
+{
+  String label = nk4CommandLabel(command);
+  if (label == "get_sync" || label == "sync_status" || label == "radio_status" || label == "get_patterns") {
+    return BLE_NK4_LONG_TIMEOUT_MS;
+  }
+  if (label == "get_wireless" || label == "get_config" || label == "get_play") {
+    return BLE_NK4_MEDIUM_TIMEOUT_MS;
+  }
+  return BLE_NK4_COMMAND_TIMEOUT_MS;
+}
+
+bool bleNk4CommandOptional(const String& command)
+{
+  String label = nk4CommandLabel(command);
+  return label == "get_sync" || label == "sync_status" || label == "radio_status" || label == "get_wireless" ||
+         label == "get_patterns";
+}
+
 void pollCommandQueue()
 {
   if (nk4Pending) {
     if (!app.usbConnected || pendingNk4.generation != connectionGeneration) {
       nk4Pending = false;
-    } else if (millis() - pendingNk4.sentAt >
-               (app.transportMode == TransportMode::Ble ? BLE_NK4_COMMAND_TIMEOUT_MS : NK4_COMMAND_TIMEOUT_MS)) {
+    } else {
+      unsigned long now = millis();
+      unsigned long timeoutMs =
+          app.transportMode == TransportMode::Ble ? bleNk4TimeoutForCommand(pendingNk4.command) : NK4_COMMAND_TIMEOUT_MS;
+      unsigned long lastBleActivity = app.transportMode == TransportMode::Ble ? bleTransport.lastNotifyAtMs() : 0;
+      bool bleStillReceiving = app.transportMode == TransportMode::Ble && lastBleActivity > pendingNk4.sentAt &&
+                               now - lastBleActivity < BLE_NOTIFY_IDLE_GRACE_MS;
+      if (now - pendingNk4.sentAt <= timeoutMs || bleStillReceiving) {
+        return;
+      }
       String timedOut = pendingNk4.command;
       String timeoutLabel = nk4CommandLabel(timedOut);
       nk4Pending = false;
@@ -1861,16 +1900,36 @@ void pollCommandQueue()
       }
       app.controllerError = true;
       if (app.transportMode == TransportMode::Ble) {
-        commandQueue.clear();
-        patternSyncInProgress = false;
-        transferCompleteSoundPending = false;
-        bleTransport.markError("timeout " + timeoutLabel);
-        syncBleUiStatus();
-        setStatus("BLE timeout " + timeoutLabel, COLOR_ERR);
+        bool optionalTimeout = bleNk4CommandOptional(timedOut);
+        activeTransport().clearBuffers();
+        if (!optionalTimeout) {
+          commandQueue.clear();
+          patternSyncInProgress = false;
+          transferCompleteSoundPending = false;
+          bleTransport.markError("timeout " + timeoutLabel);
+          app.controllerError = true;
+        } else {
+          app.controllerError = false;
+          app.bleStatus = timeoutLabel == "get_sync" || timeoutLabel == "sync_status" || timeoutLabel == "radio_status"
+                              ? "Sync slow"
+                              : "BLE slow " + timeoutLabel;
+          app.bleState = BleClientState::Ready;
+        }
+        if (!optionalTimeout) {
+          syncBleUiStatus();
+        } else {
+          app.dirty = true;
+        }
+        setStatus("BLE timeout " + timeoutLabel, optionalTimeout ? COLOR_WARN : COLOR_ERR);
         Serial.print("bleq: timeout seq=");
         Serial.print(pendingNk4.seq);
-        Serial.print(" cmd=");
+        Serial.print(" label=");
         Serial.println(timeoutLabel);
+        Serial.print("bleq: timeout raw=\"NK4 seq=");
+        Serial.print(pendingNk4.seq);
+        Serial.print(" ");
+        Serial.print(timedOut);
+        Serial.println("\"");
       } else {
         setStatus("NK4 timeout", COLOR_ERR);
       }
@@ -1929,6 +1988,8 @@ void pollCommandQueue()
       Serial.print("bleq: send seq=");
       Serial.print(entry.seq);
       Serial.print(" cmd=");
+      Serial.print(entry.command);
+      Serial.print(" label=");
       Serial.println(nk4CommandLabel(entry.command));
     }
   }
