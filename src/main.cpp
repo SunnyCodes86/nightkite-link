@@ -2378,20 +2378,22 @@ void drawStatusBar()
   String cp = app.cardputerBatteryPercent >= 0 ? String(app.cardputerBatteryPercent) + "%" : "--";
   String transport = connectionToken();
   String play = app.protocolMode == ProtocolMode::Nk4 ? playToken() + "/" + roleToken() : "CTRL";
-  String nk = "--";
-  if (app.controllerConnected && app.settings.hasControllerBattery) {
-    nk = controllerBatteryText();
-  }
   bool cliBusy = !commandQueue.empty() || patternSyncInProgress;
-  int queueDepth = static_cast<int>(commandQueue.size()) + (nk4Pending ? 1 : 0);
-  String queueText = "Q" + String(queueDepth);
+  int queuedCount = static_cast<int>(commandQueue.size());
+  String queueText = nk4Pending && queuedCount > 0 ? "Q:1+" + String(queuedCount) : "Q:" + String(queuedCount + (nk4Pending ? 1 : 0));
   uint16_t queueColor = cliBusy ? COLOR_WARN : COLOR_MUTED;
+  String nkStatus = "--";
+  if (app.settings.controllerBatteryPercent >= 0) {
+    nkStatus = String(app.settings.controllerBatteryPercent) + "%";
+  } else if (app.settings.hasControllerBattery) {
+    nkStatus = controllerBatteryVoltageText();
+  }
 
   drawTextFit(transport, 3, 4, 48, app.controllerError ? COLOR_WARN : COLOR_TEXT, COLOR_PANEL_DARK);
   drawTextFit(play, 54, 4, 43, app.protocolMode == ProtocolMode::Nk4 ? COLOR_OK : COLOR_MUTED, COLOR_PANEL_DARK);
-  drawTextFit(queueText, 100, 4, 35, queueColor, COLOR_PANEL_DARK);
+  drawTextFit(queueText, 100, 4, 48, queueColor, COLOR_PANEL_DARK);
   if (app.controllerConnected && app.settings.hasControllerBattery) {
-    drawTextFit(nk, 138, 4, 60, COLOR_OK, COLOR_PANEL_DARK);
+    drawTextFit(nkStatus, 151, 4, 47, COLOR_OK, COLOR_PANEL_DARK);
   }
   drawTextFit(String("L:") + cp, 201, 4, 36, app.cardputerCharging ? COLOR_OK : COLOR_ACCENT, COLOR_PANEL_DARK);
 }
