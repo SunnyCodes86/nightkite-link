@@ -728,6 +728,16 @@ void parseIntField(const String& line, const char* key, int& target)
   }
 }
 
+bool parseIntValue(const String& line, const char* key, int& target)
+{
+  String value = valueForKey(line, key);
+  if (value.length() == 0) {
+    return false;
+  }
+  target = value.toInt();
+  return true;
+}
+
 void parseIntFieldUnlessDirty(const String& line, const char* key, int& target, bool dirty)
 {
   if (!dirty) {
@@ -3500,12 +3510,13 @@ void applyNk4Fields(const String& parsed)
   app.sync.patternChangeCount = parseUlongText(valueForKey(parsed, "pattern_change_count"), app.sync.patternChangeCount);
   parseStringField(parsed, "sync_apply_reason", app.sync.syncApplyReason);
   parseIntField(parsed, "last_pattern_change_latency_ms", app.sync.lastPatternChangeLatencyMs);
-  parseIntField(parsed, "beacon_age_ms", app.sync.beaconAgeMs);
-  parseIntField(parsed, "beacon_age", app.sync.beaconAgeMs);
-  parseIntField(parsed, "age_ms", app.sync.beaconAgeMs);
-  parseIntField(parsed, "rx_age_ms", app.sync.beaconAgeMs);
-  parseIntField(parsed, "last_beacon_age_ms", app.sync.beaconAgeMs);
-  parseIntField(parsed, "last_beacon_ms", app.sync.beaconAgeMs);
+  int parsedBeaconAge = app.sync.beaconAgeMs;
+  if (parseIntValue(parsed, "beacon_age_ms", parsedBeaconAge) ||
+      parseIntValue(parsed, "last_beacon_age_ms", parsedBeaconAge) ||
+      parseIntValue(parsed, "rx_age_ms", parsedBeaconAge) || parseIntValue(parsed, "beacon_age", parsedBeaconAge) ||
+      parseIntValue(parsed, "age_ms", parsedBeaconAge)) {
+    app.sync.beaconAgeMs = parsedBeaconAge;
+  }
   parseStringField(parsed, "radio_mode", app.sync.radioMode);
 
   if (hasBoolKey(parsed, "wireless_enabled", boolValue)) {
