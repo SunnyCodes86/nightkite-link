@@ -40,6 +40,7 @@ constexpr unsigned long COMMAND_SEND_INTERVAL_MS = 160;
 constexpr unsigned long AUTO_STATUS_POLL_MS = 4000;
 constexpr unsigned long AUTO_REFRESH_IDLE_MS = 1800;
 constexpr unsigned long SYNC_TEST_STATUS_POLL_MS = 1800;
+constexpr unsigned long SYNC_TEST_RADIO_POLL_MS = 1800;
 constexpr unsigned long SYNC_TEST_WIRELESS_POLL_MS = 5000;
 constexpr unsigned long USB_RECONNECT_STABLE_MS = 600;
 constexpr unsigned long NK4_COMMAND_TIMEOUT_MS = 1400;
@@ -185,6 +186,7 @@ struct SyncState {
   unsigned long beaconRxCount = 0;
   unsigned long beaconCrcErrors = 0;
   unsigned long beaconGroupMismatch = 0;
+  unsigned long scanDecodeOk = 0;
   int beaconAgeMs = -1;
   String radioMode = "unknown";
   bool syncAutoplay = false;
@@ -356,6 +358,7 @@ unsigned long lastCommandSendMs = 0;
 unsigned long lastControllerBatteryReadMs = 0;
 unsigned long lastUserInputMs = 0;
 unsigned long lastSyncTestStatusPollMs = 0;
+unsigned long lastSyncTestRadioPollMs = 0;
 unsigned long lastSyncTestWirelessPollMs = 0;
 unsigned long usbConnectedSinceMs = 0;
 bool lastUsbConnected = false;
@@ -431,6 +434,7 @@ UsbMscUf2Flasher uf2Flasher;
 bool ensureSdReady();
 void syncEditFromCard();
 void discardAllDrafts();
+String beaconAgeText();
 
 bool flashCopyAudioQuiet()
 {
@@ -1169,6 +1173,7 @@ void sendCommand(const String& command, bool announce = true)
     enqueueCommandEntry("cmd=get section=config", true);
     enqueueCommandEntry("cmd=get section=play", true);
     enqueueCommandEntry("cmd=get section=sync", true);
+    enqueueCommandEntry("cmd=sync_radio_status", true);
     enqueueCommandEntry("cmd=get section=wireless", true);
     enqueueCommandEntry("cmd=get section=patterns", true);
   } else if (app.protocolMode == ProtocolMode::Nk4) {
@@ -1814,6 +1819,11 @@ void drawSyncCard()
     drawTextFit(String(labels[i]) + (dirtyField ? "*" : ""), x + 5, y + 6, 60, dirtyField ? COLOR_WARN : COLOR_MUTED, bg);
     drawTextFit(values[i], x + 5, y + 18, 60, active ? COLOR_TEXT : COLOR_ACCENT, bg);
   }
+  drawTextFit("TX " + String(app.sync.beaconTxCount) + " RX " + String(app.sync.beaconRxCount) + " A" +
+                  beaconAgeText(),
+              10, CONTENT_Y + 90, 122, COLOR_TEXT);
+  drawTextFit("E " + String(app.sync.beaconCrcErrors) + "/" + String(app.sync.beaconGroupMismatch), 138, CONTENT_Y + 90,
+              88, (app.sync.beaconCrcErrors || app.sync.beaconGroupMismatch) ? COLOR_WARN : COLOR_MUTED);
   drawFooter(app.protocolMode == ProtocolMode::Nk4 ? (syncDirtyMask ? "PEND  ENTER set  DEL cancel" : "C field  W/S edit")
                                                    : unavailable);
 }
@@ -1848,6 +1858,30 @@ String msText(int value)
 String seqText(int value)
 {
   return value >= 0 ? String(value) : "--";
+}
+
+int effectiveSyncReadyPattern()
+{
+  if (app.sync.syncReadyPattern >= 0) {
+    return app.sync.syncReadyPattern;
+  }
+  int pattern = patternDirty ? draftActivePattern : app.settings.activePattern;
+  if (!app.settings.hasPatternClassification || pattern < 1 || pattern > PATTERN_COUNT) {
+    return -1;
+  }
+  return (app.settings.syncReadyPatternMask & (1UL << (pattern - 1))) != 0 ? 1 : 0;
+}
+
+int effectivePartialSyncPattern()
+{
+  if (app.sync.partialSyncPattern >= 0) {
+    return app.sync.partialSyncPattern;
+  }
+  int pattern = patternDirty ? draftActivePattern : app.settings.activePattern;
+  if (!app.settings.hasPatternClassification || pattern < 1 || pattern > PATTERN_COUNT) {
+    return -1;
+  }
+  return (app.settings.partialSyncPatternMask & (1UL << (pattern - 1))) != 0 ? 1 : 0;
 }
 
 String wirelessProfileText()
@@ -1918,6 +1952,7 @@ void queueSyncTestRefresh()
   }
   enqueueCommandEntry("cmd=get section=sync", true);
   enqueueCommandEntry("cmd=sync_status", true);
+  enqueueCommandEntry("cmd=sync_radio_status", true);
   enqueueCommandEntry("cmd=get section=wireless", true);
   enqueueCommandEntry("cmd=status", true);
   setStatus("Sync refresh queued", COLOR_ACCENT);
@@ -2039,7 +2074,7 @@ void drawSyncDiagCard()
   drawTextFit("Lat " + msText(app.sync.lastPatternChangeLatencyMs), 124, CONTENT_Y + 76, 108, COLOR_TEXT);
   drawTextFit("Auto " + boolShort(app.sync.syncAutoplay) + " M " + boolShort(app.sync.masterAutoplay), 8, CONTENT_Y + 90,
               108, app.sync.masterAutoplay ? COLOR_OK : COLOR_MUTED);
-  drawTextFit("Pat S" + seqText(app.sync.syncReadyPattern) + " P" + seqText(app.sync.partialSyncPattern), 124,
+  drawTextFit("Pat S" + seqText(effectiveSyncReadyPattern()) + " P" + seqText(effectivePartialSyncPattern()), 124,
               CONTENT_Y + 90, 108, COLOR_TEXT);
   drawFooter("R refresh  USB config only");
 }
@@ -2103,7 +2138,7 @@ void drawBrightnessCard()
 
 void drawPatternCard()
 {
-  int value = patternDirty ? draftActivePattern : app.settings.activePattern;
+  int value = draftActivePattern >= 1 && draftActivePattern <= PATTERN_COUNT ? draftActivePattern : app.settings.activePattern;
   ensurePatternModel();
   bool cycle = value >= 1 && value <= PATTERN_COUNT ? app.settings.patterns[value - 1].cycleEnabled : false;
   bool inverted = value >= 1 && value <= PATTERN_COUNT ? app.settings.patterns[value - 1].inverted : false;
@@ -3348,6 +3383,9 @@ void applyNk4Fields(const String& parsed)
   if (hasBoolKey(parsed, "sync_locked", boolValue)) {
     app.sync.locked = boolValue;
   }
+  if (hasBoolKey(parsed, "locked", boolValue)) {
+    app.sync.locked = boolValue;
+  }
   if (hasBoolKey(parsed, "sync_autoplay", boolValue)) {
     app.sync.syncAutoplay = boolValue;
   }
@@ -3373,8 +3411,12 @@ void applyNk4Fields(const String& parsed)
   app.sync.beaconTxCount = parseUlongText(valueForKey(parsed, "beacon_tx_count"), app.sync.beaconTxCount);
   app.sync.beaconRxCount = parseUlongText(valueForKey(parsed, "beacon_rx_count"), app.sync.beaconRxCount);
   app.sync.beaconCrcErrors = parseUlongText(valueForKey(parsed, "beacon_crc_errors"), app.sync.beaconCrcErrors);
+  app.sync.beaconCrcErrors = parseUlongText(valueForKey(parsed, "scan_crc_fail"), app.sync.beaconCrcErrors);
   app.sync.beaconGroupMismatch =
       parseUlongText(valueForKey(parsed, "beacon_group_mismatch"), app.sync.beaconGroupMismatch);
+  app.sync.beaconGroupMismatch =
+      parseUlongText(valueForKey(parsed, "scan_group_mismatch"), app.sync.beaconGroupMismatch);
+  app.sync.scanDecodeOk = parseUlongText(valueForKey(parsed, "scan_decode_ok"), app.sync.scanDecodeOk);
   app.sync.syncApplyCount = parseUlongText(valueForKey(parsed, "sync_apply_count"), app.sync.syncApplyCount);
   app.sync.syncApplySkipped = parseUlongText(valueForKey(parsed, "sync_apply_skipped"), app.sync.syncApplySkipped);
   app.sync.patternChangeCount = parseUlongText(valueForKey(parsed, "pattern_change_count"), app.sync.patternChangeCount);
@@ -3645,6 +3687,7 @@ void resetControllerSession()
   lastRxMs = millis();
   lastControllerBatteryReadMs = 0;
   lastSyncTestStatusPollMs = 0;
+  lastSyncTestRadioPollMs = 0;
   lastSyncTestWirelessPollMs = 0;
 }
 
@@ -3682,6 +3725,7 @@ void enqueuePostDefaultsRefresh()
     enqueueCommandEntry("cmd=get section=config", true);
     enqueueCommandEntry("cmd=get section=play", true);
     enqueueCommandEntry("cmd=get section=sync", true);
+    enqueueCommandEntry("cmd=sync_radio_status", true);
     enqueueCommandEntry("cmd=get section=wireless", true);
     enqueueCommandEntry("cmd=get section=patterns", true);
   } else {
@@ -3818,13 +3862,18 @@ void pollTransport()
     requestControllerBattery();
   }
 
-  bool syncDiagnosticsVisible = static_cast<Card>(app.selectedCard) == Card::SyncTest ||
+  bool syncDiagnosticsVisible = static_cast<Card>(app.selectedCard) == Card::Sync ||
+                                static_cast<Card>(app.selectedCard) == Card::SyncTest ||
                                 static_cast<Card>(app.selectedCard) == Card::SyncDiag;
   if (app.usbConnected && app.protocolMode == ProtocolMode::Nk4 && syncDiagnosticsVisible && !autoRefreshPaused()) {
     unsigned long now = millis();
     if (now - lastSyncTestStatusPollMs > SYNC_TEST_STATUS_POLL_MS) {
       lastSyncTestStatusPollMs = now;
       enqueueCommandEntry("cmd=sync_status", true);
+    }
+    if (now - lastSyncTestRadioPollMs > SYNC_TEST_RADIO_POLL_MS) {
+      lastSyncTestRadioPollMs = now;
+      enqueueCommandEntry("cmd=sync_radio_status", true);
     }
     if (now - lastSyncTestWirelessPollMs > SYNC_TEST_WIRELESS_POLL_MS) {
       lastSyncTestWirelessPollMs = now;
@@ -3914,7 +3963,7 @@ void syncEditFromCard()
       }
       break;
     case Card::ActivePattern:
-      if (!patternDirty) {
+      if (draftActivePattern < 1 || draftActivePattern > PATTERN_COUNT) {
         draftActivePattern = app.settings.activePattern;
         editValue = showInt(app.settings.activePattern);
       }
@@ -3959,6 +4008,7 @@ void refreshCurrentCard()
     } else if (static_cast<Card>(app.selectedCard) == Card::Sync) {
       enqueueCommandEntry("cmd=get section=sync", true);
       enqueueCommandEntry("cmd=sync_status", true);
+      enqueueCommandEntry("cmd=sync_radio_status", true);
     } else if (static_cast<Card>(app.selectedCard) == Card::Wireless) {
       enqueueCommandEntry("cmd=get section=wireless", true);
       enqueueCommandEntry("cmd=ble_status", true);
@@ -3967,6 +4017,7 @@ void refreshCurrentCard()
     } else if (static_cast<Card>(app.selectedCard) == Card::SyncDiag) {
       enqueueCommandEntry("cmd=get section=sync", true);
       enqueueCommandEntry("cmd=sync_status", true);
+      enqueueCommandEntry("cmd=sync_radio_status", true);
       enqueueCommandEntry("cmd=get section=patterns", true);
       enqueueCommandEntry("cmd=status", true);
     } else if (static_cast<Card>(app.selectedCard) == Card::PatternList ||
@@ -4010,6 +4061,11 @@ void togglePatternCycle(int patternIndex, bool sendNow)
   }
   auto& pattern = app.settings.patterns[patternIndex];
   pattern.cycleEnabled = !pattern.cycleEnabled;
+  int selected = pattern.id;
+  if (static_cast<Card>(app.selectedCard) == Card::ActivePattern) {
+    draftActivePattern = selected;
+    editValue = String(selected);
+  }
   if (sendNow) {
     sendCommand(NightKiteCommands::setPatternCycle(pattern.id, pattern.cycleEnabled));
   } else {
@@ -4027,6 +4083,11 @@ void togglePatternInvert(int patternIndex, bool sendNow)
   }
   auto& pattern = app.settings.patterns[patternIndex];
   pattern.inverted = !pattern.inverted;
+  int selected = pattern.id;
+  if (static_cast<Card>(app.selectedCard) == Card::ActivePattern) {
+    draftActivePattern = selected;
+    editValue = String(selected);
+  }
   if (sendNow) {
     sendCommand(NightKiteCommands::setPatternInvert(pattern.id, pattern.inverted));
   } else {
@@ -4712,7 +4773,8 @@ void handleWordChar(char c)
   }
   if (c == 'c' || c == 'C') {
     if (static_cast<Card>(app.selectedCard) == Card::ActivePattern) {
-      int patternId = editValue.length() ? editValue.toInt() : app.settings.activePattern;
+      int patternId = draftActivePattern >= 1 && draftActivePattern <= PATTERN_COUNT ? draftActivePattern
+                                                                                     : app.settings.activePattern;
       togglePatternCycle(patternId - 1, true);
       return;
     }
@@ -4723,7 +4785,8 @@ void handleWordChar(char c)
   }
   if (c == 'i' || c == 'I') {
     if (static_cast<Card>(app.selectedCard) == Card::ActivePattern) {
-      int patternId = editValue.length() ? editValue.toInt() : app.settings.activePattern;
+      int patternId = draftActivePattern >= 1 && draftActivePattern <= PATTERN_COUNT ? draftActivePattern
+                                                                                     : app.settings.activePattern;
       togglePatternInvert(patternId - 1, true);
       return;
     }
