@@ -49,6 +49,8 @@ constexpr unsigned long SYNC_TEST_RADIO_POLL_MS = 1800;
 constexpr unsigned long SYNC_TEST_WIRELESS_POLL_MS = 5000;
 constexpr unsigned long USB_RECONNECT_STABLE_MS = 600;
 constexpr unsigned long NK4_COMMAND_TIMEOUT_MS = 1400;
+constexpr unsigned long BLE_NK4_COMMAND_TIMEOUT_MS = 5000;
+constexpr unsigned long BLE_NK4_HELLO_TIMEOUT_MS = 5000;
 constexpr unsigned long NK4_PROBE_TIMEOUT_MS = 1600;
 constexpr unsigned long NK4_MACHINE_DELAY_MS = 120;
 constexpr unsigned long SPLASH_DURATION_MS = 1500;
@@ -644,10 +646,18 @@ public:
   void sendLine(const String& line) override
   {
     if (!connected()) {
+      setPhase(BleClientState::Error, "BLE err no conn");
+      Serial.println("ble: write fail no conn");
       return;
     }
     String wire = line + "\n";
-    rxCharacteristic->writeValue(reinterpret_cast<uint8_t*>(const_cast<char*>(wire.c_str())), wire.length(), false);
+    bool withResponse = rxCharacteristic->canWrite();
+    Serial.print("ble: tx ");
+    Serial.print(wire.length());
+    Serial.print(" resp=");
+    Serial.println(withResponse ? "1" : "0");
+    rxCharacteristic->writeValue(reinterpret_cast<uint8_t*>(const_cast<char*>(wire.c_str())), wire.length(), withResponse);
+    Serial.println("ble: write ok");
   }
 
   bool readLine(String& line) override
@@ -737,7 +747,11 @@ public:
       return false;
     }
     Serial.println("ble: tx ok");
-    if (!rxCharacteristic->canWrite()) {
+    Serial.print("ble: rx props write=");
+    Serial.print(rxCharacteristic->canWrite() ? "1" : "0");
+    Serial.print(" noresp=");
+    Serial.println(rxCharacteristic->canWriteNoResponse() ? "1" : "0");
+    if (!rxCharacteristic->canWrite() && !rxCharacteristic->canWriteNoResponse()) {
       setPhase(BleClientState::Error, "BLE err rx write");
       Serial.println("ble: err rx write");
       disconnect();
@@ -779,8 +793,13 @@ public:
 
   void markHelloSent()
   {
-    setPhase(BleClientState::Hello, "Hello...");
+    setPhase(BleClientState::Hello, "Hello tx");
     Serial.println("ble: hello sent");
+  }
+
+  void markHelloWait()
+  {
+    setPhase(BleClientState::Hello, "Hello wait");
   }
 
   void markReady()
@@ -858,6 +877,14 @@ private:
 
   void onNotify(uint8_t* data, size_t length)
   {
+    Serial.print("ble: notify len=");
+    Serial.println(length);
+    Serial.print("ble: notify data=");
+    for (size_t i = 0; i < length && i < 24; ++i) {
+      char c = static_cast<char>(data[i]);
+      Serial.print(c >= 32 && c <= 126 ? c : '.');
+    }
+    Serial.println();
     for (size_t i = 0; i < length; ++i) {
       char c = static_cast<char>(data[i]);
       if (c == '\r') {
@@ -868,6 +895,8 @@ private:
         notifyBuffer = "";
         line.trim();
         if (line.length() > 0) {
+          Serial.print("ble: line=");
+          Serial.println(line.substring(0, min(80, static_cast<int>(line.length()))));
           lines.push_back(line);
         }
       } else if (notifyBuffer.length() < MAX_CLI_LINE_CHARS) {
@@ -1774,10 +1803,14 @@ void pollCommandQueue()
   if (nk4Pending) {
     if (!app.usbConnected || pendingNk4.generation != connectionGeneration) {
       nk4Pending = false;
-    } else if (millis() - pendingNk4.sentAt > NK4_COMMAND_TIMEOUT_MS) {
+    } else if (millis() - pendingNk4.sentAt >
+               (app.transportMode == TransportMode::Ble ? BLE_NK4_COMMAND_TIMEOUT_MS : NK4_COMMAND_TIMEOUT_MS)) {
       String timedOut = pendingNk4.command;
       nk4Pending = false;
       if (app.protocolMode == ProtocolMode::Probing) {
+        if (app.transportMode == TransportMode::Ble) {
+          Serial.println("ble: hello timeout");
+        }
         fallbackToLegacy();
         return;
       }
@@ -3991,6 +4024,12 @@ bool parseNk4Line(const String& parsed)
   if (seq >= 0 && !isEvent && matchedCommand.length() == 0) {
     Serial.print("Ignoring stale NK4 response: ");
     Serial.println(parsed);
+    if (app.transportMode == TransportMode::Ble) {
+      Serial.print("ble: stale seq=");
+      Serial.print(seq);
+      Serial.print(" pending=");
+      Serial.println(nk4Pending ? pendingNk4.seq : 0);
+    }
     return true;
   }
 
@@ -4000,6 +4039,12 @@ bool parseNk4Line(const String& parsed)
   app.lastResponse = parsed;
 
   if (isOk || isEvent) {
+    if (app.transportMode == TransportMode::Ble) {
+      Serial.print("ble: nk4 parsed seq=");
+      Serial.print(seq);
+      Serial.print(" matched=");
+      Serial.println(matchedCommand.length() ? matchedCommand : String("--"));
+    }
     if (matchedCommand.length() > 0) {
       handleNk4CommandOk(matchedCommand);
     }
@@ -4378,11 +4423,14 @@ void pollNk4Probe()
       syncBleUiStatus();
       activeTransport().sendLine("NK4 seq=" + String(pendingNk4.seq) +
                                  " cmd=hello client=nightkite-link proto_min=4 proto_max=4");
+      bleTransport.markHelloWait();
+      syncBleUiStatus();
       app.lastCommand = "BLE NK4 hello";
       app.dirty = true;
       return;
     }
-    if (now - nk4ProbeStartMs > NK4_PROBE_TIMEOUT_MS) {
+    if (now - nk4ProbeStartMs > BLE_NK4_HELLO_TIMEOUT_MS) {
+      Serial.println("ble: hello timeout");
       fallbackToLegacy();
     }
     return;
