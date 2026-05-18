@@ -32,7 +32,7 @@ constexpr int STATUS_H = 14;
 constexpr int FOOTER_H = 13;
 constexpr int CONTENT_Y = STATUS_H;
 constexpr int CONTENT_H = SCREEN_H - STATUS_H - FOOTER_H;
-constexpr int MAX_CLI_LINE_CHARS = 512;
+constexpr int MAX_CLI_LINE_CHARS = 4096;
 constexpr unsigned long CARDPUTER_BATTERY_POLL_MS = 3000;
 constexpr unsigned long CONTROLLER_BATTERY_POLL_MS = 60000;
 constexpr unsigned long LINK_STALE_MS = 9000;
@@ -187,7 +187,9 @@ struct SyncState {
   unsigned long beaconCrcErrors = 0;
   unsigned long beaconGroupMismatch = 0;
   unsigned long scanDecodeOk = 0;
+  bool hasBeaconAge = false;
   int beaconAgeMs = -1;
+  unsigned long beaconAgeUpdatedAtMs = 0;
   String radioMode = "unknown";
   bool syncAutoplay = false;
   bool masterAutoplay = false;
@@ -1934,7 +1936,7 @@ String lockedText()
 
 String beaconAgeText()
 {
-  return app.sync.beaconAgeMs >= 0 ? String(app.sync.beaconAgeMs) + "ms" : "--";
+  return app.sync.hasBeaconAge ? String(app.sync.beaconAgeMs) + "ms" : "--";
 }
 
 String msText(int value)
@@ -3516,6 +3518,8 @@ void applyNk4Fields(const String& parsed)
       parseIntValue(parsed, "rx_age_ms", parsedBeaconAge) || parseIntValue(parsed, "beacon_age", parsedBeaconAge) ||
       parseIntValue(parsed, "age_ms", parsedBeaconAge)) {
     app.sync.beaconAgeMs = parsedBeaconAge;
+    app.sync.hasBeaconAge = true;
+    app.sync.beaconAgeUpdatedAtMs = millis();
   }
   parseStringField(parsed, "radio_mode", app.sync.radioMode);
 
