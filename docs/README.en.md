@@ -317,9 +317,12 @@ In NK4 mode, existing UI actions are translated to NK4 requests such as
 `cmd=set wireless_enabled=0|1`, `cmd=set wireless_profile=...`,
 `cmd=set enabled_mask=...` and `cmd=set inverted_mask=...`.
 
-The BLE NK4 service implemented by Firmware 4.0 is not used by this version of
-NightKite Link. USB remains the stable path. Link is a configurator and
-diagnostic tool; it does not relay real-time sync beacons or stream LED frames.
+The BLE NK4 service implemented by Firmware 4.0 can be used experimentally from
+the BLE Scan card. NightKite Link scans for `NK-...` devices or the NightKite
+service UUID, connects to one controller at a time, and uses the same NK4 parser
+as USB. TX Notify chunks are reassembled until newline `\n`. USB remains the
+stable recommended path. Link is a configurator and diagnostic tool; it does not
+relay real-time sync beacons or stream LED frames.
 
 Bulk invert currently maps to comma-separated `invert_pattern` /
 `normal_pattern` commands. A code comment marks a future dedicated
@@ -330,8 +333,8 @@ adds one later.
 
 For Firmware 4.0 USB NK4 controllers, the Sync Test card provides a compact
 setup and diagnostic workflow for the first master/follower beacon tests. It is
-only a configurator and USB diagnostic view; it is not a BLE client and does not
-relay real-time sync traffic.
+only a configurator and diagnostic view. BLE NK4 can configure controllers, but
+it is not a real-time sync path and does not relay sync traffic.
 
 Typical master setup:
 
@@ -385,8 +388,8 @@ The separate Sync Diag card shows PatternClock and apply diagnostics such as
 `autoplay_next_ms`.
 
 This makes master autoplay in sync mode visible and helps verify whether a
-follower is applying received beacons. NightKite Link still uses USB NK4 for this
-diagnostic path; Link does not include a BLE client yet.
+follower is applying received beacons. USB NK4 remains the stable diagnostic
+path; BLE NK4 is available as an experimental configuration and diagnostic path.
 
 Diagnostic fields are intentionally short for the Cardputer display:
 

@@ -58,10 +58,10 @@ pio device monitor
 
 The project is functional but still evolving. The USB CLI configuration workflow
 and card UI remain the stable operating path. USB NK4 support adds Firmware 4.0
-identity, play mode, sync and wireless configuration without requiring BLE. The
-BLE NK4 firmware transport exists on compatible controllers, but NightKite Link
-does not include a BLE client yet. Link configures sync; it is not a real-time
-sync relay. The UF2 Mass Storage flasher is present as an experimental
+identity, play mode, sync and wireless configuration. An experimental BLE Scan
+card can connect to Firmware 4.0 RM2/BLE controllers and use the same NK4 command
+path over GATT. BLE is for configuration/status/control only; Link is not a
+real-time sync relay. The UF2 Mass Storage flasher is present as an experimental
 service/recovery workflow and expects the controller to be manually placed into
 BOOTSEL/Mass Storage mode.
 
@@ -76,8 +76,10 @@ fields. The pattern list marks patterns as `S` sync-ready, `P` partial-sync, `L`
 local/reactive, or `?` unknown. The Sync Diag card shows compact sync runtime
 values such as drift, phase, beacon phase, last beacon/applied sequence, apply
 counts/skips, apply reason, pattern latency, and master-autoplay state. NightKite
-Link still uses USB NK4 only for this workflow; the firmware BLE transport exists
-but Link has no BLE client yet.
+The experimental BLE client reassembles 20-byte TX Notify chunks until newline
+and supports one active BLE controller connection at a time. Multiple
+simultaneous BLE connections are a future TODO. USB remains the recommended
+service path.
 
 The Device card separates Link-side USB recovery from controller configuration:
 `C reset USB` only restarts Link's USB/protocol session, while `F defaults`

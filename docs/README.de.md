@@ -327,10 +327,13 @@ Beispiel `cmd=set brightness=...`, `cmd=set play_mode=manual|autoplay|sync`,
 `cmd=set wireless_enabled=0|1`, `cmd=set wireless_profile=...`,
 `cmd=set enabled_mask=...` und `cmd=set inverted_mask=...`.
 
-Der BLE-NK4-Service aus Firmware 4.0 wird von dieser NightKite-Link-Version noch
-nicht verwendet. USB bleibt der stabile Pfad. Link ist Konfigurator und
-Diagnosegerät; es leitet keine Echtzeit-Sync-Beacons weiter und streamt keine
-LED-Frames.
+Der BLE-NK4-Service aus Firmware 4.0 kann experimentell über die BLE-Scan-Card
+verwendet werden. NightKite Link scannt nach `NK-...`-Geräten oder der
+NightKite-Service-UUID, verbindet genau einen Controller und nutzt denselben
+NK4-Parser wie USB. TX-Notify-Chunks werden bis zum Zeilenende `\n`
+zusammengesetzt. USB bleibt der stabile empfohlene Pfad. Link ist Konfigurator
+und Diagnosegerät; es leitet keine Echtzeit-Sync-Beacons weiter und streamt
+keine LED-Frames.
 
 Bulk-Invert wird aktuell über kommaseparierte `invert_pattern`- bzw.
 `normal_pattern`-Befehle umgesetzt. Im Code ist ein zukünftiger dedizierter
@@ -341,8 +344,8 @@ Controller-Firmware so etwas später anbietet.
 
 Für Firmware-4.0-Controller mit USB NK4 bietet die Sync-Test-Card einen
 kompakten Setup- und Diagnoseablauf für die ersten Master/Follower-Beacon-Tests.
-Sie ist nur Konfigurator und USB-Diagnoseansicht. Sie ist kein BLE-Client und
-leitet keinen Echtzeit-Sync weiter.
+Sie ist nur Konfigurator und Diagnoseansicht. BLE NK4 kann zur Konfiguration
+genutzt werden, ist aber kein Echtzeit-Sync-Pfad und leitet keinen Sync weiter.
 
 Typischer Master-Ablauf:
 
@@ -398,8 +401,8 @@ Die separate Sync-Diag-Card zeigt PatternClock- und Apply-Diagnosewerte wie
 `autoplay_next_ms`.
 
 Damit ist sichtbar, ob Master-Autoplay im Sync-Modus aktiv ist und ob ein
-Follower Beacons tatsächlich anwendet. NightKite Link nutzt dafür weiterhin USB
-NK4 als Diagnosepfad; ein BLE-Client ist in Link noch nicht enthalten.
+Follower Beacons tatsächlich anwendet. USB NK4 bleibt der stabile Diagnosepfad;
+BLE NK4 ist als experimenteller Konfigurations- und Diagnosepfad verfügbar.
 
 Die Diagnosefelder sind für das Cardputer-Display bewusst kurz:
 

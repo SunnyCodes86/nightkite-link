@@ -47,6 +47,7 @@ Preserve existing behavior unless the user explicitly asks to change it:
 - experimental USB Mass Storage UF2 flasher workflow
 - startup/UI/navigation/success/error/transfer sounds
 - Device Card `C reset USB` app/session reset for manual USB reconnect
+- experimental BLE NK4 client with BLE Scan card
 - Sync Test Card with `Configure Master`, `Configure Follower`, `Save`, `Refresh Sync`
 - Sync Test selections for Group 1-4 and `long_range` / `balanced` / `fast_sync`
 - Sync Test actions `Name Master`, `Name Follower`, and `Play SYNC`
@@ -109,9 +110,17 @@ The manual Device Card `C reset USB` action should reset only app/protocol/sessi
 
 ## BLE Direction
 
-NightKite Multi firmware has experimental NK4-over-BLE GATT. NightKite Link does not yet have a BLE client.
+NightKite Link now has an experimental BLE client for Firmware 4.0 NK4-over-BLE GATT.
 
-Do not implement a BLE client unless the task explicitly asks for it. When BLE client work is requested, keep USB stable, reuse the NK4 protocol path, reassemble notify chunks until newline, and do not use BLE GATT/NK4 as the real-time sync mechanism.
+Rules:
+- USB remains the stable primary path.
+- BLE NK4 must reuse the same NK4 parser, command queue, seq matching, timeout handling, and controller state as USB NK4.
+- TX Notify chunks must be reassembled until newline `\n`; tolerate `\r\n`.
+- Support one active BLE connection at a time.
+- The BLE Scan card may show multiple discovered controllers.
+- Multiple simultaneous BLE controller connections are a TODO.
+- Do not use BLE GATT/NK4 as the real-time sync mechanism.
+- Do not relay sync beacons or stream LED frames through Link.
 
 Firmware BLE UUIDs:
 - Service: `4e4b4000-6e69-6768-746b-000000000001`
@@ -196,7 +205,7 @@ Do not destroy older profile compatibility without explicit instruction.
 - Keep USB host as the stable path.
 - Keep Firmware 3.x legacy fallback working.
 - Keep USB NK4 behind detection/handshake.
-- Do not implement BLE client work unless requested.
+- Keep BLE client work experimental and behind explicit UI actions.
 - Do not use WiFi.
 - Do not make NightKite Link mandatory for autonomous sync.
 - Do not stream LED frames.

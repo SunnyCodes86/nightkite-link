@@ -7,6 +7,11 @@
 #include "SoundManager.h"
 #include "Uf2Validator.h"
 #include "UsbMscUf2Flasher.h"
+#include <BLEDevice.h>
+#include <BLEUtils.h>
+#include <BLEScan.h>
+#include <BLEClient.h>
+#include <BLERemoteCharacteristic.h>
 #if NIGHTKITE_USB_HOST
 #include <USBHostSerial.h>
 #endif
@@ -48,6 +53,10 @@ constexpr unsigned long NK4_PROBE_TIMEOUT_MS = 1600;
 constexpr unsigned long NK4_MACHINE_DELAY_MS = 120;
 constexpr unsigned long SPLASH_DURATION_MS = 1500;
 constexpr unsigned long STARTUP_SOUND_DELAY_MS = 180;
+constexpr int BLE_SCAN_SECONDS = 6;
+const char* const NK_BLE_SERVICE_UUID = "4e4b4000-6e69-6768-746b-000000000001";
+const char* const NK_BLE_RX_UUID = "4e4b4000-6e69-6768-746b-000000000002";
+const char* const NK_BLE_TX_UUID = "4e4b4000-6e69-6768-746b-000000000003";
 
 constexpr int SD_SPI_SCK_PIN = 40;
 constexpr int SD_SPI_MISO_PIN = 39;
@@ -233,6 +242,13 @@ struct DiagnosticsState {
   bool safeBoot = false;
 };
 
+struct BleDeviceEntry {
+  String name;
+  String address;
+  int rssi = 0;
+  bool serviceMatch = false;
+};
+
 struct CommandQueueEntry {
   String command;
   bool nk4Raw = false;
@@ -244,6 +260,7 @@ struct CommandQueueEntry {
 enum class Card : uint8_t {
   Status,
   Device,
+  Ble,
   Play,
   Sync,
   Wireless,
@@ -259,7 +276,7 @@ enum class Card : uint8_t {
   Profiles,
 };
 
-constexpr int CARD_COUNT = 15;
+constexpr int CARD_COUNT = 16;
 
 enum class Mode : uint8_t {
   Cards,
@@ -329,6 +346,7 @@ struct AppState {
   String pendingProfilePath;
   int selectedCard = 0;
   int selectedPatternIndex = 0;
+  int selectedBleIndex = 0;
   int selectedProfileAction = 0;
   int selectedProfileIndex = 0;
   int selectedConfigField = 0;
@@ -344,6 +362,9 @@ struct AppState {
   FlashUiStatus flash;
   std::vector<String> profileFiles;
   std::vector<String> firmwareFiles;
+  std::vector<BleDeviceEntry> bleDevices;
+  String bleStatus = "BLE idle";
+  bool bleScanning = false;
   String lastCommand;
   String lastResponse;
   String statusMessage = "Ready";
@@ -584,10 +605,269 @@ private:
   String buffer;
 };
 
-UsbHostSerialTransport transport;
+UsbHostSerialTransport usbTransport;
 #else
-DebugSerialTransport transport;
+DebugSerialTransport usbTransport;
 #endif
+
+class BleNk4Transport : public NightKiteTransport {
+public:
+  void begin()
+  {
+    if (started) {
+      return;
+    }
+    BLEDevice::init("NightKite Link");
+    BLEDevice::setMTU(128);
+    started = true;
+  }
+
+  bool connected() override
+  {
+    return client != nullptr && client->isConnected() && rxCharacteristic != nullptr && txCharacteristic != nullptr;
+  }
+
+  void sendLine(const String& line) override
+  {
+    if (!connected()) {
+      return;
+    }
+    String wire = line + "\n";
+    rxCharacteristic->writeValue(reinterpret_cast<uint8_t*>(const_cast<char*>(wire.c_str())), wire.length(), false);
+  }
+
+  bool readLine(String& line) override
+  {
+    if (lines.empty()) {
+      return false;
+    }
+    line = lines.front();
+    lines.erase(lines.begin());
+    line.trim();
+    return line.length() > 0;
+  }
+
+  void clearBuffers() override
+  {
+    notifyBuffer = "";
+    lines.clear();
+  }
+
+  bool scan()
+  {
+    begin();
+    if (connected()) {
+      status = "Disconnect first";
+      return false;
+    }
+    devices.clear();
+    status = "Scanning";
+    scanning = true;
+    BLEScan* scan = BLEDevice::getScan();
+    scan->setAdvertisedDeviceCallbacks(new ScanCallbacks(this), true);
+    scan->setActiveScan(true);
+    scan->setInterval(100);
+    scan->setWindow(80);
+    scan->start(BLE_SCAN_SECONDS, false);
+    scan->clearResults();
+    scanning = false;
+    status = devices.empty() ? "No NK BLE" : String("Found ") + devices.size();
+    return !devices.empty();
+  }
+
+  bool connectIndex(int index)
+  {
+    if (index < 0 || index >= static_cast<int>(devices.size())) {
+      status = "No BLE device";
+      return false;
+    }
+    disconnect();
+    begin();
+    status = "Connecting";
+    client = BLEDevice::createClient();
+    client->setClientCallbacks(new ClientCallbacks(this));
+    if (client == nullptr || !client->connect(BLEAddress(devices[index].address.c_str()))) {
+      status = "Connect failed";
+      disconnect();
+      return false;
+    }
+    BLERemoteService* service = client->getService(BLEUUID(NK_BLE_SERVICE_UUID));
+    if (service == nullptr) {
+      status = "Service missing";
+      disconnect();
+      return false;
+    }
+    rxCharacteristic = service->getCharacteristic(BLEUUID(NK_BLE_RX_UUID));
+    txCharacteristic = service->getCharacteristic(BLEUUID(NK_BLE_TX_UUID));
+    if (rxCharacteristic == nullptr || txCharacteristic == nullptr) {
+      status = "Chars missing";
+      disconnect();
+      return false;
+    }
+    if (!rxCharacteristic->canWrite()) {
+      status = "RX not writable";
+      disconnect();
+      return false;
+    }
+    if (!txCharacteristic->canNotify()) {
+      status = "TX no notify";
+      disconnect();
+      return false;
+    }
+    activeInstance = this;
+    txCharacteristic->registerForNotify(notifyCallback);
+    clearBuffers();
+    connectedName = devices[index].name.length() ? devices[index].name : devices[index].address;
+    status = "Conn " + shortBleName(connectedName);
+    return true;
+  }
+
+  void disconnect()
+  {
+    clearBuffers();
+    if (client != nullptr) {
+      if (client->isConnected()) {
+        client->disconnect();
+      }
+      delete client;
+      client = nullptr;
+    }
+    rxCharacteristic = nullptr;
+    txCharacteristic = nullptr;
+    if (activeInstance == this) {
+      activeInstance = nullptr;
+    }
+    connectedName = "";
+  }
+
+  bool isScanning() const
+  {
+    return scanning;
+  }
+
+  String statusText() const
+  {
+    return status;
+  }
+
+  String currentName() const
+  {
+    return connectedName;
+  }
+
+  std::vector<BleDeviceEntry>& deviceList()
+  {
+    return devices;
+  }
+
+private:
+  static String shortBleName(const String& text)
+  {
+    return text.length() > 12 ? text.substring(0, 12) : text;
+  }
+
+  void addOrUpdate(const BleDeviceEntry& entry)
+  {
+    bool nightKiteName = entry.name.startsWith("NK-");
+    if (!nightKiteName && !entry.serviceMatch) {
+      return;
+    }
+    for (auto& device : devices) {
+      if (device.address == entry.address) {
+        device.name = entry.name.length() ? entry.name : device.name;
+        device.rssi = entry.rssi;
+        device.serviceMatch = device.serviceMatch || entry.serviceMatch;
+        return;
+      }
+    }
+    devices.push_back(entry);
+  }
+
+  void onNotify(uint8_t* data, size_t length)
+  {
+    for (size_t i = 0; i < length; ++i) {
+      char c = static_cast<char>(data[i]);
+      if (c == '\r') {
+        continue;
+      }
+      if (c == '\n') {
+        String line = notifyBuffer;
+        notifyBuffer = "";
+        line.trim();
+        if (line.length() > 0) {
+          lines.push_back(line);
+        }
+      } else if (notifyBuffer.length() < MAX_CLI_LINE_CHARS) {
+        notifyBuffer += c;
+      } else {
+        notifyBuffer = "";
+        status = "BLE RX overflow";
+      }
+    }
+  }
+
+  class ScanCallbacks : public BLEAdvertisedDeviceCallbacks {
+  public:
+    explicit ScanCallbacks(BleNk4Transport* owner) : owner(owner) {}
+    void onResult(BLEAdvertisedDevice advertisedDevice) override
+    {
+      BleDeviceEntry entry;
+      entry.name = advertisedDevice.haveName() ? String(advertisedDevice.getName().c_str()) : "";
+      entry.address = String(advertisedDevice.getAddress().toString().c_str());
+      entry.rssi = advertisedDevice.getRSSI();
+      entry.serviceMatch = advertisedDevice.haveServiceUUID() &&
+                           advertisedDevice.isAdvertisingService(BLEUUID(NK_BLE_SERVICE_UUID));
+      owner->addOrUpdate(entry);
+    }
+  private:
+    BleNk4Transport* owner;
+  };
+
+  class ClientCallbacks : public BLEClientCallbacks {
+  public:
+    explicit ClientCallbacks(BleNk4Transport* owner) : owner(owner) {}
+    void onConnect(BLEClient*) override {}
+    void onDisconnect(BLEClient*) override
+    {
+      owner->status = "BLE lost";
+    }
+  private:
+    BleNk4Transport* owner;
+  };
+
+  static void notifyCallback(BLERemoteCharacteristic*, uint8_t* data, size_t length, bool)
+  {
+    if (activeInstance != nullptr) {
+      activeInstance->onNotify(data, length);
+    }
+  }
+
+  static BleNk4Transport* activeInstance;
+  BLEClient* client = nullptr;
+  BLERemoteCharacteristic* rxCharacteristic = nullptr;
+  BLERemoteCharacteristic* txCharacteristic = nullptr;
+  std::vector<BleDeviceEntry> devices;
+  std::vector<String> lines;
+  String notifyBuffer;
+  String status = "BLE idle";
+  String connectedName;
+  bool started = false;
+  bool scanning = false;
+};
+
+BleNk4Transport* BleNk4Transport::activeInstance = nullptr;
+BleNk4Transport bleTransport;
+
+NightKiteTransport& activeTransport()
+{
+  return app.transportMode == TransportMode::Ble ? static_cast<NightKiteTransport&>(bleTransport)
+                                                 : static_cast<NightKiteTransport&>(usbTransport);
+}
+
+bool controllerTransportConnected()
+{
+  return app.transportMode == TransportMode::Ble ? bleTransport.connected() : usbTransport.connected();
+}
 
 void setStatus(const String& text, uint16_t color = COLOR_MUTED)
 {
@@ -657,7 +937,7 @@ String connectionToken()
     return "NO USB";
   }
   if (usbProbePending || app.protocolMode == ProtocolMode::Probing) {
-    return "USB DET";
+    return String(transportToken()) + " DET";
   }
   return String(transportToken()) + " " + protocolToken();
 }
@@ -1464,7 +1744,7 @@ void pollCommandQueue()
     pendingNk4 = entry;
     nk4Pending = true;
   }
-  transport.sendLine(wireCommand);
+  activeTransport().sendLine(wireCommand);
   lastCommandSendMs = millis();
   app.lastCommand = wireCommand;
   app.dirty = true;
@@ -1811,6 +2091,40 @@ void drawDeviceCard()
   drawTextFit("Cfg " + app.diagnostics.configValid, 125, CONTENT_Y + 74, 105,
               app.diagnostics.configValid == "1" || app.diagnostics.configValid == "true" ? COLOR_OK : COLOR_MUTED);
   drawFooter("R read  S save  C USB  F defaults");
+}
+
+void drawBleCard()
+{
+  drawTextFit("BLE Scan", 8, CONTENT_Y + 5, 90, COLOR_MUTED);
+  String status = app.transportMode == TransportMode::Ble && app.protocolMode == ProtocolMode::Nk4
+                      ? "Conn " + shortText(controllerLabel(), 10)
+                      : app.bleStatus;
+  drawTextFit(status.length() ? status : "BLE idle", 112, CONTENT_Y + 5, 120,
+              app.transportMode == TransportMode::Ble ? COLOR_OK : COLOR_ACCENT);
+  if (app.bleDevices.empty()) {
+    drawTextFit("No NK BLE", 12, CONTENT_Y + 35, 130, COLOR_MUTED);
+    drawTextFit("S scan", 12, CONTENT_Y + 53, 80, COLOR_ACCENT);
+  } else {
+    int visible = 4;
+    int start = 0;
+    if (app.selectedBleIndex >= visible) {
+      start = app.selectedBleIndex - visible + 1;
+    }
+    for (int row = 0; row < visible && start + row < static_cast<int>(app.bleDevices.size()); ++row) {
+      int idx = start + row;
+      const auto& device = app.bleDevices[idx];
+      int y = CONTENT_Y + 20 + row * 18;
+      bool active = idx == app.selectedBleIndex;
+      uint16_t bg = active ? COLOR_ACCENT_DARK : COLOR_PANEL_DARK;
+      uiCanvas.fillRoundRect(6, y, 228, 16, 2, bg);
+      String name = device.name.length() ? device.name : shortText(device.address, 10);
+      String line = String(active ? "> " : "  ") + shortText(name, 12) + " " + String(device.rssi) +
+                    (device.serviceMatch ? " S" : "");
+      drawTextFit(line, 10, y + 5, 132, active ? COLOR_TEXT : COLOR_MUTED, bg);
+      drawTextFit(shortText(device.address, 14), 148, y + 5, 82, COLOR_MUTED, bg);
+    }
+  }
+  drawFooter("S scan  ENTER conn  D disc");
 }
 
 const char* const PLAY_MODES[] = {"manual", "autoplay", "sync"};
@@ -2712,6 +3026,9 @@ void render()
       case Card::Device:
         drawDeviceCard();
         break;
+      case Card::Ble:
+        drawBleCard();
+        break;
       case Card::Play:
         drawPlayCard();
         break;
@@ -3610,7 +3927,7 @@ bool parseNk4Line(const String& parsed)
       app.protocolMode = ProtocolMode::Nk4;
       app.controllerError = false;
       commandQueue.clear();
-      setStatus("USB NK4 detected", COLOR_OK);
+      setStatus(String(transportToken()) + " NK4 detected", COLOR_OK);
       sendCommand(NightKiteCommands::refreshAll(), false);
     } else if (matchedCommand == "cmd=save") {
       setStatus("Saved", COLOR_OK);
@@ -3743,10 +4060,13 @@ void updateCardputerBattery(bool force = false)
   app.dirty = true;
 }
 
-void resetControllerSession()
+void resetControllerSession(TransportMode nextTransportMode = TransportMode::Usb)
 {
   ++connectionGeneration;
-  transport.clearBuffers();
+  activeTransport().clearBuffers();
+  if (app.transportMode == TransportMode::Ble && nextTransportMode == TransportMode::Usb) {
+    bleTransport.disconnect();
+  }
   rxLine = "";
   app.controllerConnected = false;
   app.controllerError = false;
@@ -3758,7 +4078,7 @@ void resetControllerSession()
   app.settings.localReactivePatternMask = 0;
   app.settings.hasPatternClassification = false;
   app.protocolMode = ProtocolMode::Unknown;
-  app.transportMode = TransportMode::Usb;
+  app.transportMode = nextTransportMode;
   app.identity = ControllerIdentity{};
   app.capabilities = ControllerCapabilities{};
   app.play = PlayState{};
@@ -3802,7 +4122,7 @@ void beginNk4Probe()
 
 void manualUsbReconnect()
 {
-  bool connected = transport.connected();
+  bool connected = usbTransport.connected();
   resetControllerSession();
   app.usbConnected = connected;
   if (connected) {
@@ -3814,6 +4134,60 @@ void manualUsbReconnect()
     setStatus("No USB", COLOR_WARN);
   }
   app.dirty = true;
+}
+
+void startBleScan()
+{
+  app.bleStatus = "Scanning";
+  app.dirty = true;
+  bleTransport.scan();
+  app.bleDevices = bleTransport.deviceList();
+  if (app.selectedBleIndex >= static_cast<int>(app.bleDevices.size())) {
+    app.selectedBleIndex = max(0, static_cast<int>(app.bleDevices.size()) - 1);
+  }
+  app.bleStatus = bleTransport.statusText();
+  app.dirty = true;
+}
+
+void connectSelectedBleDevice()
+{
+  if (app.transportMode == TransportMode::Usb && app.usbConnected) {
+    setStatus("Disconnect USB first", COLOR_WARN);
+    app.bleStatus = "USB active";
+    return;
+  }
+  if (app.bleDevices.empty()) {
+    setStatus("No NK BLE", COLOR_WARN);
+    app.bleStatus = "No NK BLE";
+    return;
+  }
+  int index = constrain(app.selectedBleIndex, 0, static_cast<int>(app.bleDevices.size()) - 1);
+  if (!bleTransport.connectIndex(index)) {
+    setStatus(bleTransport.statusText(), COLOR_ERR);
+    app.bleStatus = bleTransport.statusText();
+    return;
+  }
+  resetControllerSession(TransportMode::Ble);
+  bleTransport.clearBuffers();
+  app.usbConnected = true;
+  app.transportMode = TransportMode::Ble;
+  app.protocolMode = ProtocolMode::Probing;
+  usbProbePending = false;
+  nk4ProbeStartMs = millis();
+  nk4MachineSentMs = 0;
+  app.bleStatus = bleTransport.statusText();
+  setStatus("BLE detecting", COLOR_ACCENT);
+}
+
+void disconnectBleDevice()
+{
+  bleTransport.disconnect();
+  resetControllerSession();
+  app.usbConnected = usbTransport.connected();
+  usbProbePending = app.usbConnected;
+  usbConnectedSinceMs = millis();
+  app.bleStatus = "BLE disconnected";
+  setStatus("BLE disconnected", COLOR_WARN);
 }
 
 void enqueuePostDefaultsRefresh()
@@ -3870,6 +4244,15 @@ void startFactoryResetConfirm()
 
 void fallbackToLegacy()
 {
+  if (app.transportMode == TransportMode::Ble) {
+    app.protocolMode = ProtocolMode::Unknown;
+    nk4Pending = false;
+    commandQueue.clear();
+    bleTransport.disconnect();
+    app.usbConnected = false;
+    setStatus("BLE NK4 timeout", COLOR_ERR);
+    return;
+  }
   app.protocolMode = ProtocolMode::Legacy;
   nk4Pending = false;
   commandQueue.clear();
@@ -3884,8 +4267,29 @@ void pollNk4Probe()
     return;
   }
   unsigned long now = millis();
+  if (app.transportMode == TransportMode::Ble) {
+    if (!nk4HelloSent) {
+      pendingNk4 = CommandQueueEntry{};
+      pendingNk4.command = "cmd=hello";
+      pendingNk4.nk4Raw = true;
+      pendingNk4.seq = nextNk4Seq++;
+      pendingNk4.sentAt = now;
+      pendingNk4.generation = connectionGeneration;
+      nk4Pending = true;
+      nk4HelloSent = true;
+      activeTransport().sendLine("NK4 seq=" + String(pendingNk4.seq) +
+                                 " cmd=hello client=nightkite-link proto_min=4 proto_max=4");
+      app.lastCommand = "BLE NK4 hello";
+      app.dirty = true;
+      return;
+    }
+    if (now - nk4ProbeStartMs > NK4_PROBE_TIMEOUT_MS) {
+      fallbackToLegacy();
+    }
+    return;
+  }
   if (!nk4MachineSent) {
-    transport.sendLine("protocol machine");
+    activeTransport().sendLine("protocol machine");
     nk4MachineSent = true;
     nk4MachineSentMs = now;
     return;
@@ -3899,7 +4303,7 @@ void pollNk4Probe()
     pendingNk4.generation = connectionGeneration;
     nk4Pending = true;
     nk4HelloSent = true;
-    transport.sendLine("NK4 seq=" + String(pendingNk4.seq) +
+    activeTransport().sendLine("NK4 seq=" + String(pendingNk4.seq) +
                        " cmd=hello client=nightkite-link proto_min=4 proto_max=4");
     app.lastCommand = "NK4 hello";
     app.dirty = true;
@@ -3912,8 +4316,18 @@ void pollNk4Probe()
 
 void pollTransport()
 {
+  if (app.transportMode == TransportMode::Ble) {
+    app.usbConnected = bleTransport.connected();
+    if (!app.usbConnected) {
+      resetControllerSession();
+      usbProbePending = false;
+      setStatus("BLE disconnected", COLOR_WARN);
+      app.dirty = true;
+      return;
+    }
+  } else {
   bool wasUsbConnected = app.usbConnected;
-  app.usbConnected = transport.connected();
+  app.usbConnected = usbTransport.connected();
   if (app.usbConnected != wasUsbConnected) {
     if (!app.usbConnected) {
       resetControllerSession();
@@ -3928,17 +4342,18 @@ void pollTransport()
     }
     app.dirty = true;
   }
+  }
 
-  if (app.usbConnected && usbProbePending) {
+  if (app.transportMode == TransportMode::Usb && app.usbConnected && usbProbePending) {
     if (millis() - usbConnectedSinceMs < USB_RECONNECT_STABLE_MS) {
-      transport.clearBuffers();
+      activeTransport().clearBuffers();
       return;
     }
     beginNk4Probe();
   }
 
   String line;
-  while (transport.readLine(line)) {
+  while (activeTransport().readLine(line)) {
     parseNightKiteLine(line);
   }
 
@@ -4097,6 +4512,10 @@ void changeCard(int delta)
 
 void refreshCurrentCard()
 {
+  if (static_cast<Card>(app.selectedCard) == Card::Ble) {
+    startBleScan();
+    return;
+  }
   requestControllerBattery(true);
   if (app.protocolMode == ProtocolMode::Nk4) {
     if (static_cast<Card>(app.selectedCard) == Card::Device || static_cast<Card>(app.selectedCard) == Card::Status) {
@@ -4290,6 +4709,11 @@ void changeValue(int delta)
     case Card::SyncTest:
       app.selectedSyncTestAction = constrain(app.selectedSyncTestAction + delta, 0, SYNC_TEST_ACTION_COUNT - 1);
       break;
+    case Card::Ble:
+      if (!app.bleDevices.empty()) {
+        app.selectedBleIndex = constrain(app.selectedBleIndex + delta, 0, static_cast<int>(app.bleDevices.size()) - 1);
+      }
+      break;
     case Card::Brightness:
       if (!brightnessDirty) {
         draftBrightness = app.settings.brightness;
@@ -4394,6 +4818,9 @@ void applyCurrentCard()
     case Card::Status:
     case Card::Device:
       refreshCurrentCard();
+      break;
+    case Card::Ble:
+      connectSelectedBleDevice();
       break;
     case Card::Play:
       if (!requireNk4Controller()) {
@@ -4817,6 +5244,17 @@ void handleWordChar(char c)
 
   if (mode == Mode::ConfirmFactoryReset) {
     return;
+  }
+
+  if (static_cast<Card>(app.selectedCard) == Card::Ble) {
+    if (c == 's' || c == 'S' || c == 'r' || c == 'R') {
+      startBleScan();
+      return;
+    }
+    if (c == 'd' || c == 'D') {
+      disconnectBleDevice();
+      return;
+    }
   }
 
   if ((c == 'c' || c == 'C') && static_cast<Card>(app.selectedCard) == Card::Config) {
