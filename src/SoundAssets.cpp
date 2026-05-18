@@ -47,7 +47,7 @@ const SoundStep PAGE_CHANGE_STEPS[] = {
 };
 
 const SoundStep QUEUE_TICK_STEPS[] = {
-    {0, 32, 1180.0f, 1080.0f, 0.0f, 0.72f},
+    {0, 34, 560.0f, 420.0f, 220.0f, 0.88f},
 };
 
 const SoundStep TRANSFER_COMPLETE_STEPS[] = {
@@ -93,7 +93,7 @@ const SoundClip navigateClips[NAVIGATE_VARIANT_COUNT] = {
     {NAVIGATE_STEPS_2, sizeof(NAVIGATE_STEPS_2) / sizeof(NAVIGATE_STEPS_2[0]), 50, 0.72f},
 };
 const SoundClip pageChangeClip = {PAGE_CHANGE_STEPS, sizeof(PAGE_CHANGE_STEPS) / sizeof(PAGE_CHANGE_STEPS[0]), 124, 0.78f};
-const SoundClip queueTickClip = {QUEUE_TICK_STEPS, sizeof(QUEUE_TICK_STEPS) / sizeof(QUEUE_TICK_STEPS[0]), 36, 0.68f};
+const SoundClip queueTickClip = {QUEUE_TICK_STEPS, sizeof(QUEUE_TICK_STEPS) / sizeof(QUEUE_TICK_STEPS[0]), 38, 0.72f};
 const SoundClip transferCompleteClip = {
     TRANSFER_COMPLETE_STEPS, sizeof(TRANSFER_COMPLETE_STEPS) / sizeof(TRANSFER_COMPLETE_STEPS[0]), 220, 0.68f};
 const SoundClip confirmClip = {CONFIRM_STEPS, sizeof(CONFIRM_STEPS) / sizeof(CONFIRM_STEPS[0]), 190, 0.78f};
