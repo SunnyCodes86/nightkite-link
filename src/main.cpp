@@ -5,6 +5,7 @@
 #include <vector>
 #include "M5Cardputer.h"
 #include "SoundManager.h"
+#include "ControllerBatteryParser.h"
 #include "Uf2Validator.h"
 #include "UsbMscUf2Flasher.h"
 #include <BLEDevice.h>
@@ -39,7 +40,7 @@ constexpr int CONTENT_Y = STATUS_H;
 constexpr int CONTENT_H = SCREEN_H - STATUS_H - FOOTER_H;
 constexpr int MAX_CLI_LINE_CHARS = 4096;
 constexpr unsigned long CARDPUTER_BATTERY_POLL_MS = 3000;
-constexpr unsigned long CONTROLLER_BATTERY_POLL_MS = 60000;
+constexpr unsigned long CONTROLLER_BATTERY_POLL_MS = 20000;
 constexpr unsigned long LINK_STALE_MS = 9000;
 constexpr unsigned long BLE_LINK_STALE_MS = 45000;
 constexpr unsigned long COMMAND_SEND_INTERVAL_MS = 160;
@@ -134,6 +135,7 @@ struct ControllerSettings {
   int autoplayIntervalSeconds = -1;
   int controllerBatteryPercent = -1;
   float controllerBatteryVoltage = NAN;
+  String controllerBatteryState;
   bool hasControllerBattery = false;
   uint32_t enabledPatternMask = 0;
   uint32_t invertedPatternMask = 0;
@@ -1259,14 +1261,11 @@ bool parseVoltageNearSymbol(const String& line, float& voltage)
 
 void parseControllerBattery(const String& line)
 {
-  float voltage = NAN;
-  bool voltageParsed = parseFloatField(line, "battery_voltage", voltage) || parseFloatField(line, "battery_v", voltage) ||
-                       parseFloatField(line, "controller_battery_voltage", voltage);
-  String mv = valueForKey(line, "battery_mv");
-  if (mv.length() > 0) {
-    voltage = mv.toFloat() / 1000.0f;
-    voltageParsed = true;
-  }
+  ControllerBatteryParseResult battery;
+  parseControllerBatteryLine(line.c_str(), &battery);
+
+  float voltage = battery.hasVoltage ? battery.voltage : NAN;
+  bool voltageParsed = battery.hasVoltage;
   if (!voltageParsed) {
     voltageParsed = parseVoltageNearSymbol(line, voltage);
   }
@@ -1275,24 +1274,17 @@ void parseControllerBattery(const String& line)
     app.settings.hasControllerBattery = true;
   }
 
-  int percent = -1;
-  const char* percentKeys[] = {"battery_percent", "battery_pct", "controller_battery_percent"};
-  for (const char* key : percentKeys) {
-    String value = valueForKey(line, key);
-    if (value.length() == 0) {
-      continue;
-    }
-    int parsed = value.toInt();
-    if (parsed >= 0 && parsed <= 100) {
-      percent = parsed;
-      break;
-    }
-  }
+  int percent = battery.hasPercent ? battery.percent : -1;
   if (percent < 0) {
     parsePercentNearSymbol(line, percent);
   }
   if (percent >= 0) {
     app.settings.controllerBatteryPercent = percent;
+    app.settings.hasControllerBattery = true;
+  }
+
+  if (battery.hasState) {
+    app.settings.controllerBatteryState = battery.state;
     app.settings.hasControllerBattery = true;
   }
 }
@@ -2184,6 +2176,10 @@ String controllerBatteryVoltageText()
 
 String controllerBatteryText()
 {
+  String stateLabel = compactControllerBatteryStateLabel(app.settings.controllerBatteryState.c_str());
+  if (stateLabel.length() > 0) {
+    return stateLabel;
+  }
   String percent = app.settings.controllerBatteryPercent >= 0 ? String(app.settings.controllerBatteryPercent) + "%" : "";
   String voltage = controllerBatteryVoltageText();
   if (percent.length() > 0 && voltage.length() > 0) {
@@ -2196,6 +2192,22 @@ String controllerBatteryText()
     return voltage;
   }
   return "--";
+}
+
+String controllerBatteryStatusText()
+{
+  String stateLabel = compactControllerBatteryStateLabel(app.settings.controllerBatteryState.c_str());
+  if (stateLabel.length() > 0) {
+    return "NK " + stateLabel;
+  }
+  if (app.settings.controllerBatteryPercent >= 0) {
+    return "NK " + String(app.settings.controllerBatteryPercent) + "%";
+  }
+  String voltage = controllerBatteryVoltageText();
+  if (voltage.length() > 0) {
+    return "NK " + voltage;
+  }
+  return "NK --";
 }
 
 uint8_t configFieldMask(int field)
@@ -2382,18 +2394,14 @@ void drawStatusBar()
   int queuedCount = static_cast<int>(commandQueue.size());
   String queueText = nk4Pending && queuedCount > 0 ? "Q:1+" + String(queuedCount) : "Q:" + String(queuedCount + (nk4Pending ? 1 : 0));
   uint16_t queueColor = cliBusy ? COLOR_WARN : COLOR_MUTED;
-  String nkStatus = "--";
-  if (app.settings.controllerBatteryPercent >= 0) {
-    nkStatus = String(app.settings.controllerBatteryPercent) + "%";
-  } else if (app.settings.hasControllerBattery) {
-    nkStatus = controllerBatteryVoltageText();
-  }
+  String nkStatus = controllerBatteryStatusText();
 
   drawTextFit(transport, 3, 4, 48, app.controllerError ? COLOR_WARN : COLOR_TEXT, COLOR_PANEL_DARK);
   drawTextFit(play, 54, 4, 43, app.protocolMode == ProtocolMode::Nk4 ? COLOR_OK : COLOR_MUTED, COLOR_PANEL_DARK);
   drawTextFit(queueText, 100, 4, 48, queueColor, COLOR_PANEL_DARK);
   if (app.controllerConnected && app.settings.hasControllerBattery) {
-    drawTextFit(nkStatus, 151, 4, 47, COLOR_OK, COLOR_PANEL_DARK);
+    const bool batteryWarning = compactControllerBatteryStateLabel(app.settings.controllerBatteryState.c_str())[0] != '\0';
+    drawTextFit(nkStatus, 151, 4, 47, batteryWarning ? COLOR_WARN : COLOR_OK, COLOR_PANEL_DARK);
   }
   drawTextFit(String("L:") + cp, 201, 4, 36, app.cardputerCharging ? COLOR_OK : COLOR_ACCENT, COLOR_PANEL_DARK);
 }
@@ -3645,6 +3653,10 @@ bool saveCurrentProfileToPath(const String& path, const String& displayName, boo
   file.println("}");
   file.close();
   app.loadedProfile = app.settings;
+  app.loadedProfile.controllerBatteryPercent = -1;
+  app.loadedProfile.controllerBatteryVoltage = NAN;
+  app.loadedProfile.controllerBatteryState = "";
+  app.loadedProfile.hasControllerBattery = false;
   app.hasLoadedProfile = true;
   app.loadedProfileName = displayName.length() > 0 ? displayName : profileDisplayName(path);
   app.loadedProfilePath = path;
@@ -3777,6 +3789,10 @@ bool loadNewestProfile()
   file.close();
 
   ControllerSettings loaded = app.settings;
+  loaded.controllerBatteryPercent = -1;
+  loaded.controllerBatteryVoltage = NAN;
+  loaded.controllerBatteryState = "";
+  loaded.hasControllerBattery = false;
   loaded.brightness = jsonInt(json, "brightness", loaded.brightness);
   loaded.stripLength = jsonInt(json, "strip_length", loaded.stripLength);
   loaded.activePattern = jsonInt(json, "active_pattern", loaded.activePattern);
@@ -3836,6 +3852,10 @@ bool loadProfileFile(const String& fileName)
   file.close();
 
   ControllerSettings loaded = app.settings;
+  loaded.controllerBatteryPercent = -1;
+  loaded.controllerBatteryVoltage = NAN;
+  loaded.controllerBatteryState = "";
+  loaded.hasControllerBattery = false;
   loaded.brightness = jsonInt(json, "brightness", loaded.brightness);
   loaded.stripLength = jsonInt(json, "strip_length", loaded.stripLength);
   loaded.activePattern = jsonInt(json, "active_pattern", loaded.activePattern);
@@ -4494,6 +4514,7 @@ void resetControllerSession(TransportMode nextTransportMode = TransportMode::Usb
   app.settings.hasControllerBattery = false;
   app.settings.controllerBatteryPercent = -1;
   app.settings.controllerBatteryVoltage = NAN;
+  app.settings.controllerBatteryState = "";
   app.settings.syncReadyPatternMask = 0;
   app.settings.partialSyncPatternMask = 0;
   app.settings.localReactivePatternMask = 0;
@@ -4973,6 +4994,9 @@ void changeCard(int delta)
   syncEditFromCard();
   if (static_cast<Card>(app.selectedCard) == Card::Profiles && app.profileFiles.empty() && app.sdReady) {
     refreshProfileList();
+  }
+  if (static_cast<Card>(app.selectedCard) == Card::Device && app.controllerConnected) {
+    requestControllerBattery(true);
   }
   if (static_cast<Card>(app.selectedCard) == Card::Firmware && app.firmwareFiles.empty() && app.sdReady) {
     refreshFirmwareList();
