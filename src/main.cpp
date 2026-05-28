@@ -3036,6 +3036,7 @@ void drawBulkCard()
 
 const char* const FIRMWARE_TARGETS[] = {"RP2040", "RP2350"};
 constexpr int FIRMWARE_TARGET_COUNT = sizeof(FIRMWARE_TARGETS) / sizeof(FIRMWARE_TARGETS[0]);
+constexpr int FIRMWARE_TARGET_RP2350 = 1;
 
 String selectedFirmwarePath()
 {
@@ -5573,7 +5574,8 @@ void beginFirmwareFlashAfterBootsel()
   app.flash.busy = true;
   setStatus("Flash mode", COLOR_WARN);
   setFlashState(FlashUiState::WaitingForMassStorage);
-  if (!uf2Flasher.startFlash(app.flash.fullPath, app.flash.filename)) {
+  const bool directSectorWrite = app.selectedFirmwareTarget == FIRMWARE_TARGET_RP2350;
+  if (!uf2Flasher.startFlash(app.flash.fullPath, app.flash.filename, directSectorWrite)) {
     app.flash.busy = false;
     app.flash.errorMessage = uf2Flasher.resultMessage();
     setFlashState(FlashUiState::Error);

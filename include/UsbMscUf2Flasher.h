@@ -4,6 +4,7 @@
 #include <FS.h>
 #include <cstdio>
 #include <stddef.h>
+#include "usb/msc_host.h"
 
 enum class FlashResult {
   Ok,
@@ -41,7 +42,7 @@ public:
   bool isRunning() const;
   bool isMassStorageConnected() const;
 
-  bool startFlash(const String& sdUf2Path, const String& displayName);
+  bool startFlash(const String& sdUf2Path, const String& displayName, bool directSectorWrite = false);
   void poll();
   void cancel();
 
@@ -66,8 +67,11 @@ private:
   void setError(FlashResult result, const String& message);
   void cleanup();
   bool installMscHost();
-  bool mountDevice();
+  bool prepareDevice();
+  bool prepareDirectDevice(msc_host_device_handle_t device);
+  bool mountVfsDevice(msc_host_device_handle_t device);
   bool copyChunk();
+  void finishCopy();
   void updatePercent();
 
   State state = State::Idle;
@@ -78,7 +82,11 @@ private:
   unsigned long lastProgressLogMs = 0;
   bool mscInstalled = false;
   bool deviceInstalled = false;
+  bool directSectorWrite = false;
   bool vfsMounted = false;
+  uint32_t targetSectorSize = 0;
+  uint32_t targetSectorCount = 0;
+  uint32_t nextWriteSector = 0;
   volatile bool connectedEvent = false;
   volatile bool disconnectedEvent = false;
   uint8_t deviceAddress = 0;

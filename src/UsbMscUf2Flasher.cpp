@@ -5,6 +5,7 @@
 #include <cstring>
 #include "esp_err.h"
 #include "esp_vfs_fat.h"
+#include "esp_private/msc_scsi_bot.h"
 #include "usb/msc_host.h"
 #include "usb/msc_host_vfs.h"
 
@@ -14,6 +15,7 @@ constexpr const char* USB_MOUNT_POINT = "/usb";
 constexpr const char* USB_UF2_TARGET = "/usb/FIRMWARE.UF2";
 constexpr unsigned long MASS_STORAGE_TIMEOUT_MS = 30000;
 constexpr unsigned long REBOOT_WAIT_MS = 12000;
+constexpr size_t UF2_BLOCK_SIZE = 512;
 constexpr size_t COPY_BUFFER_SIZE = 4096;
 
 const char* flashResultText(FlashResult result)
@@ -73,7 +75,7 @@ bool UsbMscUf2Flasher::isMassStorageConnected() const
   return current.massStorageConnected;
 }
 
-bool UsbMscUf2Flasher::startFlash(const String& sdUf2Path, const String& name)
+bool UsbMscUf2Flasher::startFlash(const String& sdUf2Path, const String& name, bool useDirectSectorWrite)
 {
   if (isRunning()) {
     return false;
@@ -83,11 +85,14 @@ bool UsbMscUf2Flasher::startFlash(const String& sdUf2Path, const String& name)
   current = FlashProgress{};
   sourcePath = sdUf2Path;
   displayName = name;
+  directSectorWrite = useDirectSectorWrite;
   current.message = "USB host init";
   current.result = FlashResult::UnknownError;
 
   Serial.print("[UF2] selected: ");
   Serial.println(sourcePath);
+  Serial.print("[UF2] write mode: ");
+  Serial.println(directSectorWrite ? "direct-sector" : "vfs-file");
 
   if (!SD.exists(sourcePath)) {
     setError(FlashResult::FileMissing, "No UF2 selected");
@@ -136,7 +141,7 @@ void UsbMscUf2Flasher::poll()
       }
       break;
     case State::Mounting:
-      if (mountDevice()) {
+      if (prepareDevice()) {
         state = State::Copying;
         stateStartedMs = millis();
         current.message = "Copying firmware";
@@ -146,6 +151,16 @@ void UsbMscUf2Flasher::poll()
       break;
     case State::Copying:
       if (disconnectedEvent) {
+        if (current.totalBytes > 0 && current.copiedBytes >= current.totalBytes) {
+          current.done = true;
+          current.success = true;
+          current.result = FlashResult::Ok;
+          current.message = "Flash complete";
+          state = State::Done;
+          cleanup();
+          Serial.println("[UF2] flash complete after disconnect");
+          return;
+        }
         setError(FlashResult::DeviceDisconnectedTooEarly, "Device disconnected");
         return;
       }
@@ -241,6 +256,10 @@ void UsbMscUf2Flasher::cleanup()
     msc_host_uninstall();
   }
   mscInstalled = false;
+  directSectorWrite = false;
+  targetSectorSize = 0;
+  targetSectorCount = 0;
+  nextWriteSector = 0;
   connectedEvent = false;
   disconnectedEvent = false;
   deviceAddress = 0;
@@ -269,7 +288,7 @@ bool UsbMscUf2Flasher::installMscHost()
   return true;
 }
 
-bool UsbMscUf2Flasher::mountDevice()
+bool UsbMscUf2Flasher::prepareDevice()
 {
   msc_host_device_handle_t device = nullptr;
   esp_err_t err = msc_host_install_device(deviceAddress, &device);
@@ -281,13 +300,48 @@ bool UsbMscUf2Flasher::mountDevice()
   deviceHandle = device;
   deviceInstalled = true;
 
+  if (!directSectorWrite) {
+    return mountVfsDevice(device);
+  }
+  return prepareDirectDevice(device);
+}
+
+bool UsbMscUf2Flasher::prepareDirectDevice(msc_host_device_handle_t device)
+{
+  msc_host_device_info_t info = {};
+  esp_err_t err = msc_host_get_device_info(device, &info);
+  if (err != ESP_OK) {
+    Serial.printf("[UF2] msc_host_get_device_info failed: 0x%x\n", err);
+    setError(FlashResult::MountFailed, "Mount failed");
+    return false;
+  }
+  targetSectorSize = info.sector_size;
+  targetSectorCount = info.sector_count;
+  nextWriteSector = 0;
+  Serial.printf("[UF2] MSC ready sectors=%u sector_size=%u\n", static_cast<unsigned>(targetSectorCount),
+                static_cast<unsigned>(targetSectorSize));
+  if (targetSectorSize != UF2_BLOCK_SIZE || targetSectorCount == 0) {
+    setError(FlashResult::MountFailed, "Unsupported MSC sector size");
+    return false;
+  }
+
+  sourceFile = SD.open(sourcePath, FILE_READ);
+  if (!sourceFile) {
+    setError(FlashResult::OpenSourceFailed, "Open source failed");
+    return false;
+  }
+  return true;
+}
+
+bool UsbMscUf2Flasher::mountVfsDevice(msc_host_device_handle_t device)
+{
   esp_vfs_fat_mount_config_t mountConfig = {};
   mountConfig.format_if_mount_failed = false;
   mountConfig.max_files = 2;
   mountConfig.allocation_unit_size = 4096;
 
   msc_host_vfs_handle_t vfs = nullptr;
-  err = msc_host_vfs_register(device, USB_MOUNT_POINT, &mountConfig, &vfs);
+  esp_err_t err = msc_host_vfs_register(device, USB_MOUNT_POINT, &mountConfig, &vfs);
   if (err != ESP_OK) {
     Serial.printf("[UF2] msc_host_vfs_register failed: 0x%x\n", err);
     setError(FlashResult::MountFailed, "Mount failed");
@@ -314,49 +368,78 @@ bool UsbMscUf2Flasher::mountDevice()
 bool UsbMscUf2Flasher::copyChunk()
 {
   static uint8_t buffer[COPY_BUFFER_SIZE];
-  if (!sourceFile || targetFile == nullptr) {
+  if (!sourceFile || (directSectorWrite && deviceHandle == nullptr) || (!directSectorWrite && targetFile == nullptr)) {
     setError(FlashResult::UnknownError, "Copy not ready");
     return false;
   }
 
-  int bytesRead = sourceFile.read(buffer, sizeof(buffer));
+  const size_t readSize = directSectorWrite ? UF2_BLOCK_SIZE : COPY_BUFFER_SIZE;
+  int bytesRead = sourceFile.read(buffer, readSize);
   if (bytesRead < 0) {
     setError(FlashResult::OpenSourceFailed, "Read source failed");
     return false;
   }
   if (bytesRead == 0) {
-    fflush(targetFile);
-    fclose(targetFile);
-    targetFile = nullptr;
-    sourceFile.close();
-    if (vfsMounted && vfsHandle != nullptr) {
-      msc_host_vfs_unregister(static_cast<msc_host_vfs_handle_t>(vfsHandle));
-      vfsMounted = false;
-      vfsHandle = nullptr;
-      Serial.println("[UF2] VFS unmounted");
-    }
-    current.copiedBytes = current.totalBytes;
-    current.percent = 100;
-    current.message = "Firmware copied";
-    state = State::WaitingForReboot;
-    stateStartedMs = millis();
-    Serial.println("[UF2] copy done, waiting for reboot/disconnect");
+    finishCopy();
     return true;
   }
-
-  size_t written = fwrite(buffer, 1, static_cast<size_t>(bytesRead), targetFile);
-  if (written != static_cast<size_t>(bytesRead)) {
-    setError(FlashResult::WriteFailed, "Write failed");
+  if (directSectorWrite && bytesRead != static_cast<int>(UF2_BLOCK_SIZE)) {
+    setError(FlashResult::InvalidUf2, "Invalid UF2 block");
     return false;
   }
-  current.copiedBytes += written;
+
+  if (directSectorWrite) {
+    esp_err_t err = scsi_cmd_write10(static_cast<msc_host_device_handle_t>(deviceHandle), buffer, nextWriteSector, 1,
+                                     targetSectorSize);
+    if (err != ESP_OK) {
+      Serial.printf("[UF2] sector write failed sector=%u err=0x%x\n", static_cast<unsigned>(nextWriteSector), err);
+      setError(FlashResult::WriteFailed, "Write failed");
+      return false;
+    }
+    nextWriteSector = (nextWriteSector + 1) % targetSectorCount;
+  } else {
+    size_t written = fwrite(buffer, 1, static_cast<size_t>(bytesRead), targetFile);
+    if (written != static_cast<size_t>(bytesRead)) {
+      setError(FlashResult::WriteFailed, "Write failed");
+      return false;
+    }
+  }
+  current.copiedBytes += static_cast<size_t>(bytesRead);
   updatePercent();
+  if (current.totalBytes > 0 && current.copiedBytes >= current.totalBytes) {
+    finishCopy();
+    return true;
+  }
   if (millis() - lastProgressLogMs > 500) {
     lastProgressLogMs = millis();
     Serial.printf("[UF2] copy %u/%u (%d%%)\n", static_cast<unsigned>(current.copiedBytes),
                   static_cast<unsigned>(current.totalBytes), current.percent);
   }
   return true;
+}
+
+void UsbMscUf2Flasher::finishCopy()
+{
+  if (targetFile != nullptr) {
+    fflush(targetFile);
+    fclose(targetFile);
+    targetFile = nullptr;
+  }
+  if (sourceFile) {
+    sourceFile.close();
+  }
+  if (vfsMounted && vfsHandle != nullptr) {
+    msc_host_vfs_unregister(static_cast<msc_host_vfs_handle_t>(vfsHandle));
+    vfsMounted = false;
+    vfsHandle = nullptr;
+    Serial.println("[UF2] VFS unmounted");
+  }
+  current.copiedBytes = current.totalBytes;
+  current.percent = 100;
+  current.message = "Firmware copied";
+  state = State::WaitingForReboot;
+  stateStartedMs = millis();
+  Serial.println("[UF2] copy done, waiting for reboot/disconnect");
 }
 
 void UsbMscUf2Flasher::updatePercent()
