@@ -34,6 +34,7 @@ Im aktuellen Code vorhanden:
 - Pattern-Liste mit Cycle- und Invert-Status
 - Pattern-Detailansicht mit Cycle- und Invert-Toggles
 - Sync-Test-Card zum Vorbereiten von Firmware-4.0-Master/Follower-Beacon-Tests
+- Experimentelle Beacon-Master-Card für vom Cardputer gesendete Sync-Beacon-V1-BLE-Advertisements
 - Bulk-Aktionen für Patterns:
   - aktuelle Pattern-Zustände speichern
   - alle Patterns für Cycle aktivieren
@@ -83,6 +84,20 @@ automatischen `reboot_bootsel`-Befehl voraus.
 Die normale CLI-Konfiguration nutzt die vorhandene NightKite-USB-CLI. Dafür
 sind keine Änderungen an der NightKite-Multi-Firmware nötig, sofern die
 erwarteten CLI-Befehle bereitstehen.
+
+Die experimentelle Beacon-Master-Card funktioniert ebenfalls mit unveränderter
+Firmware 4.0. Sie sendet NightKite-Sync-Beacon-V1-kompatible BLE Manufacturer
+Data direkt vom Cardputer als nicht verbindbares Advertising. Dieser Modus ist
+getrennt von BLE-GATT-Konfiguration und hält während des Broadcasts keine
+dauerhafte GATT-Verbindung zu einem Controller offen. In diesem ersten Schritt
+gibt es keine Mikrofon-Eingabe und keine Audioanalyse.
+
+Zum Testen werden NightKite-Multi-Controller als Follower vorbereitet:
+`play_mode=sync`, `sync_enabled=1`, `sync_role=follower`, passende
+`sync_group` 1-4 und `wireless_enabled=1`. Danach auf der Beacon-Master-Card
+dieselbe Gruppe sowie Pattern, Helligkeit und BPM wählen und mit `Enter` den
+Broadcast starten oder stoppen. Der Serial Monitor zeigt Start/Stop-Meldungen
+und regelmäßig den gesendeten Advertising-Payload als Hex-Diagnose.
 
 ## Bauen und Flashen von NightKite Link
 
@@ -218,6 +233,7 @@ Die aktuelle Tastaturbehandlung verarbeitet diese Eingaben:
 | `Backspace` / `DEL` | Zurück oder abbrechen, wo unterstützt |
 | `Tab` | Nächste Card |
 | `R` | Aktuelle Card bzw. Controllerdaten neu lesen, wo implementiert |
+| `T` | Tap-Tempo auf der Beacon-Master-Card |
 | `C` | Editierbares Feld wählen, Firmware-Ziel umschalten oder Pattern-Cycle toggeln |
 | `I` | Pattern-Invert toggeln oder ausgewähltes Profil auf der Profiles-Card löschen |
 | `,` / `<` | Vorherige Card |

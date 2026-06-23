@@ -28,6 +28,7 @@ Ausführliche deutsche Dokumentation: [docs/README.de.md](docs/README.de.md)
 - Device, play mode, sync and wireless/beacon diagnostic cards
 - Sync Test card for preparing master/follower two-controller beacon tests
 - Sync Diag card for Firmware 4.0 PatternClock and beacon apply diagnostics
+- Experimental Cardputer Beacon Master card for V1-compatible BLE sync advertising
 - Brightness, strip length, active pattern, smoothing and autoplay settings
 - Pattern list with cycle, invert and Firmware 4.0 sync classification state
 - Pattern detail and bulk actions
@@ -60,16 +61,25 @@ The project is functional but still evolving. The USB CLI configuration workflow
 and card UI remain the stable operating path. USB NK4 support adds Firmware 4.0
 identity, play mode, sync and wireless configuration. An experimental BLE Scan
 card can connect to Firmware 4.0 RM2/BLE controllers and use the same NK4 command
-path over GATT. BLE is for configuration/status/control only; Link is not a
-real-time sync relay. The UF2 Mass Storage flasher is present as an experimental
-service/recovery workflow and expects the controller to be manually placed into
-BOOTSEL/Mass Storage mode.
+path over GATT. BLE GATT remains for configuration/status/control only; the
+experimental Beacon Master card is a separate show mode that sends
+NightKite Sync Beacon V1-compatible non-connectable BLE advertisements directly
+from the Cardputer. It does not require firmware changes on NightKite Multi
+controllers and does not keep a BLE-GATT controller connection open while
+broadcasting. There is no microphone or audio analysis in this step. The UF2
+Mass Storage flasher is present as an experimental service/recovery workflow
+and expects the controller to be manually placed into BOOTSEL/Mass Storage mode.
 
 For Firmware 4.0 sync bring-up, the Sync Test card can configure the connected
 USB NK4 controller as `NK-Master` or `NK-Follower`, set play mode `sync`, enable
 sync and wireless, choose group 1-4 and select `long_range`, `balanced` or
 `fast_sync`. Save is a separate visible action. Beacon diagnostics are shown for
-USB inspection only; Link does not relay real-time sync traffic.
+USB inspection only. To test the Cardputer Beacon Master, configure existing
+controllers as followers with `play_mode=sync`, `sync_enabled=1`,
+`sync_role=follower`, matching `sync_group` 1-4, and `wireless_enabled=1`; then
+start the Beacon Master card with the same group, pattern, brightness and BPM.
+The transmitted payload is Firmware-4.0 V1-compatible and the serial monitor
+prints beacon start/stop state plus sampled advertising payload hex for debug.
 
 Firmware 4.0 diagnostics now include PatternClock and pattern classification
 fields. The pattern list marks patterns as `S` sync-ready, `P` partial-sync, `L`

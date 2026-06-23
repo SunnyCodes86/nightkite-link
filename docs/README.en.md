@@ -32,6 +32,7 @@ Implemented or present in the current code:
 - Pattern list with cycle and invert state
 - Pattern detail configuration with cycle and invert toggles
 - Sync Test card for preparing Firmware 4.0 master/follower beacon tests
+- Experimental Beacon Master card for Cardputer-originated Sync Beacon V1 BLE advertising
 - Bulk pattern actions:
   - save all current pattern states
   - enable all patterns for cycle
@@ -80,6 +81,20 @@ command.
 Normal CLI configuration uses the existing NightKite USB CLI. No NightKite Multi
 firmware changes are required for that path as long as the controller provides
 the expected CLI commands.
+
+The experimental Beacon Master card also works with unchanged Firmware 4.0
+controllers. It broadcasts NightKite Sync Beacon V1-compatible BLE manufacturer
+data from the Cardputer as non-connectable advertising. It is a separate show
+mode from BLE GATT configuration and does not keep a controller GATT connection
+open while broadcasting. This first version has no microphone input and no audio
+analysis.
+
+To test it, configure one or more NightKite Multi controllers as followers:
+`play_mode=sync`, `sync_enabled=1`, `sync_role=follower`, matching
+`sync_group` 1-4, and `wireless_enabled=1`. Then open the Beacon Master card,
+choose the same group plus pattern, brightness and BPM, and press `Enter` to
+start or stop broadcasting. The serial monitor prints beacon start/stop messages
+and sampled advertising payload hex for diagnostics.
 
 ## Build and Upload
 
@@ -212,6 +227,7 @@ The current keyboard handling processes these controls:
 | `Tab` | Next card |
 | `R` | Refresh current card/controller data where implemented |
 | `C` | Select editable field, toggle firmware target, or toggle pattern cycle depending on card |
+| `T` | Tap tempo on the Beacon Master card |
 | `I` | Toggle pattern invert, or delete selected profile on the Profiles card |
 | `,` / `<` | Previous card |
 | `/` / `?` | Next card |

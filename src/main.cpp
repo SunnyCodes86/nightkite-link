@@ -11,6 +11,7 @@
 #include <BLEDevice.h>
 #include <BLEUtils.h>
 #include <BLEScan.h>
+#include <BLEAdvertising.h>
 #include <BLEClient.h>
 #include <BLERemoteCharacteristic.h>
 #if NIGHTKITE_USB_HOST
@@ -63,6 +64,7 @@ constexpr unsigned long BLE_NK4_LONG_TIMEOUT_MS = 10000;
 constexpr unsigned long BLE_NK4_MEDIUM_TIMEOUT_MS = 8000;
 constexpr unsigned long NK4_PROBE_TIMEOUT_MS = 1600;
 constexpr unsigned long NK4_MACHINE_DELAY_MS = 120;
+constexpr unsigned long BEACON_MASTER_TX_INTERVAL_MS = 100;
 constexpr unsigned long SPLASH_DURATION_MS = 1500;
 constexpr unsigned long STARTUP_SOUND_DELAY_MS = 180;
 constexpr int BLE_SCAN_SECONDS = 6;
@@ -76,6 +78,14 @@ constexpr int SD_SPI_MOSI_PIN = 14;
 constexpr int SD_SPI_CS_PIN = 12;
 constexpr uint32_t ALL_PATTERN_MASK = (1UL << 22) - 1UL;
 const char* const ALL_PATTERN_LIST = "1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22";
+constexpr uint8_t NK_SYNC_BEACON_VERSION = 1;
+constexpr uint8_t NK_SYNC_BEACON_MAGIC0 = 'N';
+constexpr uint8_t NK_SYNC_BEACON_MAGIC1 = 'K';
+constexpr uint16_t NK_SYNC_BEACON_COMPANY_ID = 0xFFFF;
+constexpr uint16_t NK_SYNC_BEACON_ADV_INTERVAL_UNITS = 160;
+constexpr size_t NK_SYNC_BEACON_PACKET_SIZE = 17;
+constexpr size_t NK_SYNC_BEACON_MFG_LEN = 2 + NK_SYNC_BEACON_PACKET_SIZE;
+constexpr size_t NK_SYNC_BEACON_ADV_LEN = 3 + 2 + NK_SYNC_BEACON_MFG_LEN;
 
 const char* const PATTERN_NAMES[] = {
     "",
@@ -295,6 +305,7 @@ enum class Card : uint8_t {
   Status,
   Device,
   Ble,
+  BeaconMaster,
   Play,
   Sync,
   Wireless,
@@ -310,7 +321,7 @@ enum class Card : uint8_t {
   Profiles,
 };
 
-constexpr int CARD_COUNT = 16;
+constexpr int CARD_COUNT = 17;
 
 enum class Mode : uint8_t {
   Cards,
@@ -381,6 +392,7 @@ struct AppState {
   int selectedCard = 0;
   int selectedPatternIndex = 0;
   int selectedBleIndex = 0;
+  int selectedBeaconMasterField = 0;
   int selectedProfileAction = 0;
   int selectedProfileIndex = 0;
   int selectedConfigField = 0;
@@ -398,6 +410,7 @@ struct AppState {
   std::vector<String> firmwareFiles;
   std::vector<BleDeviceEntry> bleDevices;
   String bleStatus = "BLE idle";
+  String beaconStatus = "Beacon idle";
   BleClientState bleState = BleClientState::Idle;
   bool bleScanning = false;
   String lastCommand;
@@ -533,6 +546,8 @@ public:
   virtual void clearBuffers() {}
 };
 
+void ensureBleStackStarted();
+
 class DebugSerialTransport : public NightKiteTransport {
 public:
   bool connected() override
@@ -657,8 +672,7 @@ public:
     if (started) {
       return;
     }
-    BLEDevice::init("NightKite Link");
-    BLEDevice::setMTU(128);
+    ensureBleStackStarted();
     started = true;
   }
 
@@ -998,6 +1012,250 @@ private:
 BleNk4Transport* BleNk4Transport::activeInstance = nullptr;
 BleNk4Transport bleTransport;
 
+bool bleStackStarted = false;
+
+void ensureBleStackStarted()
+{
+  if (bleStackStarted) {
+    return;
+  }
+  BLEDevice::init("NightKite Link");
+  BLEDevice::setMTU(128);
+  bleStackStarted = true;
+}
+
+struct NkSyncBeaconV1 {
+  uint8_t magic0;
+  uint8_t magic1;
+  uint8_t version;
+  uint8_t groupId;
+  uint8_t flags;
+  uint16_t seq;
+  uint8_t pattern;
+  uint8_t brightness;
+  uint32_t phaseMs;
+  uint16_t beatMs;
+  uint16_t crc;
+} __attribute__((packed));
+
+static_assert(sizeof(NkSyncBeaconV1) == NK_SYNC_BEACON_PACKET_SIZE, "Unexpected sync beacon V1 size");
+
+struct BeaconMasterSettings {
+  uint8_t group = 1;
+  uint8_t pattern = 1;
+  uint8_t brightness = 159;
+  uint16_t bpm = 120;
+};
+
+BeaconMasterSettings beaconMasterSettings;
+unsigned long beaconMasterLastTapMs = 0;
+
+String hexBytes(const uint8_t* data, size_t len)
+{
+  const char* digits = "0123456789ABCDEF";
+  String out;
+  out.reserve(len * 2);
+  for (size_t i = 0; i < len; ++i) {
+    out += digits[(data[i] >> 4) & 0x0F];
+    out += digits[data[i] & 0x0F];
+  }
+  return out;
+}
+
+class NightKiteBeaconBroadcaster {
+public:
+  bool start(const BeaconMasterSettings& settings)
+  {
+    ensureBleStackStarted();
+    BLEDevice::getScan()->stop();
+    advertising = BLEDevice::getAdvertising();
+    if (advertising == nullptr) {
+      lastError = "no advertising";
+      Serial.println("beacon: err no advertising");
+      return false;
+    }
+    advertising->stop();
+    broadcasting = true;
+    startedAtMs = millis();
+    nextTxMs = 0;
+    seq = 0;
+    lastError = "none";
+    Serial.println("beacon: start v1 nonconnectable interval=100ms adv_units=160");
+    return publish(settings);
+  }
+
+  void stop()
+  {
+    if (advertising != nullptr) {
+      advertising->stop();
+    }
+    if (broadcasting) {
+      Serial.println("beacon: stop");
+    }
+    broadcasting = false;
+    lastError = "stopped";
+  }
+
+  void tick(const BeaconMasterSettings& settings)
+  {
+    if (!broadcasting) {
+      return;
+    }
+    const unsigned long now = millis();
+    if (nextTxMs == 0 || static_cast<int32_t>(now - nextTxMs) >= 0) {
+      publish(settings);
+    }
+  }
+
+  bool active() const
+  {
+    return broadcasting;
+  }
+
+  uint16_t currentSeq() const
+  {
+    return seq;
+  }
+
+  uint16_t beatMs(const BeaconMasterSettings& settings) const
+  {
+    uint16_t bpm = constrain(settings.bpm, static_cast<uint16_t>(30), static_cast<uint16_t>(300));
+    return static_cast<uint16_t>(60000UL / bpm);
+  }
+
+  uint32_t phaseMs(const BeaconMasterSettings& settings) const
+  {
+    uint16_t beat = beatMs(settings);
+    if (beat == 0) {
+      return 0;
+    }
+    return (millis() - startedAtMs) % beat;
+  }
+
+  const String& payloadHex() const
+  {
+    return lastPayloadHex;
+  }
+
+  const String& status() const
+  {
+    return lastError;
+  }
+
+private:
+  static uint16_t crc16Ccitt(const uint8_t* data, size_t len)
+  {
+    uint16_t crc = 0xFFFF;
+    for (size_t i = 0; i < len; ++i) {
+      crc ^= static_cast<uint16_t>(data[i]) << 8;
+      for (uint8_t bit = 0; bit < 8; ++bit) {
+        crc = (crc & 0x8000) ? static_cast<uint16_t>((crc << 1) ^ 0x1021) : static_cast<uint16_t>(crc << 1);
+      }
+    }
+    return crc;
+  }
+
+  static uint16_t computeCrc(const NkSyncBeaconV1& beacon)
+  {
+    NkSyncBeaconV1 copy = beacon;
+    copy.crc = 0;
+    return crc16Ccitt(reinterpret_cast<const uint8_t*>(&copy), sizeof(copy));
+  }
+
+  bool buildAdvertisingData(const NkSyncBeaconV1& beacon, uint8_t* output, size_t outputSize, uint8_t& outputLen)
+  {
+    if (output == nullptr || outputSize < NK_SYNC_BEACON_ADV_LEN || NK_SYNC_BEACON_ADV_LEN > 31) {
+      return false;
+    }
+    uint8_t pos = 0;
+    output[pos++] = 2;
+    output[pos++] = ESP_BLE_AD_TYPE_FLAG;
+    output[pos++] = 0x06;
+    output[pos++] = static_cast<uint8_t>(NK_SYNC_BEACON_MFG_LEN + 1);
+    output[pos++] = ESP_BLE_AD_MANUFACTURER_SPECIFIC_TYPE;
+    output[pos++] = static_cast<uint8_t>(NK_SYNC_BEACON_COMPANY_ID & 0xFF);
+    output[pos++] = static_cast<uint8_t>(NK_SYNC_BEACON_COMPANY_ID >> 8);
+    memcpy(&output[pos], &beacon, sizeof(beacon));
+    pos += sizeof(beacon);
+    outputLen = pos;
+    return true;
+  }
+
+  bool publish(const BeaconMasterSettings& settings)
+  {
+    if (advertising == nullptr) {
+      lastError = "no advertising";
+      broadcasting = false;
+      return false;
+    }
+
+    NkSyncBeaconV1 beacon;
+    beacon.magic0 = NK_SYNC_BEACON_MAGIC0;
+    beacon.magic1 = NK_SYNC_BEACON_MAGIC1;
+    beacon.version = NK_SYNC_BEACON_VERSION;
+    beacon.groupId = constrain(settings.group, static_cast<uint8_t>(1), static_cast<uint8_t>(4));
+    beacon.flags = 0;
+    beacon.seq = ++seq;
+    beacon.pattern = constrain(settings.pattern, static_cast<uint8_t>(1), static_cast<uint8_t>(PATTERN_COUNT));
+    beacon.brightness = settings.brightness;
+    beacon.phaseMs = phaseMs(settings);
+    beacon.beatMs = beatMs(settings);
+    beacon.crc = computeCrc(beacon);
+
+    uint8_t advData[31];
+    uint8_t advLen = 0;
+    if (!buildAdvertisingData(beacon, advData, sizeof(advData), advLen)) {
+      lastError = "payload too long";
+      broadcasting = false;
+      Serial.println("beacon: err payload too long");
+      return false;
+    }
+
+    BLEAdvertisementData advertisementData;
+    advertisementData.addData(String(reinterpret_cast<const char*>(advData), advLen));
+    advertising->stop();
+    advertising->setScanResponse(false);
+    advertising->setAdvertisementType(ADV_TYPE_NONCONN_IND);
+    advertising->setMinInterval(NK_SYNC_BEACON_ADV_INTERVAL_UNITS);
+    advertising->setMaxInterval(NK_SYNC_BEACON_ADV_INTERVAL_UNITS + 16);
+    advertising->setAdvertisementData(advertisementData);
+    advertising->start();
+
+    lastPayloadHex = hexBytes(advData, advLen);
+    lastError = "broadcasting";
+    nextTxMs = millis() + BEACON_MASTER_TX_INTERVAL_MS;
+    if (seq <= 3 || seq % 10 == 0) {
+      Serial.print("beacon: tx seq=");
+      Serial.print(seq);
+      Serial.print(" group=");
+      Serial.print(beacon.groupId);
+      Serial.print(" pattern=");
+      Serial.print(beacon.pattern);
+      Serial.print(" brightness=");
+      Serial.print(beacon.brightness);
+      Serial.print(" phase=");
+      Serial.print(beacon.phaseMs);
+      Serial.print(" beat=");
+      Serial.print(beacon.beatMs);
+      Serial.print(" crc=0x");
+      Serial.print(beacon.crc, HEX);
+      Serial.print(" adv=");
+      Serial.println(lastPayloadHex);
+    }
+    return true;
+  }
+
+  BLEAdvertising* advertising = nullptr;
+  bool broadcasting = false;
+  uint16_t seq = 0;
+  unsigned long startedAtMs = 0;
+  unsigned long nextTxMs = 0;
+  String lastPayloadHex;
+  String lastError = "idle";
+};
+
+NightKiteBeaconBroadcaster beaconBroadcaster;
+
 NightKiteTransport& activeTransport()
 {
   return app.transportMode == TransportMode::Ble ? static_cast<NightKiteTransport&>(bleTransport)
@@ -1080,6 +1338,9 @@ const char* transportToken()
 
 String connectionToken()
 {
+  if (beaconBroadcaster.active()) {
+    return "BCN ON";
+  }
   if (!app.usbConnected) {
     return "NO USB";
   }
@@ -2512,6 +2773,43 @@ void drawBleCard()
   drawFooter("S scan  ENTER conn  D disc  B reset");
 }
 
+const char* const BEACON_MASTER_FIELDS[] = {"Power", "Group", "Pattern", "Bright", "BPM"};
+constexpr int BEACON_MASTER_FIELD_COUNT = sizeof(BEACON_MASTER_FIELDS) / sizeof(BEACON_MASTER_FIELDS[0]);
+
+void drawBeaconMasterCard()
+{
+  drawTextFit("Beacon Master", 8, CONTENT_Y + 5, 100, COLOR_MUTED);
+  drawTextFit(beaconBroadcaster.active() ? "ON" : "OFF", 184, CONTENT_Y + 5, 48,
+              beaconBroadcaster.active() ? COLOR_OK : COLOR_WARN);
+
+  String values[] = {
+      beaconBroadcaster.active() ? "ON" : "OFF",
+      String(beaconMasterSettings.group),
+      String(beaconMasterSettings.pattern),
+      String(beaconMasterSettings.brightness),
+      String(beaconMasterSettings.bpm),
+  };
+
+  for (int i = 0; i < BEACON_MASTER_FIELD_COUNT; ++i) {
+    int x = 8 + (i % 3) * 76;
+    int y = CONTENT_Y + 22 + (i / 3) * 30;
+    bool active = i == app.selectedBeaconMasterField;
+    uint16_t bg = active ? COLOR_ACCENT_DARK : COLOR_PANEL_DARK;
+    uiCanvas.fillRoundRect(x, y, 70, 24, 3, bg);
+    drawTextFit(BEACON_MASTER_FIELDS[i], x + 5, y + 5, 60, COLOR_MUTED, bg);
+    drawTextFit(values[i], x + 5, y + 16, 60, active ? COLOR_TEXT : COLOR_ACCENT, bg);
+  }
+
+  drawTextFit("Phase " + String(beaconBroadcaster.phaseMs(beaconMasterSettings)) + "ms", 10, CONTENT_Y + 82, 92,
+              COLOR_TEXT);
+  drawTextFit("Seq " + String(beaconBroadcaster.currentSeq()), 112, CONTENT_Y + 82, 58, COLOR_TEXT);
+  drawTextFit("Beat " + String(beaconBroadcaster.beatMs(beaconMasterSettings)) + "ms", 174, CONTENT_Y + 82, 58,
+              COLOR_TEXT);
+  drawTextFit(shortText(beaconBroadcaster.payloadHex(), 36), 10, CONTENT_Y + 96, 218,
+              beaconBroadcaster.active() ? COLOR_MUTED : COLOR_PANEL_LIGHT);
+  drawFooter("ENTER start/stop  C field  W/S edit  T tap");
+}
+
 const char* const PLAY_MODES[] = {"manual", "autoplay", "sync"};
 constexpr int PLAY_MODE_COUNT = sizeof(PLAY_MODES) / sizeof(PLAY_MODES[0]);
 const char* const BOOT_MODES[] = {"last", "manual", "autoplay", "sync"};
@@ -3414,6 +3712,9 @@ void render()
         break;
       case Card::Ble:
         drawBleCard();
+        break;
+      case Card::BeaconMaster:
+        drawBeaconMasterCard();
         break;
       case Card::Play:
         drawPlayCard();
@@ -4584,6 +4885,10 @@ void manualUsbReconnect()
 
 void startBleScan()
 {
+  if (beaconBroadcaster.active()) {
+    beaconBroadcaster.stop();
+    app.beaconStatus = beaconBroadcaster.status();
+  }
   app.bleStatus = "Scanning";
   app.bleState = BleClientState::Scanning;
   app.dirty = true;
@@ -4598,6 +4903,10 @@ void startBleScan()
 
 void connectSelectedBleDevice()
 {
+  if (beaconBroadcaster.active()) {
+    beaconBroadcaster.stop();
+    app.beaconStatus = beaconBroadcaster.status();
+  }
   if (app.transportMode == TransportMode::Ble && app.protocolMode == ProtocolMode::Nk4 && app.controllerConnected) {
     setStatus("Already BLE", COLOR_ACCENT);
     app.bleStatus = "BLE NK4";
@@ -5011,6 +5320,12 @@ void refreshCurrentCard()
     startBleScan();
     return;
   }
+  if (static_cast<Card>(app.selectedCard) == Card::BeaconMaster) {
+    app.beaconStatus = beaconBroadcaster.status();
+    setStatus(app.beaconStatus, beaconBroadcaster.active() ? COLOR_OK : COLOR_MUTED);
+    app.dirty = true;
+    return;
+  }
   requestControllerBattery(true);
   if (app.protocolMode == ProtocolMode::Nk4) {
     if (static_cast<Card>(app.selectedCard) == Card::Device || static_cast<Card>(app.selectedCard) == Card::Status) {
@@ -5204,6 +5519,18 @@ void changeValue(int delta)
     case Card::SyncTest:
       app.selectedSyncTestAction = constrain(app.selectedSyncTestAction + delta, 0, SYNC_TEST_ACTION_COUNT - 1);
       break;
+    case Card::BeaconMaster:
+      if (app.selectedBeaconMasterField == 1) {
+        beaconMasterSettings.group = static_cast<uint8_t>(wrapRange(beaconMasterSettings.group, 1, 4, 1, delta));
+      } else if (app.selectedBeaconMasterField == 2) {
+        beaconMasterSettings.pattern = static_cast<uint8_t>(wrapRange(beaconMasterSettings.pattern, 1, PATTERN_COUNT, 1, delta));
+      } else if (app.selectedBeaconMasterField == 3) {
+        beaconMasterSettings.brightness = static_cast<uint8_t>(
+            wrappedValue(brightnessLevels, BRIGHTNESS_LEVEL_COUNT, beaconMasterSettings.brightness, delta));
+      } else if (app.selectedBeaconMasterField == 4) {
+        beaconMasterSettings.bpm = static_cast<uint16_t>(wrapRange(beaconMasterSettings.bpm, 40, 240, 1, delta));
+      }
+      break;
     case Card::Ble:
       if (!app.bleDevices.empty()) {
         app.selectedBleIndex = constrain(app.selectedBleIndex + delta, 0, static_cast<int>(app.bleDevices.size()) - 1);
@@ -5316,6 +5643,21 @@ void applyCurrentCard()
       break;
     case Card::Ble:
       connectSelectedBleDevice();
+      break;
+    case Card::BeaconMaster:
+      if (beaconBroadcaster.active()) {
+        beaconBroadcaster.stop();
+        app.beaconStatus = beaconBroadcaster.status();
+        setStatus("Beacon stopped", COLOR_WARN);
+      } else {
+        if (app.transportMode == TransportMode::Ble || bleTransport.connected()) {
+          disconnectBleDevice();
+        }
+        bool ok = beaconBroadcaster.start(beaconMasterSettings);
+        app.beaconStatus = beaconBroadcaster.status();
+        setStatus(ok ? "Beacon broadcasting" : app.beaconStatus, ok ? COLOR_OK : COLOR_ERR);
+      }
+      app.dirty = true;
       break;
     case Card::Play:
       if (!requireNk4Controller()) {
@@ -5786,6 +6128,28 @@ void handleWordChar(char c)
     app.dirty = true;
     return;
   }
+  if ((c == 'c' || c == 'C') && static_cast<Card>(app.selectedCard) == Card::BeaconMaster) {
+    app.selectedBeaconMasterField = (app.selectedBeaconMasterField + 1) % BEACON_MASTER_FIELD_COUNT;
+    app.dirty = true;
+    return;
+  }
+  if ((c == 't' || c == 'T') && static_cast<Card>(app.selectedCard) == Card::BeaconMaster) {
+    unsigned long now = millis();
+    if (beaconMasterLastTapMs > 0) {
+      unsigned long interval = now - beaconMasterLastTapMs;
+      if (interval >= 250 && interval <= 2000) {
+        beaconMasterSettings.bpm = static_cast<uint16_t>(constrain(60000UL / interval, 40UL, 240UL));
+        setStatus("Tap tempo " + String(beaconMasterSettings.bpm) + " BPM", COLOR_ACCENT);
+      } else {
+        setStatus("Tap again", COLOR_MUTED);
+      }
+    } else {
+      setStatus("Tap again", COLOR_MUTED);
+    }
+    beaconMasterLastTapMs = now;
+    app.dirty = true;
+    return;
+  }
   if ((c == 'c' || c == 'C') && static_cast<Card>(app.selectedCard) == Card::Device) {
     manualUsbReconnect();
     return;
@@ -6052,6 +6416,18 @@ void handleKeyboard()
   }
 }
 
+void updateBeaconMaster()
+{
+  uint16_t previousSeq = beaconBroadcaster.currentSeq();
+  beaconBroadcaster.tick(beaconMasterSettings);
+  if (beaconBroadcaster.active()) {
+    app.beaconStatus = beaconBroadcaster.status();
+    if (beaconBroadcaster.currentSeq() != previousSeq) {
+      app.dirty = true;
+    }
+  }
+}
+
 }  // namespace
 
 void setup()
@@ -6107,6 +6483,7 @@ void loop()
   updateCardputerBattery();
   handleKeyboard();
   updateFlashWorkflow();
+  updateBeaconMaster();
   if (!flashWorkflowBusy()) {
     pollTransport();
     pollCommandQueue();
