@@ -33,8 +33,8 @@ Im aktuellen Code vorhanden:
 - Autoplay-Status und Autoplay-Intervall konfigurieren
 - Pattern-Liste mit Cycle- und Invert-Status
 - Pattern-Detailansicht mit Cycle- und Invert-Toggles
-- Sync-Test-Card zum Vorbereiten von Firmware-4.0-Master/Follower-Beacon-Tests
-- Experimentelle Beacon-Master-Card mit V1/V2-Manual- und Cardputer-Mikrofon-Audio-Sync-Modi
+- Sync-Setup-Test-Card zum Vorbereiten von Firmware-4.0-Master/Follower-Beacon-Tests
+- Experimentelle Audio-Beacon-Card mit V1/V2-Manual- und Cardputer-Mikrofon-Audio-Sync-Modi
 - Bulk-Aktionen für Patterns:
   - aktuelle Pattern-Zustände speichern
   - alle Patterns für Cycle aktivieren
@@ -85,7 +85,8 @@ Die normale CLI-Konfiguration nutzt die vorhandene NightKite-USB-CLI. Dafür
 sind keine Änderungen an der NightKite-Multi-Firmware nötig, sofern die
 erwarteten CLI-Befehle bereitstehen.
 
-Die experimentelle Beacon-Master-Card sendet NightKite-Sync-Beacon-V1- oder
+Die experimentelle Audio-Beacon-Card sendet als Beacon Master
+NightKite-Sync-Beacon-V1- oder
 V2-BLE-Manufacturer-Data direkt vom Cardputer als nicht verbindbares
 Advertising. V1 funktioniert weiterhin mit unveränderter Firmware 4.0. Der
 V2-Audio-Testmodus benötigt NightKite-Multi-Firmware mit V2-Empfang
@@ -99,7 +100,7 @@ Beat-/BPM-/Phasenerkennung.
 
 Zum Testen werden NightKite-Multi-Controller als Follower vorbereitet:
 `play_mode=sync`, `sync_enabled=1`, `sync_role=follower`, passende
-`sync_group` 1-4 und `wireless_enabled=1`. Danach auf der Beacon-Master-Card
+`sync_group` 1-4 und `wireless_enabled=1`. Danach auf der Audio-Beacon-Card
 dieselbe Gruppe sowie Pattern, Helligkeit und BPM wählen und mit `Enter` den
 Broadcast starten oder stoppen. V1 wählt den etablierten Pfad, V2 Manual die
 manuellen Testwerte und die Mic-Modi die Live-Analyse. In Mic-Modi sind
@@ -200,7 +201,7 @@ Firmwaredateien:
 
 - liegen unter `/firmware/`
 - müssen die Endung `.uf2` haben
-- werden auf der Firmware-Card ausgewählt
+- werden auf `Firmware Update` ausgewählt
 
 Profile:
 
@@ -279,7 +280,7 @@ Die aktuelle Tastaturbehandlung verarbeitet diese Eingaben:
 | `Backspace` / `DEL` | Zurück oder abbrechen, wo unterstützt |
 | `Tab` | Nächste Card |
 | `R` | Aktuelle Card bzw. Controllerdaten neu lesen, wo implementiert |
-| `T` | Tap-Tempo auf der Beacon-Master-Card |
+| `T` | Tap-Tempo auf der Audio-Beacon-Card |
 | `C` | Editierbares Feld wählen, Firmware-Ziel umschalten oder Pattern-Cycle toggeln |
 | `I` | Pattern-Invert toggeln oder ausgewähltes Profil auf der Profiles-Card löschen |
 | `,` / `<` | Vorherige Card |
@@ -299,10 +300,15 @@ markiert; `Enter` wendet sie an, `Backspace` / `DEL` verwirft die lokale
 ## UI-Konzept
 
 NightKite Link nutzt ein Card-based Interface statt eines großen klassischen
-Menüs, weil das Display nur 240 x 135 px groß ist. Jede Card steht für eine
-Hauptaufgabe: Status/Device, Play Mode, Sync, Wireless-Diagnose, Brightness,
-Config, Calibration, Active Pattern, Pattern-Liste, Bulk-Aktionen, Firmware oder
-Profiles.
+Menüs, weil das Display nur 240 x 135 px groß ist. Die flache Reihenfolge stellt
+Live-Funktionen nach vorne und Diagnose-/Servicefunktionen nach hinten:
+`Status`, `Pattern Live`, `Brightness`, `Play`, `Audio Beacon`, `Patterns`,
+`Pattern Bulk`, `Profiles`, `Controller`, `BLE Connect`, `Controller Setup`,
+`Controller Sync`, `Controller Radio`, `Motion Service`, `Sync Diagnostics`,
+`Sync Setup Test` und `Firmware Update`.
+
+Auf `Patterns` wechselt `W` / `S` das Controller-Pattern als Live-Vorschau.
+`Enter` öffnet die Detailansicht für Cycle und Invert.
 
 Die Statusleiste oben zeigt kompakt Transport/Protokoll (`USB LEG` oder
 `USB NK4`), Controller-Name oder Short-ID, Play-/Rollen-Token, Controller-Akku
@@ -389,7 +395,7 @@ Beispiel `cmd=set brightness=...`, `cmd=set play_mode=manual|autoplay|sync`,
 `cmd=set wireless_enabled=0|1`, `cmd=set wireless_profile=...`,
 `cmd=set enabled_mask=...` und `cmd=set inverted_mask=...`.
 
-Der BLE-NK4-Service aus Firmware 4.0 kann experimentell über die BLE-Scan-Card
+Der BLE-NK4-Service aus Firmware 4.0 kann experimentell über die BLE-Connect-Card
 verwendet werden. NightKite Link scannt nach `NK-...`-Geräten oder der
 NightKite-Service-UUID, verbindet genau einen Controller und nutzt denselben
 NK4-Parser wie USB. TX-Notify-Chunks werden bis zum Zeilenende `\n`
@@ -402,9 +408,9 @@ Bulk-Invert wird aktuell über kommaseparierte `invert_pattern`- bzw.
 Befehl im Stil von `set all_patterns_invert` als TODO markiert, falls die
 Controller-Firmware so etwas später anbietet.
 
-## Zwei-Controller-Sync-Test
+## Zwei-Controller-Sync-Setup-Test
 
-Für Firmware-4.0-Controller mit USB NK4 bietet die Sync-Test-Card einen
+Für Firmware-4.0-Controller mit USB NK4 bietet die Sync-Setup-Test-Card einen
 kompakten Setup- und Diagnoseablauf für die ersten Master/Follower-Beacon-Tests.
 Sie ist nur Konfigurator und Diagnoseansicht. BLE NK4 kann zur Konfiguration
 genutzt werden, ist aber kein Echtzeit-Sync-Pfad und leitet keinen Sync weiter.
@@ -412,7 +418,7 @@ genutzt werden, ist aber kein Echtzeit-Sync-Pfad und leitet keinen Sync weiter.
 Typischer Master-Ablauf:
 
 1. Controller A per USB verbinden und `USB NK4` prüfen.
-2. Sync Test öffnen.
+2. Sync Setup Test öffnen.
 3. Gruppe wählen, meist `Group 1`, und Wireless-Profil wählen, meist
    `balanced`.
 4. `Configure Master` ausführen.
@@ -428,7 +434,7 @@ Typischer Master-Ablauf:
 Typischer Follower-Ablauf:
 
 1. Controller B per USB verbinden und `USB NK4` prüfen.
-2. Sync Test öffnen.
+2. Sync Setup Test öffnen.
 3. Dieselbe Gruppe und dasselbe Wireless-Profil wie beim Master wählen.
 4. `Configure Follower` ausführen.
 5. `Save` ausführen.
@@ -441,7 +447,7 @@ Typischer Follower-Ablauf:
 - `set wireless_enabled=1 wireless_profile=<profile>`
 
 `Refresh Sync` fragt `get section=sync`, `sync_status`,
-`get section=wireless` und `status` ab. Solange die Sync-Test-Card geöffnet ist,
+`get section=wireless` und `status` ab. Solange die Sync-Setup-Test-Card geöffnet ist,
 pollt Link `sync_status` ungefähr alle 1,8 Sekunden und
 `get section=wireless` ungefähr alle 5 Sekunden. Die bestehende
 Dirty-/Draft-Logik verhindert weiterhin, dass aktive Eingaben überschrieben
@@ -455,7 +461,7 @@ Pattern-Klassifizierung:
 - `L`: lokal/reaktiv
 - `?`: Klassifizierung nicht bekannt
 
-Die separate Sync-Diag-Card zeigt PatternClock- und Apply-Diagnosewerte wie
+Die separate Sync-Diagnostics-Card zeigt PatternClock- und Apply-Diagnosewerte wie
 `drift_ms`, `phase_ms`, `beacon_phase_ms`, `last_beacon_seq`,
 `last_applied_seq`, `sync_apply_count`, `sync_apply_skipped`,
 `sync_apply_reason`, `last_pattern_change_latency_ms`, `sync_ready_pattern`,
@@ -484,7 +490,7 @@ verbunden bleiben.
 ## Speichern und Werkreset
 
 Live-Änderungen wie Brightness oder aktives Pattern werden sofort an den
-Controller gesendet, sind aber erst nach `save` persistent. Auf der Device-Card
+Controller gesendet, sind aber erst nach `save` persistent. Auf der Controller-Card
 ist `S save` die klare Persistenz-Aktion.
 
 `C reset USB` setzt nur den Link-seitigen USB-/Protokollzustand zurück. Das ist
@@ -516,7 +522,7 @@ USB-Mass-Storage-Modus des RP2040/RP2350-Controllers.
 Aktueller Ablauf:
 
 1. Eine `.uf2`-Firmwaredatei nach `/firmware/` auf der SD-Karte kopieren.
-2. Firmware-Card öffnen.
+2. Firmware Update öffnen.
 3. UF2-Datei mit `W` / `S` auswählen.
 4. Ziellabel mit `C` wählen (`RP2040` oder `RP2350`).
 5. `Enter` drücken.
@@ -584,7 +590,7 @@ Warnungen:
 ### No UF2 file found
 
 - `.uf2`-Dateien unter `/firmware/` ablegen.
-- Firmware-Card mit `R` neu scannen.
+- Firmware Update mit `R` neu scannen.
 
 ### Invalid UF2
 

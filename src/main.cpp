@@ -321,22 +321,22 @@ struct CommandQueueEntry {
 
 enum class Card : uint8_t {
   Status,
-  Device,
-  Ble,
-  BeaconMaster,
-  Play,
-  Sync,
-  Wireless,
-  SyncTest,
-  SyncDiag,
-  Brightness,
-  Config,
-  Calibration,
   ActivePattern,
+  Brightness,
+  Play,
+  BeaconMaster,
   PatternList,
   PatternBulk,
-  Firmware,
   Profiles,
+  Device,
+  Ble,
+  Config,
+  Sync,
+  Wireless,
+  Calibration,
+  SyncDiag,
+  SyncTest,
+  Firmware,
 };
 
 constexpr int CARD_COUNT = 17;
@@ -2998,7 +2998,7 @@ void drawStatusTile(int x, int y, int w, int h, const String& label, const Strin
 
 void drawStatusCard()
 {
-  drawTitle("NightKite Link");
+  drawTitle("Status");
   drawStatusTile(6, CONTENT_Y + 25, 53, 27, "USB", app.usbConnected ? "OK" : "--", app.usbConnected ? COLOR_OK : COLOR_WARN);
   drawStatusTile(64, CONTENT_Y + 25, 53, 27, "CTRL", app.controllerConnected ? (app.controllerError ? "ERR" : "OK") : "--",
                  app.controllerError ? COLOR_ERR : (app.controllerConnected ? COLOR_OK : COLOR_WARN));
@@ -3016,7 +3016,7 @@ void drawStatusCard()
 void drawDeviceCard()
 {
   String battery = app.settings.hasControllerBattery ? controllerBatteryText() : "--";
-  drawTextFit("Device", 8, CONTENT_Y + 5, 90, COLOR_MUTED);
+  drawTextFit("Controller", 8, CONTENT_Y + 5, 90, COLOR_MUTED);
   drawTextFit(String(transportToken()) + " " + protocolToken(), 160, CONTENT_Y + 5, 70,
               app.protocolMode == ProtocolMode::Nk4 ? COLOR_OK : COLOR_WARN);
   drawStatusTile(8, CONTENT_Y + 22, 70, 25, "Name", app.controllerConnected ? shortText(controllerLabel(), 9) : "--",
@@ -3037,7 +3037,7 @@ void drawDeviceCard()
 
 void drawBleCard()
 {
-  drawTextFit("BLE Scan", 8, CONTENT_Y + 5, 90, COLOR_MUTED);
+  drawTextFit("BLE Connect", 8, CONTENT_Y + 5, 90, COLOR_MUTED);
   String status = app.transportMode == TransportMode::Ble && app.protocolMode == ProtocolMode::Nk4
                       ? "Conn " + shortText(controllerLabel(), 10)
                       : app.bleStatus;
@@ -3183,8 +3183,7 @@ void drawMicBeaconMasterCard()
 
 void drawBeaconMasterCard()
 {
-  String title = "Beacon P" + String(beaconMasterSettings.pattern) + " " +
-                 shortText(patternName(beaconMasterSettings.pattern), 12);
+  String title = "Audio Beacon P" + String(beaconMasterSettings.pattern);
   drawTextFit(title, 8, CONTENT_Y + 5, 136, COLOR_MUTED);
   const char* micState = beaconMasterSettings.micPaused ? "PAUSE"
                          : cardputerAudioSync.failed()    ? "ERR"
@@ -3199,7 +3198,8 @@ void drawBeaconMasterCard()
   } else {
     drawManualBeaconMasterCard();
   }
-  drawFooter("ENTER start/stop  C field  W/S edit  T tap");
+  drawFooter(beaconBroadcaster.active() ? "NO GATT  ENT stop  C field  W/S  T tap"
+                                        : "ENT start  C field  W/S edit  T tap");
 }
 
 const char* const PLAY_MODES[] = {"manual", "autoplay", "sync"};
@@ -3271,7 +3271,8 @@ constexpr int SYNC_LOSS_COUNT = sizeof(SYNC_LOSS) / sizeof(SYNC_LOSS[0]);
 
 void drawSyncCard()
 {
-  drawTextFit(String("Sync") + (syncDirtyMask ? "*" : ""), 8, CONTENT_Y + 5, 80, syncDirtyMask ? COLOR_WARN : COLOR_MUTED);
+  drawTextFit(String("Controller Sync") + (syncDirtyMask ? "*" : ""), 8, CONTENT_Y + 5, 112,
+              syncDirtyMask ? COLOR_WARN : COLOR_MUTED);
   String unavailable = !app.usbConnected ? "No controller"
                        : (usbProbePending || app.protocolMode == ProtocolMode::Probing) ? "Detecting..."
                                                                                         : "NK4 required";
@@ -3452,7 +3453,7 @@ void queueSyncTestRoleSetup(const char* role, const char* name)
 
 void drawSyncTestCard()
 {
-  drawTextFit("Sync Test", 8, CONTENT_Y + 4, 88, COLOR_MUTED);
+  drawTextFit("Sync Setup Test", 8, CONTENT_Y + 4, 110, COLOR_MUTED);
   drawTextFit("G" + String(selectedSyncTestGroup()) + " " + shortText(selectedSyncTestProfile(), 9), 124, CONTENT_Y + 4,
               108, COLOR_ACCENT);
   if (!app.usbConnected) {
@@ -3517,7 +3518,7 @@ void drawSyncTestCard()
 
 void drawSyncDiagCard()
 {
-  drawTextFit("Sync Diag", 8, CONTENT_Y + 4, 90, COLOR_MUTED);
+  drawTextFit("Sync Diagnostics", 8, CONTENT_Y + 4, 108, COLOR_MUTED);
   if (!app.usbConnected) {
     drawTextFit("No controller", 12, CONTENT_Y + 34, 160, COLOR_WARN);
     drawFooter("Disconnected");
@@ -3558,7 +3559,7 @@ void drawSyncDiagCard()
 
 void drawWirelessCard()
 {
-  drawTextFit(String("Wireless") + (wirelessDirtyMask ? "*" : ""), 8, CONTENT_Y + 5, 90,
+  drawTextFit(String("Controller Radio") + (wirelessDirtyMask ? "*" : ""), 8, CONTENT_Y + 5, 112,
               wirelessDirtyMask ? COLOR_WARN : COLOR_MUTED);
   String unavailable = !app.usbConnected ? "No controller"
                        : (usbProbePending || app.protocolMode == ProtocolMode::Probing) ? "Detecting..."
@@ -3620,7 +3621,7 @@ void drawPatternCard()
   bool cycle = value >= 1 && value <= PATTERN_COUNT ? app.settings.patterns[value - 1].cycleEnabled : false;
   bool inverted = value >= 1 && value <= PATTERN_COUNT ? app.settings.patterns[value - 1].inverted : false;
   char classTag = patternClassTag(value);
-  drawTitle(String("Pattern") + (patternDirty ? "*" : ""));
+  drawTitle(String("Pattern Live") + (patternDirty ? "*" : ""));
   char num[8];
   snprintf(num, sizeof(num), "%02d", value > 0 ? value : 0);
   drawBigValue(value > 0 ? String(num) : "--", CONTENT_Y + 27);
@@ -3642,7 +3643,7 @@ void drawConfigCard()
       draftAutoplayEnabled ? "ON" : "OFF",
       showInt(draftAutoplayIntervalSeconds) + " s",
   };
-  drawTextFit(String("Config") + (configDirtyMask ? "*" : ""), 8, CONTENT_Y + 6, 120,
+  drawTextFit(String("Controller Setup") + (configDirtyMask ? "*" : ""), 8, CONTENT_Y + 6, 140,
               configDirtyMask ? COLOR_WARN : COLOR_MUTED);
   for (int i = 0; i < 6; ++i) {
     int x = 8 + (i % 3) * 76;
@@ -3707,7 +3708,7 @@ void drawPatternListCard()
     drawTextFit(active ? String("> ") + line : String("  ") + line, 10, y + 3, 220, active ? COLOR_TEXT : COLOR_MUTED, bg);
     uiCanvas.setFont(&fonts::Font0);
   }
-  drawFooter("W/S scroll  C cycle  I invert  R read");
+  drawFooter("W/S LIVE  ENT detail  C cycle  I invert");
 }
 
 const char* const BULK_ACTIONS[] = {"Save all states", "Enable all cycle", "Disable all cycle", "Invert all", "Normal all"};
@@ -3715,7 +3716,7 @@ constexpr int BULK_ACTION_COUNT = sizeof(BULK_ACTIONS) / sizeof(BULK_ACTIONS[0])
 
 void drawBulkCard()
 {
-  drawTextFit("Bulk Actions", 8, CONTENT_Y + 4, 160, COLOR_MUTED);
+  drawTextFit("Pattern Bulk", 8, CONTENT_Y + 4, 160, COLOR_MUTED);
   for (int i = 0; i < BULK_ACTION_COUNT; ++i) {
     int y = CONTENT_Y + 18 + i * 17;
     bool active = i == app.selectedBulkAction;
@@ -3777,7 +3778,7 @@ void refreshFirmwareList()
 
 void drawFirmwareCard()
 {
-  drawTextFit("Firmware Flash", 8, CONTENT_Y + 5, 130, COLOR_MUTED);
+  drawTextFit("Firmware Update", 8, CONTENT_Y + 5, 130, COLOR_MUTED);
   drawTextFit(app.sdReady ? "SD OK" : "SD --", 178, CONTENT_Y + 5, 50, app.sdReady ? COLOR_OK : COLOR_WARN);
 
   uiCanvas.fillRoundRect(8, CONTENT_Y + 22, 224, 18, 3, COLOR_PANEL_DARK);

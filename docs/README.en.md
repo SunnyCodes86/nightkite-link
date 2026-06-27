@@ -31,8 +31,8 @@ Implemented or present in the current code:
 - Autoplay enabled state and autoplay interval configuration
 - Pattern list with cycle and invert state
 - Pattern detail configuration with cycle and invert toggles
-- Sync Test card for preparing Firmware 4.0 master/follower beacon tests
-- Experimental Beacon Master card with V1/V2 manual and Cardputer microphone audio-sync modes
+- Sync Setup Test card for preparing Firmware 4.0 master/follower beacon tests
+- Experimental Audio Beacon card with V1/V2 manual and Cardputer microphone audio-sync modes
 - Bulk pattern actions:
   - save all current pattern states
   - enable all patterns for cycle
@@ -82,8 +82,8 @@ Normal CLI configuration uses the existing NightKite USB CLI. No NightKite Multi
 firmware changes are required for that path as long as the controller provides
 the expected CLI commands.
 
-The experimental Beacon Master card broadcasts NightKite Sync Beacon V1 or V2
-BLE manufacturer data from the Cardputer as non-connectable advertising. V1
+The experimental Audio Beacon card broadcasts NightKite Sync Beacon V1 or V2
+as a Cardputer Beacon Master using non-connectable BLE manufacturer data. V1
 continues to work with unchanged Firmware 4.0 controllers. V2 audio-test mode
 requires NightKite Multi firmware with V2 receive support (`4cfa6a0` or newer).
 Audio-sync patterns 23 through 27 require NightKite Multi `0f03e9e` or newer.
@@ -95,7 +95,7 @@ also controls bass, mid and treble and enables simple beat/BPM/phase tracking.
 
 To test it, configure one or more NightKite Multi controllers as followers:
 `play_mode=sync`, `sync_enabled=1`, `sync_role=follower`, matching
-`sync_group` 1-4, and `wireless_enabled=1`. Then open the Beacon Master card,
+`sync_group` 1-4, and `wireless_enabled=1`. Then open the Audio Beacon card,
 choose the same group plus pattern, brightness and BPM, and press `Enter` to
 start or stop broadcasting. Select V1 for the established path, V2 Manual for
 manual test values, or a Mic mode for live analysis. Mic fields provide
@@ -192,7 +192,7 @@ Firmware files:
 
 - must be placed under `/firmware/`
 - must use the `.uf2` extension
-- are selected from the Firmware card
+- are selected from `Firmware Update`
 
 Profiles:
 
@@ -270,7 +270,7 @@ The current keyboard handling processes these controls:
 | `Tab` | Next card |
 | `R` | Refresh current card/controller data where implemented |
 | `C` | Select editable field, toggle firmware target, or toggle pattern cycle depending on card |
-| `T` | Tap tempo on the Beacon Master card |
+| `T` | Tap tempo on the Audio Beacon card |
 | `I` | Toggle pattern invert, or delete selected profile on the Profiles card |
 | `,` / `<` | Previous card |
 | `/` / `?` | Next card |
@@ -288,10 +288,15 @@ apply them or `Backspace` / `DEL` to discard the local edit.
 ## UI Concept
 
 NightKite Link uses a card-based interface instead of a classic large menu
-because the display is only 240 x 135 px. Each card presents one primary task:
-status/device, play mode, sync, wireless diagnostics, brightness, configuration,
-calibration, pattern selection, pattern list, bulk actions, firmware, or
-profiles.
+because the display is only 240 x 135 px. The flat order keeps live controls at
+the front and diagnostics/service at the back: `Status`, `Pattern Live`,
+`Brightness`, `Play`, `Audio Beacon`, `Patterns`, `Pattern Bulk`, `Profiles`,
+`Controller`, `BLE Connect`, `Controller Setup`, `Controller Sync`,
+`Controller Radio`, `Motion Service`, `Sync Diagnostics`, `Sync Setup Test`,
+and `Firmware Update`.
+
+On `Patterns`, `W` / `S` changes the controller pattern as a live preview.
+`Enter` opens the cycle/invert detail view.
 
 The top status bar shows compact transport/protocol state (`USB LEG` or
 `USB NK4`), controller name or short ID, play/role tokens, controller battery
@@ -377,7 +382,7 @@ In NK4 mode, existing UI actions are translated to NK4 requests such as
 `cmd=set enabled_mask=...` and `cmd=set inverted_mask=...`.
 
 The BLE NK4 service implemented by Firmware 4.0 can be used experimentally from
-the BLE Scan card. NightKite Link scans for `NK-...` devices or the NightKite
+the BLE Connect card. NightKite Link scans for `NK-...` devices or the NightKite
 service UUID, connects to one controller at a time, and uses the same NK4 parser
 as USB. TX Notify chunks are reassembled until newline `\n`. USB remains the
 stable recommended path. Link is a configurator and diagnostic tool; it does not
@@ -388,9 +393,9 @@ Bulk invert currently maps to comma-separated `invert_pattern` /
 `set all_patterns_invert` style command as a TODO if the controller firmware
 adds one later.
 
-## Two-Controller Sync Test
+## Two-Controller Sync Setup Test
 
-For Firmware 4.0 USB NK4 controllers, the Sync Test card provides a compact
+For Firmware 4.0 USB NK4 controllers, the Sync Setup Test card provides a compact
 setup and diagnostic workflow for the first master/follower beacon tests. It is
 only a configurator and diagnostic view. BLE NK4 can configure controllers, but
 it is not a real-time sync path and does not relay sync traffic.
@@ -398,7 +403,7 @@ it is not a real-time sync path and does not relay sync traffic.
 Typical master setup:
 
 1. Connect controller A over USB and confirm `USB NK4`.
-2. Open Sync Test.
+2. Open Sync Setup Test.
 3. Select the group, usually `Group 1`, and wireless profile, usually
    `balanced`.
 4. Run `Configure Master`.
@@ -414,7 +419,7 @@ Typical master setup:
 Typical follower setup:
 
 1. Connect controller B over USB and confirm `USB NK4`.
-2. Open Sync Test.
+2. Open Sync Setup Test.
 3. Use the same group and wireless profile as the master.
 4. Run `Configure Follower`.
 5. Run `Save`.
@@ -427,7 +432,7 @@ Typical follower setup:
 - `set wireless_enabled=1 wireless_profile=<profile>`
 
 `Refresh Sync` queues `get section=sync`, `sync_status`, `get section=wireless`
-and `status`. While the Sync Test card is open, Link polls `sync_status` about
+and `status`. While the Sync Setup Test card is open, Link polls `sync_status` about
 every 1.8 seconds and `get section=wireless` about every 5 seconds, but the
 existing dirty/draft protection still prevents active edits from being
 overwritten.
@@ -439,7 +444,7 @@ The pattern list also shows compact Firmware 4.0 pattern classification:
 - `L`: local/reactive
 - `?`: classification unknown
 
-The separate Sync Diag card shows PatternClock and apply diagnostics such as
+The separate Sync Diagnostics card shows PatternClock and apply diagnostics such as
 `drift_ms`, `phase_ms`, `beacon_phase_ms`, `last_beacon_seq`,
 `last_applied_seq`, `sync_apply_count`, `sync_apply_skipped`,
 `sync_apply_reason`, `last_pattern_change_latency_ms`, `sync_ready_pattern`,
@@ -468,7 +473,7 @@ diagnostics is fine.
 ## Save And Factory Reset
 
 Live changes such as brightness or active pattern are sent to the controller
-immediately, but they are only persistent after `save`. On the Device card,
+immediately, but they are only persistent after `save`. On the Controller card,
 `S save` is the explicit persistence action.
 
 `C reset USB` only resets Link's USB/protocol session. It is not a controller
@@ -500,7 +505,7 @@ mode on the RP2040/RP2350 controller.
 Current flow:
 
 1. Copy a `.uf2` firmware file to `/firmware/` on the SD card.
-2. Open the Firmware card.
+2. Open Firmware Update.
 3. Select the UF2 file with `W` / `S`.
 4. Select the target label with `C` (`RP2040` or `RP2350`).
 5. Press `Enter`.
@@ -566,7 +571,7 @@ Warnings:
 ### No UF2 file found
 
 - Put `.uf2` files under `/firmware/`.
-- Refresh the Firmware card with `R`.
+- Refresh Firmware Update with `R`.
 
 ### Invalid UF2
 

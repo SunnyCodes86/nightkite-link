@@ -25,16 +25,22 @@ Ausführliche deutsche Dokumentation: [docs/README.de.md](docs/README.de.md)
 - WAV/PCM-style startup and UI key sounds
 - Cardputer battery, USB and controller/CLI status display
 - USB NK4 detection for Firmware 4.0 with legacy CLI fallback for Firmware 3.x
-- Device, play mode, sync and wireless/beacon diagnostic cards
-- Sync Test card for preparing master/follower two-controller beacon tests
-- Sync Diag card for Firmware 4.0 PatternClock and beacon apply diagnostics
-- Experimental Cardputer Beacon Master with V1/V2 manual and microphone audio-sync modes
+- Controller, play mode, sync and controller-radio configuration cards
+- Sync Setup Test card for preparing master/follower two-controller beacon tests
+- Sync Diagnostics card for Firmware 4.0 PatternClock and beacon apply diagnostics
+- Experimental Audio Beacon card with V1/V2 manual and Cardputer microphone audio-sync modes
 - Brightness, strip length, active pattern, smoothing and autoplay settings
 - Pattern list with cycle, invert and Firmware 4.0 sync classification state
 - Pattern detail and bulk actions
 - SD card profiles under `/profiles/`
 - UF2 firmware selection from `/firmware/`
 - Experimental USB Mass Storage UF2 flasher workflow for RP2040/RP2350 BOOTSEL mode
+
+The flat Cardputer navigation is ordered by task frequency:
+`Status`, `Pattern Live`, `Brightness`, `Play`, `Audio Beacon`, `Patterns`,
+`Pattern Bulk`, `Profiles`, `Controller`, `BLE Connect`, `Controller Setup`,
+`Controller Sync`, `Controller Radio`, `Motion Service`, `Sync Diagnostics`,
+`Sync Setup Test`, and `Firmware Update`.
 
 ## Hardware Target
 
@@ -59,10 +65,10 @@ pio device monitor
 
 The project is functional but still evolving. The USB CLI configuration workflow
 and card UI remain the stable operating path. USB NK4 support adds Firmware 4.0
-identity, play mode, sync and wireless configuration. An experimental BLE Scan
+identity, play mode, sync and wireless configuration. The experimental BLE Connect
 card can connect to Firmware 4.0 RM2/BLE controllers and use the same NK4 command
 path over GATT. BLE GATT remains for configuration/status/control only; the
-experimental Beacon Master card is a separate show mode that sends
+experimental Audio Beacon card is a separate Beacon Master show mode that sends
 NightKite Sync Beacon V1 or V2 non-connectable BLE advertisements directly from
 the Cardputer. V1 remains compatible with unchanged NightKite Multi controllers;
 V2 audio-test mode requires controller firmware with V2 receive support
@@ -76,14 +82,14 @@ The UF2
 Mass Storage flasher is present as an experimental service/recovery workflow
 and expects the controller to be manually placed into BOOTSEL/Mass Storage mode.
 
-For Firmware 4.0 sync bring-up, the Sync Test card can configure the connected
+For Firmware 4.0 sync bring-up, the Sync Setup Test card can configure the connected
 USB NK4 controller as `NK-Master` or `NK-Follower`, set play mode `sync`, enable
 sync and wireless, choose group 1-4 and select `long_range`, `balanced` or
 `fast_sync`. Save is a separate visible action. Beacon diagnostics are shown for
 USB inspection only. To test the Cardputer Beacon Master, configure existing
 controllers as followers with `play_mode=sync`, `sync_enabled=1`,
 `sync_role=follower`, matching `sync_group` 1-4, and `wireless_enabled=1`; then
-start the Beacon Master card with the same group, pattern, brightness and BPM.
+start the Audio Beacon card with the same group, pattern, brightness and BPM.
 Choose V1 for the established compatible path, V2 Manual to edit the five test
 values, or one of the Mic modes for live analysis. The Mic controls expose
 sensitivity, noise gate, smoothing, beat detect and pause. Capture uses
@@ -121,7 +127,7 @@ Hardware check:
 
 Firmware 4.0 diagnostics now include PatternClock and pattern classification
 fields. The pattern list marks patterns as `S` sync-ready, `P` partial-sync, `L`
-local/reactive, or `?` unknown. The Sync Diag card shows compact sync runtime
+local/reactive, or `?` unknown. The Sync Diagnostics card shows compact sync runtime
 values such as drift, phase, beacon phase, last beacon/applied sequence, apply
 counts/skips, apply reason, pattern latency, and master-autoplay state. NightKite
 The experimental BLE client reassembles 20-byte TX Notify chunks until newline
@@ -129,7 +135,7 @@ and supports one active BLE controller connection at a time. Multiple
 simultaneous BLE connections are a future TODO. USB remains the recommended
 service path.
 
-The Device card separates Link-side USB recovery from controller configuration:
+The Controller card separates Link-side USB recovery from controller configuration:
 `C reset USB` only restarts Link's USB/protocol session, while `F defaults`
 opens a confirmation for controller factory defaults. Confirmed defaults send
 `defaults confirm=1`, then `save`, then reload controller state. `S save` writes
