@@ -34,7 +34,7 @@ Im aktuellen Code vorhanden:
 - Pattern-Liste mit Cycle- und Invert-Status
 - Pattern-Detailansicht mit Cycle- und Invert-Toggles
 - Sync-Test-Card zum Vorbereiten von Firmware-4.0-Master/Follower-Beacon-Tests
-- Experimentelle Beacon-Master-Card für vom Cardputer gesendete Sync-Beacon-V1- und V2-Audio-Test-Advertisements
+- Experimentelle Beacon-Master-Card mit V1/V2-Manual- und Cardputer-Mikrofon-Audio-Sync-Modi
 - Bulk-Aktionen für Patterns:
   - aktuelle Pattern-Zustände speichern
   - alle Patterns für Cycle aktivieren
@@ -90,18 +90,29 @@ V2-BLE-Manufacturer-Data direkt vom Cardputer als nicht verbindbares
 Advertising. V1 funktioniert weiterhin mit unveränderter Firmware 4.0. Der
 V2-Audio-Testmodus benötigt NightKite-Multi-Firmware mit V2-Empfang
 (`4cfa6a0` oder neuer). Dieser Modus ist von der BLE-GATT-Konfiguration getrennt
-und hält während des Broadcasts keine dauerhafte GATT-Verbindung offen. Energy,
-Bass, Mid, Treble und Confidence sind manuelle Testwerte. Mikrofon-Eingabe, FFT
-und Audio-Beat-Erkennung sind noch nicht enthalten.
+und hält während des Broadcasts keine dauerhafte GATT-Verbindung offen. Verfügbar
+sind `V1 Manual`, `V2 Manual`, `V2 Mic Energy` und `V2 Mic Full`. Mic Energy
+steuert Energy und Confidence per Mikrofon und behält die manuellen Bandwerte.
+Mic Full steuert zusätzlich Bass, Mid und Treble und aktiviert eine einfache
+Beat-/BPM-/Phasenerkennung.
 
 Zum Testen werden NightKite-Multi-Controller als Follower vorbereitet:
 `play_mode=sync`, `sync_enabled=1`, `sync_role=follower`, passende
 `sync_group` 1-4 und `wireless_enabled=1`. Danach auf der Beacon-Master-Card
 dieselbe Gruppe sowie Pattern, Helligkeit und BPM wählen und mit `Enter` den
-Broadcast starten oder stoppen. V1 wählt den etablierten Pfad; in V2 lassen sich
-die fünf Audio-Testwerte bearbeiten. V2 nutzt 22 Byte Beacon-Payload und ein
-29-Byte-Legacy-Advertising ohne Local Name oder Service Data. Der Serial Monitor
-zeigt Version, Payload-Länge, V2-Audiowerte und regelmäßig den Payload als Hex.
+Broadcast starten oder stoppen. V1 wählt den etablierten Pfad, V2 Manual die
+manuellen Testwerte und die Mic-Modi die Live-Analyse. In Mic-Modi sind
+Sensitivity, Noise Gate, Smoothing, Beat Detect und Pause einstellbar.
+Tap-Tempo bleibt der Fallback, wenn die Beat-Erkennung deaktiviert oder unsicher
+ist.
+
+Die Aufnahme läuft asynchron mit 8 kHz, mono und 256 Samples bzw. 32 ms pro
+Frame. Der DSP entfernt DC, verfolgt RMS, Peak und einen langsamen Noise Floor,
+wendet Gate und Attack/Release-Glättung an und normalisiert Energy. Mic Full
+nutzt eine kleine Goertzel-Filterbank für ungefähr 60-250 Hz, 250-2000 Hz und
+2000-3400 Hz. Die obere Grenze folgt dem Nyquist-Limit von 4 kHz. UI-Sounds
+werden während aktiver Mikrofonaufnahme unterdrückt. V2 bleibt bei 22 Byte
+Payload und 29 Byte Legacy Advertising ohne Local Name oder Service Data.
 
 Controller-Diagnose:
 
@@ -109,6 +120,18 @@ Controller-Diagnose:
 NK4 seq=10 cmd=get section=sync
 NK4 seq=20 cmd=audio_sync_status
 ```
+
+Hardwaretest:
+
+1. Controller mit `play_mode=sync`, `sync_enabled=1`, `sync_role=follower`,
+   passender `sync_group` und `wireless_enabled=1` konfigurieren.
+2. `V2 Mic Full` starten und Musik oder einen regelmäßigen Puls am Cardputer
+   abspielen.
+3. Beide obigen Kommandos über Controller-USB ausführen.
+4. Erwartet werden `audio_valid=1`, `last_beacon_version=2`, steigendes
+   `scan_decode_v2`, reagierende Energy-/Bandwerte, steigende Confidence bei
+   stabilem Puls, plausibles `audio_beat_ms`, `sync_locked=1` und
+   `scan_crc_fail=0`.
 
 ## Bauen und Flashen von NightKite Link
 

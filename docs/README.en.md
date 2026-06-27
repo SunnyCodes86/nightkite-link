@@ -32,7 +32,7 @@ Implemented or present in the current code:
 - Pattern list with cycle and invert state
 - Pattern detail configuration with cycle and invert toggles
 - Sync Test card for preparing Firmware 4.0 master/follower beacon tests
-- Experimental Beacon Master card for Cardputer-originated Sync Beacon V1 and V2 audio-test BLE advertising
+- Experimental Beacon Master card with V1/V2 manual and Cardputer microphone audio-sync modes
 - Bulk pattern actions:
   - save all current pattern states
   - enable all patterns for cycle
@@ -87,18 +87,27 @@ BLE manufacturer data from the Cardputer as non-connectable advertising. V1
 continues to work with unchanged Firmware 4.0 controllers. V2 audio-test mode
 requires NightKite Multi firmware with V2 receive support (`4cfa6a0` or newer).
 The mode is separate from BLE GATT configuration and does not keep a controller
-GATT connection open while broadcasting. V2 energy, bass, mid, treble and
-confidence are manual test values. There is no microphone input, FFT or audio
-beat analysis.
+GATT connection open while broadcasting. Available modes are `V1 Manual`,
+`V2 Manual`, `V2 Mic Energy` and `V2 Mic Full`. Mic Energy controls energy and
+confidence from the microphone while retaining the manual band values. Mic Full
+also controls bass, mid and treble and enables simple beat/BPM/phase tracking.
 
 To test it, configure one or more NightKite Multi controllers as followers:
 `play_mode=sync`, `sync_enabled=1`, `sync_role=follower`, matching
 `sync_group` 1-4, and `wireless_enabled=1`. Then open the Beacon Master card,
 choose the same group plus pattern, brightness and BPM, and press `Enter` to
-start or stop broadcasting. Select V1 for the established path or V2 to edit the
-five audio test values. V2 uses a 22-byte beacon payload and a 29-byte legacy
-advertisement, with no local name or service data. The serial monitor prints
-version, payload length, V2 audio values and sampled payload hex.
+start or stop broadcasting. Select V1 for the established path, V2 Manual for
+manual test values, or a Mic mode for live analysis. Mic fields provide
+sensitivity, noise gate, smoothing, beat detect and pause. Tap tempo remains the
+fallback when beat tracking is disabled or uncertain.
+
+Capture runs asynchronously at 8 kHz with 256-sample/32-ms mono frames. The DSP
+removes DC, tracks RMS, peak and a slow noise floor, applies a gate and
+attack/release smoothing, then normalizes energy. Mic Full uses a small Goertzel
+filter bank covering approximately 60-250 Hz, 250-2000 Hz and 2000-3400 Hz.
+The upper treble limit follows the 4-kHz Nyquist limit. Speaker UI sounds are
+suspended while capture is active. V2 remains a 22-byte payload in a 29-byte
+legacy advertisement without local name or service data.
 
 Controller diagnostics:
 
@@ -106,6 +115,16 @@ Controller diagnostics:
 NK4 seq=10 cmd=get section=sync
 NK4 seq=20 cmd=audio_sync_status
 ```
+
+Hardware test:
+
+1. Configure the controller as `play_mode=sync`, `sync_enabled=1`,
+   `sync_role=follower`, with matching `sync_group` and `wireless_enabled=1`.
+2. Start `V2 Mic Full` and play music or a regular pulse near the Cardputer.
+3. Run the two commands above over controller USB.
+4. Verify `audio_valid=1`, `last_beacon_version=2`, increasing
+   `scan_decode_v2`, responsive energy/bands, improving confidence with a stable
+   pulse, plausible `audio_beat_ms`, `sync_locked=1`, and `scan_crc_fail=0`.
 
 ## Build and Upload
 

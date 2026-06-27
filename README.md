@@ -28,7 +28,7 @@ Ausführliche deutsche Dokumentation: [docs/README.de.md](docs/README.de.md)
 - Device, play mode, sync and wireless/beacon diagnostic cards
 - Sync Test card for preparing master/follower two-controller beacon tests
 - Sync Diag card for Firmware 4.0 PatternClock and beacon apply diagnostics
-- Experimental Cardputer Beacon Master card for V1 and V2 audio-test BLE sync advertising
+- Experimental Cardputer Beacon Master with V1/V2 manual and microphone audio-sync modes
 - Brightness, strip length, active pattern, smoothing and autoplay settings
 - Pattern list with cycle, invert and Firmware 4.0 sync classification state
 - Pattern detail and bulk actions
@@ -67,8 +67,11 @@ NightKite Sync Beacon V1 or V2 non-connectable BLE advertisements directly from
 the Cardputer. V1 remains compatible with unchanged NightKite Multi controllers;
 V2 audio-test mode requires controller firmware with V2 receive support
 (`4cfa6a0` or newer). Broadcasting does not keep a BLE-GATT controller
-connection open. Energy, bass, mid, treble and confidence are manual test values;
-there is no microphone, FFT or audio analysis in this step. The UF2
+connection open. The modes are `V1 Manual`, `V2 Manual`, `V2 Mic Energy` and
+`V2 Mic Full`. Mic Energy derives energy and confidence from the Cardputer
+microphone. Mic Full additionally analyzes bass, mid and treble and performs
+simple beat/BPM/phase tracking. The manual BPM or tap tempo remains the fallback.
+The UF2
 Mass Storage flasher is present as an experimental service/recovery workflow
 and expects the controller to be manually placed into BOOTSEL/Mass Storage mode.
 
@@ -80,10 +83,16 @@ USB inspection only. To test the Cardputer Beacon Master, configure existing
 controllers as followers with `play_mode=sync`, `sync_enabled=1`,
 `sync_role=follower`, matching `sync_group` 1-4, and `wireless_enabled=1`; then
 start the Beacon Master card with the same group, pattern, brightness and BPM.
-Choose V1 for the established compatible path or V2 to edit the five manual
-audio values. The serial monitor prints version, payload length, audio test
-values for V2, and sampled advertising payload hex. V2 uses 29 of the 31 legacy
-advertising bytes and does not add a local name or service data.
+Choose V1 for the established compatible path, V2 Manual to edit the five test
+values, or one of the Mic modes for live analysis. The Mic controls expose
+sensitivity, noise gate, smoothing, beat detect and pause. Capture uses
+8 kHz mono frames with 256 samples (32 ms); Mic Full uses a small Goertzel
+filter bank for roughly 60-250 Hz bass, 250-2000 Hz mids and 2000-3400 Hz
+treble. Speaker UI sounds are suspended while the microphone is active because
+the Cardputer cannot use both paths simultaneously. The serial monitor prints
+periodic RMS, peak, noise floor, bands, confidence, beat timing and payload
+diagnostics. V2 uses 29 of the 31 legacy advertising bytes and adds no local
+name or service data.
 
 Controller diagnostics for the two modes:
 
@@ -91,6 +100,15 @@ Controller diagnostics for the two modes:
 NK4 seq=10 cmd=get section=sync
 NK4 seq=20 cmd=audio_sync_status
 ```
+
+Hardware check:
+
+1. Configure the controller as a follower with sync and wireless enabled and a matching group.
+2. Start `V2 Mic Full` on the Cardputer and provide music or a stable pulse.
+3. Run both diagnostic commands above over USB.
+4. Expect `audio_valid=1`, `last_beacon_version=2`, rising `scan_decode_v2`,
+   reactive energy/bands, plausible confidence and beat timing, `sync_locked=1`,
+   and `scan_crc_fail=0`.
 
 Firmware 4.0 diagnostics now include PatternClock and pattern classification
 fields. The pattern list marks patterns as `S` sync-ready, `P` partial-sync, `L`

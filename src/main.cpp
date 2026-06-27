@@ -5,6 +5,7 @@
 #include <vector>
 #include "M5Cardputer.h"
 #include "SoundManager.h"
+#include "CardputerAudioSync.h"
 #include "ControllerBatteryParser.h"
 #include "Uf2Validator.h"
 #include "UsbMscUf2Flasher.h"
@@ -81,6 +82,7 @@ const char* const ALL_PATTERN_LIST = "1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,
 constexpr uint8_t NK_SYNC_BEACON_VERSION_V1 = 1;
 constexpr uint8_t NK_SYNC_BEACON_VERSION_V2 = 2;
 constexpr uint8_t NK_SYNC_BEACON_VERSION = NK_SYNC_BEACON_VERSION_V1;
+constexpr uint8_t NK_SYNC_BEACON_FLAG_AUDIO_BEAT = 0x01;
 constexpr uint8_t NK_SYNC_BEACON_MAGIC0 = 'N';
 constexpr uint8_t NK_SYNC_BEACON_MAGIC1 = 'K';
 constexpr uint16_t NK_SYNC_BEACON_COMPANY_ID = 0xFFFF;
@@ -1077,8 +1079,15 @@ struct NkSyncBeaconV2 {
 
 static_assert(sizeof(NkSyncBeaconV2) == NK_SYNC_BEACON_V2_PACKET_SIZE, "Unexpected sync beacon V2 size");
 
+enum class BeaconMasterMode : uint8_t {
+  V1Manual = 0,
+  V2Manual,
+  V2MicEnergy,
+  V2MicFull,
+};
+
 struct BeaconMasterSettings {
-  uint8_t version = NK_SYNC_BEACON_VERSION_V1;
+  BeaconMasterMode mode = BeaconMasterMode::V1Manual;
   uint8_t group = 1;
   uint8_t pattern = 1;
   uint8_t brightness = 159;
@@ -1088,10 +1097,118 @@ struct BeaconMasterSettings {
   uint8_t mid = 128;
   uint8_t treble = 128;
   uint8_t confidence = 255;
+  uint8_t sensitivity = 100;
+  uint8_t noiseGate = 20;
+  uint8_t smoothing = 50;
+  bool beatDetect = true;
+  bool micPaused = false;
 };
 
 BeaconMasterSettings beaconMasterSettings;
 unsigned long beaconMasterLastTapMs = 0;
+CardputerAudioSync cardputerAudioSync;
+
+struct BeaconAudioValues {
+  uint8_t energy = 0;
+  uint8_t bass = 0;
+  uint8_t mid = 0;
+  uint8_t treble = 0;
+  uint8_t confidence = 0;
+  bool beat = false;
+};
+
+bool beaconModeUsesV2(const BeaconMasterSettings& settings)
+{
+  return settings.mode != BeaconMasterMode::V1Manual;
+}
+
+bool beaconModeUsesMic(const BeaconMasterSettings& settings)
+{
+  return settings.mode == BeaconMasterMode::V2MicEnergy || settings.mode == BeaconMasterMode::V2MicFull;
+}
+
+bool beaconModeUsesFullAudio(const BeaconMasterSettings& settings)
+{
+  return settings.mode == BeaconMasterMode::V2MicFull;
+}
+
+const char* beaconModeLabel(BeaconMasterMode mode)
+{
+  switch (mode) {
+    case BeaconMasterMode::V2Manual: return "V2 Manual";
+    case BeaconMasterMode::V2MicEnergy: return "V2 Mic Energy";
+    case BeaconMasterMode::V2MicFull: return "V2 Mic Full";
+    case BeaconMasterMode::V1Manual:
+    default: return "V1 Manual";
+  }
+}
+
+const char* beaconModeShortLabel(BeaconMasterMode mode)
+{
+  switch (mode) {
+    case BeaconMasterMode::V2Manual: return "V2 Man";
+    case BeaconMasterMode::V2MicEnergy: return "Mic Energy";
+    case BeaconMasterMode::V2MicFull: return "Mic Full";
+    case BeaconMasterMode::V1Manual:
+    default: return "V1 Man";
+  }
+}
+
+AudioSyncDspConfig audioDspConfig(const BeaconMasterSettings& settings)
+{
+  AudioSyncDspConfig config;
+  config.sampleRate = CardputerAudioSync::SAMPLE_RATE;
+  config.sensitivity = settings.sensitivity;
+  config.noiseGate = settings.noiseGate;
+  config.smoothing = settings.smoothing;
+  config.fullBands = beaconModeUsesFullAudio(settings);
+  config.beatDetect = config.fullBands && settings.beatDetect;
+  config.fallbackBpm = settings.bpm;
+  return config;
+}
+
+AudioSyncDspOutput currentAudioOutput(const BeaconMasterSettings& settings)
+{
+  return cardputerAudioSync.output(millis(), audioDspConfig(settings));
+}
+
+BeaconAudioValues effectiveBeaconAudioValues(const BeaconMasterSettings& settings)
+{
+  BeaconAudioValues values;
+  values.energy = settings.energy;
+  values.bass = settings.bass;
+  values.mid = settings.mid;
+  values.treble = settings.treble;
+  values.confidence = settings.confidence;
+  if (!beaconModeUsesMic(settings)) {
+    return values;
+  }
+
+  values.energy = 0;
+  values.confidence = 0;
+  if (beaconModeUsesFullAudio(settings)) {
+    values.bass = 0;
+    values.mid = 0;
+    values.treble = 0;
+  }
+  if (!cardputerAudioSync.active() || settings.micPaused) {
+    return values;
+  }
+
+  AudioSyncDspOutput audio = currentAudioOutput(settings);
+  if (!audio.valid) {
+    return values;
+  }
+  values.energy = audio.energy;
+  values.confidence = audio.confidence;
+  if (beaconModeUsesFullAudio(settings)) {
+    values.bass = audio.bass;
+    values.mid = audio.mid;
+    values.treble = audio.treble;
+    values.beat = audio.beat && settings.beatDetect;
+  }
+  return values;
+}
 
 String hexBytes(const uint8_t* data, size_t len)
 {
@@ -1123,14 +1240,14 @@ public:
     nextTxMs = 0;
     seq = 0;
     lastError = "none";
-    const bool v2 = settings.version == NK_SYNC_BEACON_VERSION_V2;
+    const bool v2 = beaconModeUsesV2(settings);
     Serial.print("beacon: start version=");
     Serial.print(v2 ? "v2" : "v1");
     Serial.print(" payload_len=");
     Serial.print(v2 ? NK_SYNC_BEACON_V2_ADV_LEN : NK_SYNC_BEACON_ADV_LEN);
     Serial.print(" nonconnectable interval=100ms adv_units=160");
     if (v2) {
-      printAudioValues(settings);
+      printAudioValues(effectiveBeaconAudioValues(settings));
     }
     Serial.println();
     return publish(settings);
@@ -1171,12 +1288,18 @@ public:
 
   uint16_t beatMs(const BeaconMasterSettings& settings) const
   {
+    if (cardputerAudioSync.active() && beaconModeUsesFullAudio(settings)) {
+      return currentAudioOutput(settings).beatMs;
+    }
     uint16_t bpm = constrain(settings.bpm, static_cast<uint16_t>(30), static_cast<uint16_t>(300));
     return static_cast<uint16_t>(60000UL / bpm);
   }
 
   uint32_t phaseMs(const BeaconMasterSettings& settings) const
   {
+    if (cardputerAudioSync.active() && beaconModeUsesFullAudio(settings)) {
+      return currentAudioOutput(settings).phaseMs;
+    }
     uint16_t beat = beatMs(settings);
     if (beat == 0) {
       return 0;
@@ -1195,18 +1318,18 @@ public:
   }
 
 private:
-  static void printAudioValues(const BeaconMasterSettings& settings)
+  static void printAudioValues(const BeaconAudioValues& values)
   {
     Serial.print(" energy=");
-    Serial.print(settings.energy);
+    Serial.print(values.energy);
     Serial.print(" bass=");
-    Serial.print(settings.bass);
+    Serial.print(values.bass);
     Serial.print(" mid=");
-    Serial.print(settings.mid);
+    Serial.print(values.mid);
     Serial.print(" treble=");
-    Serial.print(settings.treble);
+    Serial.print(values.treble);
     Serial.print(" confidence=");
-    Serial.print(settings.confidence);
+    Serial.print(values.confidence);
   }
 
   static uint16_t crc16Ccitt(const uint8_t* data, size_t len)
@@ -1283,7 +1406,7 @@ private:
 
     uint8_t advData[31];
     uint8_t advLen = 0;
-    const bool v2 = settings.version == NK_SYNC_BEACON_VERSION_V2;
+    const bool v2 = beaconModeUsesV2(settings);
     const uint8_t group = constrain(settings.group, static_cast<uint8_t>(1), static_cast<uint8_t>(4));
     const uint8_t pattern = constrain(settings.pattern, static_cast<uint8_t>(1), static_cast<uint8_t>(PATTERN_COUNT));
     const uint8_t brightness = settings.brightness;
@@ -1294,22 +1417,23 @@ private:
 
     bool built = false;
     if (v2) {
+      const BeaconAudioValues audio = effectiveBeaconAudioValues(settings);
       NkSyncBeaconV2 beacon{};
       beacon.magic0 = NK_SYNC_BEACON_MAGIC0;
       beacon.magic1 = NK_SYNC_BEACON_MAGIC1;
       beacon.version = NK_SYNC_BEACON_VERSION_V2;
       beacon.groupId = group;
-      beacon.flags = 0;
+      beacon.flags = audio.beat ? NK_SYNC_BEACON_FLAG_AUDIO_BEAT : 0;
       beacon.seq = currentSeq;
       beacon.pattern = pattern;
       beacon.brightness = brightness;
       beacon.phaseMs = phase;
       beacon.beatMs = beat;
-      beacon.audioEnergy = settings.energy;
-      beacon.audioBass = settings.bass;
-      beacon.audioMid = settings.mid;
-      beacon.audioTreble = settings.treble;
-      beacon.audioConfidence = settings.confidence;
+      beacon.audioEnergy = audio.energy;
+      beacon.audioBass = audio.bass;
+      beacon.audioMid = audio.mid;
+      beacon.audioTreble = audio.treble;
+      beacon.audioConfidence = audio.confidence;
       beacon.crc = computeCrc(beacon);
       crc = beacon.crc;
       built = buildAdvertisingData(beacon, advData, sizeof(advData), advLen);
@@ -1370,7 +1494,7 @@ private:
       Serial.print(" beat=");
       Serial.print(beat);
       if (v2) {
-        printAudioValues(settings);
+        printAudioValues(effectiveBeaconAudioValues(settings));
       }
       Serial.print(" crc=0x");
       Serial.print(crc, HEX);
@@ -2910,40 +3034,51 @@ void drawBleCard()
   drawFooter("S scan  ENTER conn  D disc  B reset");
 }
 
-const char* const BEACON_MASTER_FIELDS[] = {
-    "Power", "Version", "Group", "Pattern", "Bright", "BPM", "Energy", "Bass", "Mid", "Treble", "Conf"};
-constexpr int BEACON_MASTER_FIELD_COUNT = sizeof(BEACON_MASTER_FIELDS) / sizeof(BEACON_MASTER_FIELDS[0]);
+const char* const BEACON_MASTER_MANUAL_FIELDS[] = {
+    "Power", "Mode", "Group", "Pattern", "Bright", "BPM", "Energy", "Bass", "Mid", "Treble", "Conf"};
+const char* const BEACON_MASTER_MIC_FIELDS[] = {
+    "Power", "Mode", "Group", "Pattern", "Bright", "BPM", "Sens", "Gate", "Smooth", "Beat", "Pause"};
+constexpr int BEACON_MASTER_FIELD_COUNT =
+    sizeof(BEACON_MASTER_MANUAL_FIELDS) / sizeof(BEACON_MASTER_MANUAL_FIELDS[0]);
 constexpr int BEACON_MASTER_V1_FIELD_COUNT = 6;
 
 int activeBeaconMasterFieldCount()
 {
-  return beaconMasterSettings.version == NK_SYNC_BEACON_VERSION_V2 ? BEACON_MASTER_FIELD_COUNT
-                                                                   : BEACON_MASTER_V1_FIELD_COUNT;
+  return beaconMasterSettings.mode == BeaconMasterMode::V1Manual ? BEACON_MASTER_V1_FIELD_COUNT
+                                                                  : BEACON_MASTER_FIELD_COUNT;
 }
 
-void drawBeaconMasterCard()
+String beaconMasterFieldValue(int field)
 {
-  drawTextFit("Beacon Master", 8, CONTENT_Y + 5, 100, COLOR_MUTED);
-  String mode = String("V") + String(beaconMasterSettings.version) + " " +
-                (beaconBroadcaster.active() ? "ON" : "OFF");
-  drawTextFit(mode, 174, CONTENT_Y + 5, 58,
-              beaconBroadcaster.active() ? COLOR_OK : COLOR_WARN);
+  switch (field) {
+    case 0: return beaconBroadcaster.active() ? "ON" : "OFF";
+    case 1: return beaconModeShortLabel(beaconMasterSettings.mode);
+    case 2: return String(beaconMasterSettings.group);
+    case 3: return String(beaconMasterSettings.pattern);
+    case 4: return String(beaconMasterSettings.brightness);
+    case 5: return String(beaconMasterSettings.bpm);
+    case 6:
+      return beaconModeUsesMic(beaconMasterSettings) ? String(beaconMasterSettings.sensitivity)
+                                                     : String(beaconMasterSettings.energy);
+    case 7:
+      return beaconModeUsesMic(beaconMasterSettings) ? String(beaconMasterSettings.noiseGate)
+                                                     : String(beaconMasterSettings.bass);
+    case 8:
+      return beaconModeUsesMic(beaconMasterSettings) ? String(beaconMasterSettings.smoothing)
+                                                     : String(beaconMasterSettings.mid);
+    case 9:
+      return beaconModeUsesMic(beaconMasterSettings) ? (beaconMasterSettings.beatDetect ? "ON" : "OFF")
+                                                     : String(beaconMasterSettings.treble);
+    case 10:
+      return beaconModeUsesMic(beaconMasterSettings) ? (beaconMasterSettings.micPaused ? "ON" : "OFF")
+                                                     : String(beaconMasterSettings.confidence);
+    default: return "--";
+  }
+}
 
-  String values[] = {
-      beaconBroadcaster.active() ? "ON" : "OFF",
-      String("V") + String(beaconMasterSettings.version),
-      String(beaconMasterSettings.group),
-      String(beaconMasterSettings.pattern),
-      String(beaconMasterSettings.brightness),
-      String(beaconMasterSettings.bpm),
-      String(beaconMasterSettings.energy),
-      String(beaconMasterSettings.bass),
-      String(beaconMasterSettings.mid),
-      String(beaconMasterSettings.treble),
-      String(beaconMasterSettings.confidence),
-  };
-
-  const bool v2 = beaconMasterSettings.version == NK_SYNC_BEACON_VERSION_V2;
+void drawManualBeaconMasterCard()
+{
+  const bool v2 = beaconModeUsesV2(beaconMasterSettings);
   const int fieldCount = activeBeaconMasterFieldCount();
   const int columns = v2 ? 4 : 3;
   const int tileWidth = v2 ? 55 : 70;
@@ -2957,8 +3092,9 @@ void drawBeaconMasterCard()
     bool active = i == app.selectedBeaconMasterField;
     uint16_t bg = active ? COLOR_ACCENT_DARK : COLOR_PANEL_DARK;
     uiCanvas.fillRoundRect(x, y, tileWidth, tileHeight, 3, bg);
-    drawTextFit(BEACON_MASTER_FIELDS[i], x + 4, y + (v2 ? 2 : 5), tileWidth - 8, COLOR_MUTED, bg);
-    drawTextFit(values[i], x + 4, y + (v2 ? 11 : 16), tileWidth - 8, active ? COLOR_TEXT : COLOR_ACCENT, bg);
+    drawTextFit(BEACON_MASTER_MANUAL_FIELDS[i], x + 4, y + (v2 ? 2 : 5), tileWidth - 8, COLOR_MUTED, bg);
+    drawTextFit(beaconMasterFieldValue(i), x + 4, y + (v2 ? 11 : 16), tileWidth - 8,
+                active ? COLOR_TEXT : COLOR_ACCENT, bg);
   }
 
   drawTextFit("Phase " + String(beaconBroadcaster.phaseMs(beaconMasterSettings)) + "ms", 8, CONTENT_Y + 82, 94,
@@ -2971,6 +3107,61 @@ void drawBeaconMasterCard()
               beaconBroadcaster.active() ? COLOR_MUTED : COLOR_PANEL_LIGHT);
   drawTextFit(payload.length() > 36 ? payload.substring(36) : "", 10, CONTENT_Y + 100, 218,
               beaconBroadcaster.active() ? COLOR_MUTED : COLOR_PANEL_LIGHT);
+}
+
+void drawMicBeaconMasterCard()
+{
+  AudioSyncDspOutput audio = currentAudioOutput(beaconMasterSettings);
+  BeaconAudioValues values = effectiveBeaconAudioValues(beaconMasterSettings);
+  const char* mic = beaconMasterSettings.micPaused ? "PAUSE"
+                    : cardputerAudioSync.failed()    ? "ERR"
+                    : cardputerAudioSync.active()    ? "MIC"
+                                                    : "OFF";
+  const char* const* fields = BEACON_MASTER_MIC_FIELDS;
+  int selected = constrain(app.selectedBeaconMasterField, 0, BEACON_MASTER_FIELD_COUNT - 1);
+
+  drawTextFit(beaconModeLabel(beaconMasterSettings.mode), 8, CONTENT_Y + 17, 128, COLOR_ACCENT);
+  drawTextFit(String(">") + fields[selected] + " " + beaconMasterFieldValue(selected), 142, CONTENT_Y + 17, 90,
+              COLOR_TEXT);
+  drawTextFit("G" + String(beaconMasterSettings.group) + " P" + String(beaconMasterSettings.pattern) + " Br" +
+                  String(beaconMasterSettings.brightness) + " BPM" + String(audio.bpm),
+              8, CONTENT_Y + 29, 224, COLOR_TEXT);
+  drawTextFit("S" + String(beaconMasterSettings.sensitivity) + " G" + String(beaconMasterSettings.noiseGate) +
+                  " Sm" + String(beaconMasterSettings.smoothing) + " BD" +
+                  String(beaconMasterSettings.beatDetect ? 1 : 0) + " Pa" +
+                  String(beaconMasterSettings.micPaused ? 1 : 0),
+              8, CONTENT_Y + 41, 224, COLOR_MUTED);
+  drawTextFit("E" + String(values.energy) + " B" + String(values.bass) + " M" + String(values.mid) + " T" +
+                  String(values.treble) + " C" + String(values.confidence),
+              8, CONTENT_Y + 53, 224, COLOR_ACCENT);
+  drawTextFit("RMS " + String(audio.rms, 0) + " Peak " + String(audio.peak, 0) + " NF " +
+                  String(audio.noiseFloor, 0),
+              8, CONTENT_Y + 65, 224, COLOR_MUTED);
+  drawTextFit(String("Beat ") + (audio.beat ? "*" : "-") + " " + String(audio.beatMs) + "ms Phase " +
+                  String(beaconBroadcaster.phaseMs(beaconMasterSettings)),
+              8, CONTENT_Y + 77, 224, audio.beat ? COLOR_OK : COLOR_TEXT);
+  drawTextFit("Seq " + String(beaconBroadcaster.currentSeq()) + " Mic " + mic + " F" +
+                  String(cardputerAudioSync.frameCount()),
+              8, CONTENT_Y + 89, 224, cardputerAudioSync.active() ? COLOR_OK : COLOR_WARN);
+  drawTextFit(shortText(beaconBroadcaster.payloadHex(), 36), 8, CONTENT_Y + 100, 224, COLOR_PANEL_LIGHT);
+}
+
+void drawBeaconMasterCard()
+{
+  drawTextFit("Beacon Master", 8, CONTENT_Y + 5, 100, COLOR_MUTED);
+  const char* micState = beaconMasterSettings.micPaused ? "PAUSE"
+                         : cardputerAudioSync.failed()    ? "ERR"
+                         : cardputerAudioSync.active()    ? "MIC"
+                                                        : "OFF";
+  String state = String(beaconBroadcaster.active() ? "ON " : "OFF ") +
+                 (beaconModeUsesMic(beaconMasterSettings) ? micState : beaconModeLabel(beaconMasterSettings.mode));
+  drawTextFit(state, 148, CONTENT_Y + 5, 84, beaconBroadcaster.active() ? COLOR_OK : COLOR_WARN);
+
+  if (beaconModeUsesMic(beaconMasterSettings)) {
+    drawMicBeaconMasterCard();
+  } else {
+    drawManualBeaconMasterCard();
+  }
   drawFooter("ENTER start/stop  C field  W/S edit  T tap");
 }
 
@@ -5051,6 +5242,7 @@ void startBleScan()
 {
   if (beaconBroadcaster.active()) {
     beaconBroadcaster.stop();
+    cardputerAudioSync.end();
     app.beaconStatus = beaconBroadcaster.status();
   }
   app.bleStatus = "Scanning";
@@ -5069,6 +5261,7 @@ void connectSelectedBleDevice()
 {
   if (beaconBroadcaster.active()) {
     beaconBroadcaster.stop();
+    cardputerAudioSync.end();
     app.beaconStatus = beaconBroadcaster.status();
   }
   if (app.transportMode == TransportMode::Ble && app.protocolMode == ProtocolMode::Nk4 && app.controllerConnected) {
@@ -5685,8 +5878,9 @@ void changeValue(int delta)
       break;
     case Card::BeaconMaster:
       if (app.selectedBeaconMasterField == 1) {
-        beaconMasterSettings.version = static_cast<uint8_t>(
-            wrapRange(beaconMasterSettings.version, NK_SYNC_BEACON_VERSION_V1, NK_SYNC_BEACON_VERSION_V2, 1, delta));
+        int mode = wrapRange(static_cast<int>(beaconMasterSettings.mode), static_cast<int>(BeaconMasterMode::V1Manual),
+                             static_cast<int>(BeaconMasterMode::V2MicFull), 1, delta);
+        beaconMasterSettings.mode = static_cast<BeaconMasterMode>(mode);
       } else if (app.selectedBeaconMasterField == 2) {
         beaconMasterSettings.group = static_cast<uint8_t>(wrapRange(beaconMasterSettings.group, 1, 4, 1, delta));
       } else if (app.selectedBeaconMasterField == 3) {
@@ -5697,16 +5891,39 @@ void changeValue(int delta)
       } else if (app.selectedBeaconMasterField == 5) {
         beaconMasterSettings.bpm = static_cast<uint16_t>(wrapRange(beaconMasterSettings.bpm, 40, 240, 1, delta));
       } else if (app.selectedBeaconMasterField == 6) {
-        beaconMasterSettings.energy = static_cast<uint8_t>(wrapRange(beaconMasterSettings.energy, 0, 255, 1, delta));
+        if (beaconModeUsesMic(beaconMasterSettings)) {
+          beaconMasterSettings.sensitivity =
+              static_cast<uint8_t>(wrapRange(beaconMasterSettings.sensitivity, 25, 200, 5, delta));
+        } else {
+          beaconMasterSettings.energy = static_cast<uint8_t>(wrapRange(beaconMasterSettings.energy, 0, 255, 1, delta));
+        }
       } else if (app.selectedBeaconMasterField == 7) {
-        beaconMasterSettings.bass = static_cast<uint8_t>(wrapRange(beaconMasterSettings.bass, 0, 255, 1, delta));
+        if (beaconModeUsesMic(beaconMasterSettings)) {
+          beaconMasterSettings.noiseGate =
+              static_cast<uint8_t>(wrapRange(beaconMasterSettings.noiseGate, 0, 100, 5, delta));
+        } else {
+          beaconMasterSettings.bass = static_cast<uint8_t>(wrapRange(beaconMasterSettings.bass, 0, 255, 1, delta));
+        }
       } else if (app.selectedBeaconMasterField == 8) {
-        beaconMasterSettings.mid = static_cast<uint8_t>(wrapRange(beaconMasterSettings.mid, 0, 255, 1, delta));
+        if (beaconModeUsesMic(beaconMasterSettings)) {
+          beaconMasterSettings.smoothing =
+              static_cast<uint8_t>(wrapRange(beaconMasterSettings.smoothing, 0, 100, 5, delta));
+        } else {
+          beaconMasterSettings.mid = static_cast<uint8_t>(wrapRange(beaconMasterSettings.mid, 0, 255, 1, delta));
+        }
       } else if (app.selectedBeaconMasterField == 9) {
-        beaconMasterSettings.treble = static_cast<uint8_t>(wrapRange(beaconMasterSettings.treble, 0, 255, 1, delta));
+        if (beaconModeUsesMic(beaconMasterSettings)) {
+          beaconMasterSettings.beatDetect = !beaconMasterSettings.beatDetect;
+        } else {
+          beaconMasterSettings.treble = static_cast<uint8_t>(wrapRange(beaconMasterSettings.treble, 0, 255, 1, delta));
+        }
       } else if (app.selectedBeaconMasterField == 10) {
-        beaconMasterSettings.confidence =
-            static_cast<uint8_t>(wrapRange(beaconMasterSettings.confidence, 0, 255, 1, delta));
+        if (beaconModeUsesMic(beaconMasterSettings)) {
+          beaconMasterSettings.micPaused = !beaconMasterSettings.micPaused;
+        } else {
+          beaconMasterSettings.confidence =
+              static_cast<uint8_t>(wrapRange(beaconMasterSettings.confidence, 0, 255, 1, delta));
+        }
       }
       break;
     case Card::Ble:
@@ -5812,6 +6029,26 @@ void changeValue(int delta)
   app.dirty = true;
 }
 
+bool startBeaconMicIfNeeded()
+{
+  if (!beaconModeUsesMic(beaconMasterSettings) || beaconMasterSettings.micPaused) {
+    cardputerAudioSync.end();
+    return true;
+  }
+  if (cardputerAudioSync.active()) {
+    return true;
+  }
+  if (cardputerAudioSync.begin(soundManager, beaconMasterSettings.bpm)) {
+    return true;
+  }
+
+  beaconMasterSettings.mode = BeaconMasterMode::V2Manual;
+  beaconMasterSettings.micPaused = false;
+  setStatus("Mic error - V2 Manual", COLOR_ERR);
+  app.dirty = true;
+  return false;
+}
+
 void applyCurrentCard()
 {
   switch (static_cast<Card>(app.selectedCard)) {
@@ -5825,15 +6062,24 @@ void applyCurrentCard()
     case Card::BeaconMaster:
       if (beaconBroadcaster.active()) {
         beaconBroadcaster.stop();
+        cardputerAudioSync.end();
         app.beaconStatus = beaconBroadcaster.status();
         setStatus("Beacon stopped", COLOR_WARN);
       } else {
         if (app.transportMode == TransportMode::Ble || bleTransport.connected()) {
           disconnectBleDevice();
         }
+        bool micReady = startBeaconMicIfNeeded();
         bool ok = beaconBroadcaster.start(beaconMasterSettings);
+        if (!ok) {
+          cardputerAudioSync.end();
+        }
         app.beaconStatus = beaconBroadcaster.status();
-        setStatus(ok ? "Beacon broadcasting" : app.beaconStatus, ok ? COLOR_OK : COLOR_ERR);
+        if (ok && micReady) {
+          setStatus("Beacon broadcasting", COLOR_OK);
+        } else if (!ok) {
+          setStatus(app.beaconStatus, COLOR_ERR);
+        }
       }
       app.dirty = true;
       break;
@@ -6317,6 +6563,7 @@ void handleWordChar(char c)
       unsigned long interval = now - beaconMasterLastTapMs;
       if (interval >= 250 && interval <= 2000) {
         beaconMasterSettings.bpm = static_cast<uint16_t>(constrain(60000UL / interval, 40UL, 240UL));
+        cardputerAudioSync.tapTempo(beaconMasterSettings.bpm, now);
         setStatus("Tap tempo " + String(beaconMasterSettings.bpm) + " BPM", COLOR_ACCENT);
       } else {
         setStatus("Tap again", COLOR_MUTED);
@@ -6596,6 +6843,24 @@ void handleKeyboard()
 
 void updateBeaconMaster()
 {
+  if (beaconBroadcaster.active()) {
+    bool shouldCapture = beaconModeUsesMic(beaconMasterSettings) && !beaconMasterSettings.micPaused;
+    if (shouldCapture && !cardputerAudioSync.active()) {
+      startBeaconMicIfNeeded();
+    } else if (!shouldCapture && cardputerAudioSync.active()) {
+      cardputerAudioSync.end();
+    }
+    if (cardputerAudioSync.active()) {
+      cardputerAudioSync.tick(audioDspConfig(beaconMasterSettings));
+      if (cardputerAudioSync.failed()) {
+        beaconMasterSettings.mode = BeaconMasterMode::V2Manual;
+        setStatus("Mic lost - V2 Manual", COLOR_ERR);
+      }
+    }
+  } else if (cardputerAudioSync.active()) {
+    cardputerAudioSync.end();
+  }
+
   uint16_t previousSeq = beaconBroadcaster.currentSeq();
   beaconBroadcaster.tick(beaconMasterSettings);
   if (beaconBroadcaster.active()) {

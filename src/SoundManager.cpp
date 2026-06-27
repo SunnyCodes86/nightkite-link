@@ -97,6 +97,21 @@ uint8_t SoundManager::volume() const
   return currentVolume;
 }
 
+void SoundManager::setCaptureActive(bool active)
+{
+  if (captureActive == active) {
+    return;
+  }
+  captureActive = active;
+  if (captureActive) {
+    M5Cardputer.Speaker.stop();
+    M5Cardputer.Speaker.end();
+  } else {
+    M5Cardputer.Speaker.begin();
+    M5Cardputer.Speaker.setVolume(currentVolume);
+  }
+}
+
 void SoundManager::playStartup()
 {
   playClip(NightKiteSoundAssets::startupClip, true);
@@ -169,7 +184,7 @@ void SoundManager::update()
 
 bool SoundManager::isPlaying() const
 {
-  return M5Cardputer.Speaker.isPlaying();
+  return !captureActive && M5Cardputer.Speaker.isPlaying();
 }
 
 uint8_t SoundManager::chooseNextKeyVariant()
@@ -203,7 +218,7 @@ void SoundManager::refillKeyVariantBag()
 
 void SoundManager::playClip(const NightKiteSoundAssets::SoundClip& clip, bool interrupt)
 {
-  if (!enabled) {
+  if (!enabled || captureActive) {
     return;
   }
   M5Cardputer.Speaker.setVolume(currentVolume);

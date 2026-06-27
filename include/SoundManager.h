@@ -12,6 +12,7 @@ public:
 
   void setVolume(uint8_t volume);
   uint8_t volume() const;
+  void setCaptureActive(bool active);
 
   void playStartup();
   void playKey();
@@ -35,6 +36,7 @@ private:
   bool shouldPlayUiClick();
 
   bool enabled = true;
+  bool captureActive = false;
   uint8_t currentVolume = 210;
   unsigned long lastClickMs = 0;
   uint8_t bufferIndex = 0;
