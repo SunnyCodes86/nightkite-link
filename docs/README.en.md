@@ -86,6 +86,7 @@ The experimental Beacon Master card broadcasts NightKite Sync Beacon V1 or V2
 BLE manufacturer data from the Cardputer as non-connectable advertising. V1
 continues to work with unchanged Firmware 4.0 controllers. V2 audio-test mode
 requires NightKite Multi firmware with V2 receive support (`4cfa6a0` or newer).
+Audio-sync patterns 23 through 27 require NightKite Multi `0f03e9e` or newer.
 The mode is separate from BLE GATT configuration and does not keep a controller
 GATT connection open while broadcasting. Available modes are `V1 Manual`,
 `V2 Manual`, `V2 Mic Energy` and `V2 Mic Full`. Mic Energy controls energy and
@@ -109,6 +110,13 @@ The upper treble limit follows the 4-kHz Nyquist limit. Speaker UI sounds are
 suspended while capture is active. V2 remains a 22-byte payload in a 29-byte
 legacy advertisement without local name or service data.
 
+The Cardputer catalog now covers all 27 firmware patterns. The new entries are
+`audio_pulse_angle_color` (23), `audio_spectrum_ribbon` (24),
+`audio_beat_ripples` (25), `audio_band_comets` (26), and `audio_beat_mosaic`
+(27). These IDs are selectable in V1 Manual, V2 Manual, V2 Mic Energy, and V2
+Mic Full. Firmware 4.0 controllers report their pattern count through NK4;
+Firmware 3.x legacy configuration and bulk actions remain limited to 22.
+
 Controller diagnostics:
 
 ```text
@@ -120,11 +128,13 @@ Hardware test:
 
 1. Configure the controller as `play_mode=sync`, `sync_enabled=1`,
    `sync_role=follower`, with matching `sync_group` and `wireless_enabled=1`.
-2. Start `V2 Mic Full` and play music or a regular pulse near the Cardputer.
-3. Run the two commands above over controller USB.
-4. Verify `audio_valid=1`, `last_beacon_version=2`, increasing
-   `scan_decode_v2`, responsive energy/bands, improving confidence with a stable
-   pulse, plausible `audio_beat_ms`, `sync_locked=1`, and `scan_crc_fail=0`.
+2. Start `V2 Mic Full`, play music or a regular pulse near the Cardputer, and
+   select patterns 23, 24, 25, 26, and 27 in sequence.
+3. Run the two commands above over controller USB for each pattern.
+4. Verify `sync_locked=1`, `local_pattern` or `sync_pattern` matching 23-27,
+   `audio_valid=1`, `last_beacon_version=2`, increasing `scan_decode_v2`,
+   responsive energy/bands, improving confidence with a stable pulse,
+   plausible `audio_beat_ms`, and `scan_crc_fail=0`.
 
 ## Build and Upload
 
@@ -220,7 +230,7 @@ Older profiles remain readable; missing keys keep the current/default value.
     "sync_loss_behavior": "continue_local",
     "wireless_enabled": false,
     "wireless_profile": "balanced",
-    "enabled_pattern_mask": 4194303,
+    "enabled_pattern_mask": 134217727,
     "inverted_pattern_mask": 0,
     "autoplay": {
       "enabled": true,
@@ -242,7 +252,10 @@ When applying a loaded profile to a Firmware 4.0/NK4 controller, NightKite Link
 prefers compact NK4 `set` commands, including `enabled_mask` and
 `inverted_mask`. In legacy mode it keeps the existing Firmware 3.x command flow:
 scalar settings, pattern enable/disable lists, reset all patterns to normal, and
-then re-apply the inverted pattern list.
+then re-apply the inverted pattern list. Existing profiles containing IDs 1
+through 22 remain compatible. When applying a profile to an older controller,
+masks and active pattern are defensively limited to the reported or legacy
+pattern range.
 
 ## Controls
 

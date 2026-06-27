@@ -77,8 +77,7 @@ constexpr int SD_SPI_SCK_PIN = 40;
 constexpr int SD_SPI_MISO_PIN = 39;
 constexpr int SD_SPI_MOSI_PIN = 14;
 constexpr int SD_SPI_CS_PIN = 12;
-constexpr uint32_t ALL_PATTERN_MASK = (1UL << 22) - 1UL;
-const char* const ALL_PATTERN_LIST = "1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22";
+constexpr int LEGACY_PATTERN_COUNT = 22;
 constexpr uint8_t NK_SYNC_BEACON_VERSION_V1 = 1;
 constexpr uint8_t NK_SYNC_BEACON_VERSION_V2 = 2;
 constexpr uint8_t NK_SYNC_BEACON_VERSION = NK_SYNC_BEACON_VERSION_V1;
@@ -122,8 +121,15 @@ const char* const PATTERN_NAMES[] = {
     "Pride yaw",
     "Confetti jerk",
     "Center ripple",
+    "Audio Pulse Angle Color",
+    "Audio Spectrum Ribbon",
+    "Audio Beat Ripples",
+    "Audio Band Comets",
+    "Audio Beat Mosaic",
 };
-constexpr int PATTERN_COUNT = 22;
+constexpr int PATTERN_COUNT = (sizeof(PATTERN_NAMES) / sizeof(PATTERN_NAMES[0])) - 1;
+constexpr uint32_t ALL_PATTERN_MASK = (1UL << PATTERN_COUNT) - 1UL;
+static_assert(PATTERN_COUNT == 27, "Pattern catalog must match current NightKite Multi firmware");
 
 int brightnessLevels[] = {95, 127, 159, 191, 223, 255};
 constexpr size_t BRIGHTNESS_LEVEL_COUNT = sizeof(brightnessLevels) / sizeof(brightnessLevels[0]);
@@ -147,6 +153,7 @@ struct ControllerSettings {
   int brightness = -1;
   int stripLength = -1;
   int activePattern = -1;
+  int patternCount = -1;
   int smoothing = -1;
   int accelRange = -1;
   int gyroRange = -1;
@@ -1847,6 +1854,34 @@ String patternListFromMask(uint32_t mask)
   return list;
 }
 
+uint32_t patternMaskForCount(int count)
+{
+  count = constrain(count, 1, PATTERN_COUNT);
+  if (count == PATTERN_COUNT) {
+    return ALL_PATTERN_MASK;
+  }
+  return (1UL << count) - 1UL;
+}
+
+int controllerPatternCount()
+{
+  if (!app.controllerConnected) {
+    return PATTERN_COUNT;
+  }
+  if (app.protocolMode == ProtocolMode::Legacy) {
+    return LEGACY_PATTERN_COUNT;
+  }
+  if (app.settings.patternCount >= 1) {
+    return min(app.settings.patternCount, PATTERN_COUNT);
+  }
+  return PATTERN_COUNT;
+}
+
+uint32_t controllerPatternMask()
+{
+  return patternMaskForCount(controllerPatternCount());
+}
+
 const char* patternName(int patternId)
 {
   if (patternId >= 1 && patternId <= PATTERN_COUNT) {
@@ -2087,12 +2122,12 @@ public:
   static String setAllCycle(bool enabled)
   {
     // Existing NightKite Multi CLI supports comma-separated pattern IDs.
-    return String(enabled ? "enable_pattern " : "disable_pattern ") + ALL_PATTERN_LIST;
+    return String(enabled ? "enable_pattern " : "disable_pattern ") + patternListFromMask(controllerPatternMask());
   }
   static String setAllInvert(bool inverted)
   {
     // TODO: If firmware later adds set all_patterns_invert, map it here.
-    return String(inverted ? "invert_pattern " : "normal_pattern ") + ALL_PATTERN_LIST;
+    return String(inverted ? "invert_pattern " : "normal_pattern ") + patternListFromMask(controllerPatternMask());
   }
 };
 
@@ -3148,7 +3183,9 @@ void drawMicBeaconMasterCard()
 
 void drawBeaconMasterCard()
 {
-  drawTextFit("Beacon Master", 8, CONTENT_Y + 5, 100, COLOR_MUTED);
+  String title = "Beacon P" + String(beaconMasterSettings.pattern) + " " +
+                 shortText(patternName(beaconMasterSettings.pattern), 12);
+  drawTextFit(title, 8, CONTENT_Y + 5, 136, COLOR_MUTED);
   const char* micState = beaconMasterSettings.micPaused ? "PAUSE"
                          : cardputerAudioSync.failed()    ? "ERR"
                          : cardputerAudioSync.active()    ? "MIC"
@@ -3647,13 +3684,15 @@ void drawPatternListCard()
 {
   ensurePatternModel();
   drawTextFit("Patterns", 8, CONTENT_Y + 4, 110, COLOR_MUTED);
+  const int availablePatterns = controllerPatternCount();
+  app.selectedPatternIndex = constrain(app.selectedPatternIndex, 0, availablePatterns - 1);
   int rowH = 20;
   int visible = 4;
   int start = 0;
   if (app.selectedPatternIndex >= visible) {
     start = app.selectedPatternIndex - visible + 1;
   }
-  for (int row = 0; row < visible && start + row < PATTERN_COUNT; ++row) {
+  for (int row = 0; row < visible && start + row < availablePatterns; ++row) {
     int idx = start + row;
     const auto& pattern = app.settings.patterns[idx];
     int y = CONTENT_Y + 17 + row * rowH;
@@ -4559,13 +4598,27 @@ void applyLoadedProfile()
   }
   setStatus("Applying profile...", COLOR_ACCENT);
   markTransferCompleteSoundPending();
+  const int supportedPatterns = controllerPatternCount();
+  const uint32_t supportedMask = controllerPatternMask();
+  uint32_t enabledMask = app.loadedProfile.enabledPatternMask & supportedMask;
+  if (enabledMask == 0) {
+    enabledMask = 1;
+  }
+  const uint32_t invertedMask = app.loadedProfile.invertedPatternMask & supportedMask;
+  int activePattern = app.loadedProfile.activePattern;
+  if (activePattern < 1 || activePattern > supportedPatterns) {
+    activePattern = app.settings.activePattern >= 1 && app.settings.activePattern <= supportedPatterns
+                        ? app.settings.activePattern
+                        : 1;
+    Serial.println("profile: active pattern unsupported by connected controller, using fallback");
+  }
   if (app.protocolMode == ProtocolMode::Nk4) {
     if (app.loadedProfile.deviceName.length() > 0) {
       sendCommand("set name=" + app.loadedProfile.deviceName);
     }
     sendCommand(NightKiteCommands::setBrightness(app.loadedProfile.brightness));
     sendCommand(NightKiteCommands::setStripLength(app.loadedProfile.stripLength));
-    sendCommand(NightKiteCommands::setPattern(app.loadedProfile.activePattern));
+    sendCommand(NightKiteCommands::setPattern(activePattern));
     sendCommand(NightKiteCommands::setSmoothing(app.loadedProfile.smoothing));
     sendCommand(NightKiteCommands::setAccelRange(app.loadedProfile.accelRange));
     sendCommand(NightKiteCommands::setGyroRange(app.loadedProfile.gyroRange));
@@ -4577,8 +4630,8 @@ void applyLoadedProfile()
     if (app.loadedProfile.bootMode != "unknown") {
       sendCommand("set boot_mode=" + app.loadedProfile.bootMode);
     }
-    sendCommand("set enabled_mask=" + String(app.loadedProfile.enabledPatternMask));
-    sendCommand("set inverted_mask=" + String(app.loadedProfile.invertedPatternMask));
+    sendCommand("set enabled_mask=" + String(enabledMask));
+    sendCommand("set inverted_mask=" + String(invertedMask));
     sendCommand(String("set sync_enabled=") + (app.loadedProfile.syncEnabled ? "1" : "0"));
     if (app.loadedProfile.syncGroup >= 0) {
       sendCommand("set sync_group=" + String(app.loadedProfile.syncGroup));
@@ -4601,22 +4654,22 @@ void applyLoadedProfile()
   }
   sendCommand(NightKiteCommands::setBrightness(app.loadedProfile.brightness));
   sendCommand(NightKiteCommands::setStripLength(app.loadedProfile.stripLength));
-  sendCommand(NightKiteCommands::setPattern(app.loadedProfile.activePattern));
+  sendCommand(NightKiteCommands::setPattern(activePattern));
   sendCommand(NightKiteCommands::setSmoothing(app.loadedProfile.smoothing));
   sendCommand(NightKiteCommands::setAccelRange(app.loadedProfile.accelRange));
   sendCommand(NightKiteCommands::setGyroRange(app.loadedProfile.gyroRange));
   sendCommand(NightKiteCommands::setAutoplay(app.loadedProfile.autoplayEnabled));
   sendCommand(NightKiteCommands::setAutoplayInterval(app.loadedProfile.autoplayIntervalSeconds));
-  String enabledList = patternListFromMask(app.loadedProfile.enabledPatternMask);
-  String disabledList = patternListFromMask(ALL_PATTERN_MASK & ~app.loadedProfile.enabledPatternMask);
+  String enabledList = patternListFromMask(enabledMask);
+  String disabledList = patternListFromMask(supportedMask & ~enabledMask);
   if (enabledList.length() > 0) {
     sendCommand(String("enable_pattern ") + enabledList);
   }
   if (disabledList.length() > 0) {
     sendCommand(String("disable_pattern ") + disabledList);
   }
-  sendCommand(String("normal_pattern ") + ALL_PATTERN_LIST);
-  String invertedList = patternListFromMask(app.loadedProfile.invertedPatternMask);
+  sendCommand(String("normal_pattern ") + patternListFromMask(supportedMask));
+  String invertedList = patternListFromMask(invertedMask);
   if (invertedList.length() > 0) {
     sendCommand(String("invert_pattern ") + invertedList);
   }
@@ -4810,6 +4863,18 @@ void applyNk4Fields(const String& parsed)
 
   String enabledMask = valueForKey(parsed, "enabled_mask");
   String invertedMask = valueForKey(parsed, "inverted_mask");
+  String reportedPatternCount = valueForKey(parsed, "pattern_count");
+  if (reportedPatternCount.length() == 0 &&
+      (enabledMask.length() > 0 || invertedMask.length() > 0 ||
+       valueForKey(parsed, "sync_ready_mask").length() > 0)) {
+    reportedPatternCount = valueForKey(parsed, "count");
+  }
+  if (reportedPatternCount.length() > 0) {
+    const int count = reportedPatternCount.toInt();
+    if (count >= 1) {
+      app.settings.patternCount = min(count, PATTERN_COUNT);
+    }
+  }
   if (enabledMask.length() > 0 || invertedMask.length() > 0) {
     applyPatternMasks(parseUint32Text(enabledMask, app.settings.enabledPatternMask),
                       parseUint32Text(invertedMask, app.settings.invertedPatternMask), enabledMask.length() > 0,
@@ -5172,6 +5237,7 @@ void resetControllerSession(TransportMode nextTransportMode = TransportMode::Usb
   app.settings.controllerBatteryPercent = -1;
   app.settings.controllerBatteryVoltage = NAN;
   app.settings.controllerBatteryState = "";
+  app.settings.patternCount = -1;
   app.settings.syncReadyPatternMask = 0;
   app.settings.partialSyncPatternMask = 0;
   app.settings.localReactivePatternMask = 0;
@@ -5635,7 +5701,7 @@ void syncEditFromCard()
       }
       break;
     case Card::ActivePattern:
-      if (draftActivePattern < 1 || draftActivePattern > PATTERN_COUNT) {
+      if (draftActivePattern < 1 || draftActivePattern > controllerPatternCount()) {
         draftActivePattern = app.settings.activePattern;
         editValue = showInt(app.settings.activePattern);
       }
@@ -5985,10 +6051,10 @@ void changeValue(int delta)
       }
       break;
     case Card::ActivePattern:
-      if (!patternDirty && (draftActivePattern < 1 || draftActivePattern > PATTERN_COUNT)) {
+      if (!patternDirty && (draftActivePattern < 1 || draftActivePattern > controllerPatternCount())) {
         draftActivePattern = app.settings.activePattern;
       }
-      draftActivePattern = wrapRange(draftActivePattern, 1, PATTERN_COUNT, 1, delta);
+      draftActivePattern = wrapRange(draftActivePattern, 1, controllerPatternCount(), 1, delta);
       editValue = String(draftActivePattern);
       patternDirty = true;
       sendLiveEditCommand(NightKiteCommands::setPattern(draftActivePattern), "Pattern sent");
@@ -6001,7 +6067,8 @@ void changeValue(int delta)
       app.selectedCalAction = constrain(app.selectedCalAction + delta, 0, CAL_ACTION_COUNT - 1);
       break;
     case Card::PatternList:
-      app.selectedPatternIndex = constrain(app.selectedPatternIndex + delta, 0, PATTERN_COUNT - 1);
+      app.selectedPatternIndex =
+          constrain(app.selectedPatternIndex + delta, 0, controllerPatternCount() - 1);
       draftActivePattern = app.selectedPatternIndex + 1;
       patternDirty = true;
       sendLiveEditCommand(NightKiteCommands::setPattern(draftActivePattern), "Pattern sent");
@@ -6247,6 +6314,8 @@ void applyCurrentCard()
       break;
     case Card::PatternList: {
       ensurePatternModel();
+      app.selectedPatternIndex =
+          constrain(app.selectedPatternIndex, 0, controllerPatternCount() - 1);
       const auto& pattern = app.settings.patterns[app.selectedPatternIndex];
       detailCycle = pattern.cycleEnabled;
       detailInvert = pattern.inverted;
@@ -6283,7 +6352,9 @@ void saveAllPatternStates()
 {
   ensurePatternModel();
   markTransferCompleteSoundPending();
-  for (const auto& pattern : app.settings.patterns) {
+  const int supportedPatterns = controllerPatternCount();
+  for (int index = 0; index < supportedPatterns; ++index) {
+    const auto& pattern = app.settings.patterns[index];
     sendCommand(NightKiteCommands::setPatternCycle(pattern.id, pattern.cycleEnabled));
     sendCommand(NightKiteCommands::setPatternInvert(pattern.id, pattern.inverted));
   }
@@ -6450,28 +6521,29 @@ void deleteSelectedProfile()
 
 void runBulkAction()
 {
+  const uint32_t supportedMask = controllerPatternMask();
   switch (app.selectedBulkAction) {
     case 0:
       saveAllPatternStates();
       break;
     case 1:
       markTransferCompleteSoundPending();
-      applyPatternMasks(ALL_PATTERN_MASK, 0, true, false);
+      applyPatternMasks(currentEnabledMask() | supportedMask, 0, true, false);
       sendCommand(NightKiteCommands::setAllCycle(true));
       break;
     case 2:
       markTransferCompleteSoundPending();
-      applyPatternMasks(0, 0, true, false);
+      applyPatternMasks(currentEnabledMask() & ~supportedMask, 0, true, false);
       sendCommand(NightKiteCommands::setAllCycle(false));
       break;
     case 3:
       markTransferCompleteSoundPending();
-      applyPatternMasks(0, ALL_PATTERN_MASK, false, true);
+      applyPatternMasks(0, currentInvertedMask() | supportedMask, false, true);
       sendCommand(NightKiteCommands::setAllInvert(true));
       break;
     case 4:
       markTransferCompleteSoundPending();
-      applyPatternMasks(0, 0, false, true);
+      applyPatternMasks(0, currentInvertedMask() & ~supportedMask, false, true);
       sendCommand(NightKiteCommands::setAllInvert(false));
       break;
   }

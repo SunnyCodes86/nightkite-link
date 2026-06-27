@@ -66,7 +66,8 @@ experimental Beacon Master card is a separate show mode that sends
 NightKite Sync Beacon V1 or V2 non-connectable BLE advertisements directly from
 the Cardputer. V1 remains compatible with unchanged NightKite Multi controllers;
 V2 audio-test mode requires controller firmware with V2 receive support
-(`4cfa6a0` or newer). Broadcasting does not keep a BLE-GATT controller
+(`4cfa6a0` or newer). Audio-sync patterns 23-27 require NightKite Multi
+`0f03e9e` or newer. Broadcasting does not keep a BLE-GATT controller
 connection open. The modes are `V1 Manual`, `V2 Manual`, `V2 Mic Energy` and
 `V2 Mic Full`. Mic Energy derives energy and confidence from the Cardputer
 microphone. Mic Full additionally analyzes bass, mid and treble and performs
@@ -94,6 +95,13 @@ periodic RMS, peak, noise floor, bands, confidence, beat timing and payload
 diagnostics. V2 uses 29 of the 31 legacy advertising bytes and adds no local
 name or service data.
 
+The Cardputer catalog now covers all 27 controller patterns. The five new
+entries are `audio_pulse_angle_color` (23), `audio_spectrum_ribbon` (24),
+`audio_beat_ripples` (25), `audio_band_comets` (26), and `audio_beat_mosaic`
+(27). V1 Manual, V2 Manual, and both microphone modes can advertise these IDs.
+Firmware 4.0 pattern counts are detected from NK4; Firmware 3.x legacy
+configuration remains limited to its 22 supported patterns.
+
 Controller diagnostics for the two modes:
 
 ```text
@@ -104,11 +112,12 @@ NK4 seq=20 cmd=audio_sync_status
 Hardware check:
 
 1. Configure the controller as a follower with sync and wireless enabled and a matching group.
-2. Start `V2 Mic Full` on the Cardputer and provide music or a stable pulse.
-3. Run both diagnostic commands above over USB.
-4. Expect `audio_valid=1`, `last_beacon_version=2`, rising `scan_decode_v2`,
-   reactive energy/bands, plausible confidence and beat timing, `sync_locked=1`,
-   and `scan_crc_fail=0`.
+2. Start `V2 Mic Full` on the Cardputer and select patterns 23, 24, 25, 26,
+   and 27 in sequence while providing music or a stable pulse.
+3. Run both diagnostic commands above over USB for each pattern.
+4. Expect `sync_locked=1`, `local_pattern` or `sync_pattern` matching 23-27,
+   `audio_valid=1`, `last_beacon_version=2`, rising `scan_decode_v2`, reactive
+   energy/bands, plausible confidence and beat timing, and `scan_crc_fail=0`.
 
 Firmware 4.0 diagnostics now include PatternClock and pattern classification
 fields. The pattern list marks patterns as `S` sync-ready, `P` partial-sync, `L`

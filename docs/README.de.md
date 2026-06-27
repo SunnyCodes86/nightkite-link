@@ -89,7 +89,8 @@ Die experimentelle Beacon-Master-Card sendet NightKite-Sync-Beacon-V1- oder
 V2-BLE-Manufacturer-Data direkt vom Cardputer als nicht verbindbares
 Advertising. V1 funktioniert weiterhin mit unveränderter Firmware 4.0. Der
 V2-Audio-Testmodus benötigt NightKite-Multi-Firmware mit V2-Empfang
-(`4cfa6a0` oder neuer). Dieser Modus ist von der BLE-GATT-Konfiguration getrennt
+(`4cfa6a0` oder neuer). Die Audio-Sync-Patterns 23 bis 27 benötigen
+NightKite Multi ab `0f03e9e`. Dieser Modus ist von der BLE-GATT-Konfiguration getrennt
 und hält während des Broadcasts keine dauerhafte GATT-Verbindung offen. Verfügbar
 sind `V1 Manual`, `V2 Manual`, `V2 Mic Energy` und `V2 Mic Full`. Mic Energy
 steuert Energy und Confidence per Mikrofon und behält die manuellen Bandwerte.
@@ -114,6 +115,14 @@ nutzt eine kleine Goertzel-Filterbank für ungefähr 60-250 Hz, 250-2000 Hz und
 werden während aktiver Mikrofonaufnahme unterdrückt. V2 bleibt bei 22 Byte
 Payload und 29 Byte Legacy Advertising ohne Local Name oder Service Data.
 
+Der Cardputer-Katalog umfasst jetzt alle 27 Firmware-Patterns. Neu sind
+`audio_pulse_angle_color` (23), `audio_spectrum_ribbon` (24),
+`audio_beat_ripples` (25), `audio_band_comets` (26) und `audio_beat_mosaic`
+(27). Die IDs sind in V1 Manual, V2 Manual, V2 Mic Energy und V2 Mic Full
+auswählbar. Firmware-4.0-Controller melden ihre Patternanzahl über NK4; im
+Firmware-3.x-Legacy-Modus bleiben Konfiguration und Bulk-Aktionen auf 22
+Patterns begrenzt.
+
 Controller-Diagnose:
 
 ```text
@@ -125,12 +134,13 @@ Hardwaretest:
 
 1. Controller mit `play_mode=sync`, `sync_enabled=1`, `sync_role=follower`,
    passender `sync_group` und `wireless_enabled=1` konfigurieren.
-2. `V2 Mic Full` starten und Musik oder einen regelmäßigen Puls am Cardputer
-   abspielen.
-3. Beide obigen Kommandos über Controller-USB ausführen.
-4. Erwartet werden `audio_valid=1`, `last_beacon_version=2`, steigendes
-   `scan_decode_v2`, reagierende Energy-/Bandwerte, steigende Confidence bei
-   stabilem Puls, plausibles `audio_beat_ms`, `sync_locked=1` und
+2. `V2 Mic Full` starten, Musik oder einen regelmäßigen Puls am Cardputer
+   abspielen und die Patterns 23, 24, 25, 26 und 27 nacheinander auswählen.
+3. Beide obigen Kommandos für jedes Pattern über Controller-USB ausführen.
+4. Erwartet werden `sync_locked=1`, `local_pattern` beziehungsweise
+   `sync_pattern` 23 bis 27, `audio_valid=1`, `last_beacon_version=2`,
+   steigendes `scan_decode_v2`, reagierende Energy-/Bandwerte, steigende
+   Confidence bei stabilem Puls, plausibles `audio_beat_ms` und
    `scan_crc_fail=0`.
 
 ## Bauen und Flashen von NightKite Link
@@ -230,7 +240,7 @@ den aktuellen Wert bzw. den Default.
     "sync_loss_behavior": "continue_local",
     "wireless_enabled": false,
     "wireless_profile": "balanced",
-    "enabled_pattern_mask": 4194303,
+    "enabled_pattern_mask": 134217727,
     "inverted_pattern_mask": 0,
     "autoplay": {
       "enabled": true,
@@ -253,7 +263,9 @@ bevorzugt NightKite Link kompakte NK4-`set`-Befehle, inklusive `enabled_mask`
 und `inverted_mask`. Im Legacy-Modus bleibt der Firmware-3.x-Ablauf erhalten:
 einzelne Settings senden, Patterns per Listen aktivieren/deaktivieren, alle
 Patterns zuerst auf normal setzen und danach die invertierte Pattern-Liste erneut
-setzen.
+setzen. Profile mit IDs 1 bis 22 bleiben unverändert lesbar. Beim Anwenden auf
+einen älteren Controller werden Masken und aktive Pattern defensiv auf dessen
+gemeldeten beziehungsweise Legacy-Patternbereich begrenzt.
 
 ## Bedienung
 
