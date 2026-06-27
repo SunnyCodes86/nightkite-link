@@ -34,7 +34,7 @@ Im aktuellen Code vorhanden:
 - Pattern-Liste mit Cycle- und Invert-Status
 - Pattern-Detailansicht mit Cycle- und Invert-Toggles
 - Sync-Test-Card zum Vorbereiten von Firmware-4.0-Master/Follower-Beacon-Tests
-- Experimentelle Beacon-Master-Card für vom Cardputer gesendete Sync-Beacon-V1-BLE-Advertisements
+- Experimentelle Beacon-Master-Card für vom Cardputer gesendete Sync-Beacon-V1- und V2-Audio-Test-Advertisements
 - Bulk-Aktionen für Patterns:
   - aktuelle Pattern-Zustände speichern
   - alle Patterns für Cycle aktivieren
@@ -85,19 +85,30 @@ Die normale CLI-Konfiguration nutzt die vorhandene NightKite-USB-CLI. Dafür
 sind keine Änderungen an der NightKite-Multi-Firmware nötig, sofern die
 erwarteten CLI-Befehle bereitstehen.
 
-Die experimentelle Beacon-Master-Card funktioniert ebenfalls mit unveränderter
-Firmware 4.0. Sie sendet NightKite-Sync-Beacon-V1-kompatible BLE Manufacturer
-Data direkt vom Cardputer als nicht verbindbares Advertising. Dieser Modus ist
-getrennt von BLE-GATT-Konfiguration und hält während des Broadcasts keine
-dauerhafte GATT-Verbindung zu einem Controller offen. In diesem ersten Schritt
-gibt es keine Mikrofon-Eingabe und keine Audioanalyse.
+Die experimentelle Beacon-Master-Card sendet NightKite-Sync-Beacon-V1- oder
+V2-BLE-Manufacturer-Data direkt vom Cardputer als nicht verbindbares
+Advertising. V1 funktioniert weiterhin mit unveränderter Firmware 4.0. Der
+V2-Audio-Testmodus benötigt NightKite-Multi-Firmware mit V2-Empfang
+(`4cfa6a0` oder neuer). Dieser Modus ist von der BLE-GATT-Konfiguration getrennt
+und hält während des Broadcasts keine dauerhafte GATT-Verbindung offen. Energy,
+Bass, Mid, Treble und Confidence sind manuelle Testwerte. Mikrofon-Eingabe, FFT
+und Audio-Beat-Erkennung sind noch nicht enthalten.
 
 Zum Testen werden NightKite-Multi-Controller als Follower vorbereitet:
 `play_mode=sync`, `sync_enabled=1`, `sync_role=follower`, passende
 `sync_group` 1-4 und `wireless_enabled=1`. Danach auf der Beacon-Master-Card
 dieselbe Gruppe sowie Pattern, Helligkeit und BPM wählen und mit `Enter` den
-Broadcast starten oder stoppen. Der Serial Monitor zeigt Start/Stop-Meldungen
-und regelmäßig den gesendeten Advertising-Payload als Hex-Diagnose.
+Broadcast starten oder stoppen. V1 wählt den etablierten Pfad; in V2 lassen sich
+die fünf Audio-Testwerte bearbeiten. V2 nutzt 22 Byte Beacon-Payload und ein
+29-Byte-Legacy-Advertising ohne Local Name oder Service Data. Der Serial Monitor
+zeigt Version, Payload-Länge, V2-Audiowerte und regelmäßig den Payload als Hex.
+
+Controller-Diagnose:
+
+```text
+NK4 seq=10 cmd=get section=sync
+NK4 seq=20 cmd=audio_sync_status
+```
 
 ## Bauen und Flashen von NightKite Link
 

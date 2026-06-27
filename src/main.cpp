@@ -78,7 +78,9 @@ constexpr int SD_SPI_MOSI_PIN = 14;
 constexpr int SD_SPI_CS_PIN = 12;
 constexpr uint32_t ALL_PATTERN_MASK = (1UL << 22) - 1UL;
 const char* const ALL_PATTERN_LIST = "1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22";
-constexpr uint8_t NK_SYNC_BEACON_VERSION = 1;
+constexpr uint8_t NK_SYNC_BEACON_VERSION_V1 = 1;
+constexpr uint8_t NK_SYNC_BEACON_VERSION_V2 = 2;
+constexpr uint8_t NK_SYNC_BEACON_VERSION = NK_SYNC_BEACON_VERSION_V1;
 constexpr uint8_t NK_SYNC_BEACON_MAGIC0 = 'N';
 constexpr uint8_t NK_SYNC_BEACON_MAGIC1 = 'K';
 constexpr uint16_t NK_SYNC_BEACON_COMPANY_ID = 0xFFFF;
@@ -86,6 +88,13 @@ constexpr uint16_t NK_SYNC_BEACON_ADV_INTERVAL_UNITS = 160;
 constexpr size_t NK_SYNC_BEACON_PACKET_SIZE = 17;
 constexpr size_t NK_SYNC_BEACON_MFG_LEN = 2 + NK_SYNC_BEACON_PACKET_SIZE;
 constexpr size_t NK_SYNC_BEACON_ADV_LEN = 3 + 2 + NK_SYNC_BEACON_MFG_LEN;
+constexpr size_t NK_SYNC_BEACON_V2_PACKET_SIZE = 22;
+constexpr size_t NK_SYNC_BEACON_V2_MFG_LEN = 2 + NK_SYNC_BEACON_V2_PACKET_SIZE;
+constexpr size_t NK_SYNC_BEACON_V2_ADV_LEN = 3 + 2 + NK_SYNC_BEACON_V2_MFG_LEN;
+
+static_assert(NK_SYNC_BEACON_ADV_LEN == 24, "Unexpected sync beacon V1 advertising size");
+static_assert(NK_SYNC_BEACON_V2_ADV_LEN == 29, "Unexpected sync beacon V2 advertising size");
+static_assert(NK_SYNC_BEACON_V2_ADV_LEN <= 31, "Sync beacon V2 exceeds legacy BLE advertising");
 
 const char* const PATTERN_NAMES[] = {
     "",
@@ -1040,11 +1049,45 @@ struct NkSyncBeaconV1 {
 
 static_assert(sizeof(NkSyncBeaconV1) == NK_SYNC_BEACON_PACKET_SIZE, "Unexpected sync beacon V1 size");
 
+// V2 matches nightkite-multi 4cfa6a0: V1 basis at bytes 0..14,
+// manual audio test values at bytes 15..19, and CRC16 at bytes 20..21.
+// Multi-byte fields are little endian. CRC16-CCITT uses init 0xFFFF and
+// polynomial 0x1021 over all 22 bytes with crc zeroed. Manufacturer data is
+// FF FF + this struct; the raw advertisement starts 02 01 06 19 FF FF FF.
+// Flags bit 0 is the firmware's audio-beat flag and remains clear here because
+// this test mode performs no beat detection.
+struct NkSyncBeaconV2 {
+  uint8_t magic0;
+  uint8_t magic1;
+  uint8_t version;
+  uint8_t groupId;
+  uint8_t flags;
+  uint16_t seq;
+  uint8_t pattern;
+  uint8_t brightness;
+  uint32_t phaseMs;
+  uint16_t beatMs;
+  uint8_t audioEnergy;
+  uint8_t audioBass;
+  uint8_t audioMid;
+  uint8_t audioTreble;
+  uint8_t audioConfidence;
+  uint16_t crc;
+} __attribute__((packed));
+
+static_assert(sizeof(NkSyncBeaconV2) == NK_SYNC_BEACON_V2_PACKET_SIZE, "Unexpected sync beacon V2 size");
+
 struct BeaconMasterSettings {
+  uint8_t version = NK_SYNC_BEACON_VERSION_V1;
   uint8_t group = 1;
   uint8_t pattern = 1;
   uint8_t brightness = 159;
   uint16_t bpm = 120;
+  uint8_t energy = 128;
+  uint8_t bass = 128;
+  uint8_t mid = 128;
+  uint8_t treble = 128;
+  uint8_t confidence = 255;
 };
 
 BeaconMasterSettings beaconMasterSettings;
@@ -1080,7 +1123,16 @@ public:
     nextTxMs = 0;
     seq = 0;
     lastError = "none";
-    Serial.println("beacon: start v1 nonconnectable interval=100ms adv_units=160");
+    const bool v2 = settings.version == NK_SYNC_BEACON_VERSION_V2;
+    Serial.print("beacon: start version=");
+    Serial.print(v2 ? "v2" : "v1");
+    Serial.print(" payload_len=");
+    Serial.print(v2 ? NK_SYNC_BEACON_V2_ADV_LEN : NK_SYNC_BEACON_ADV_LEN);
+    Serial.print(" nonconnectable interval=100ms adv_units=160");
+    if (v2) {
+      printAudioValues(settings);
+    }
+    Serial.println();
     return publish(settings);
   }
 
@@ -1143,6 +1195,20 @@ public:
   }
 
 private:
+  static void printAudioValues(const BeaconMasterSettings& settings)
+  {
+    Serial.print(" energy=");
+    Serial.print(settings.energy);
+    Serial.print(" bass=");
+    Serial.print(settings.bass);
+    Serial.print(" mid=");
+    Serial.print(settings.mid);
+    Serial.print(" treble=");
+    Serial.print(settings.treble);
+    Serial.print(" confidence=");
+    Serial.print(settings.confidence);
+  }
+
   static uint16_t crc16Ccitt(const uint8_t* data, size_t len)
   {
     uint16_t crc = 0xFFFF;
@@ -1158,6 +1224,13 @@ private:
   static uint16_t computeCrc(const NkSyncBeaconV1& beacon)
   {
     NkSyncBeaconV1 copy = beacon;
+    copy.crc = 0;
+    return crc16Ccitt(reinterpret_cast<const uint8_t*>(&copy), sizeof(copy));
+  }
+
+  static uint16_t computeCrc(const NkSyncBeaconV2& beacon)
+  {
+    NkSyncBeaconV2 copy = beacon;
     copy.crc = 0;
     return crc16Ccitt(reinterpret_cast<const uint8_t*>(&copy), sizeof(copy));
   }
@@ -1181,6 +1254,25 @@ private:
     return true;
   }
 
+  bool buildAdvertisingData(const NkSyncBeaconV2& beacon, uint8_t* output, size_t outputSize, uint8_t& outputLen)
+  {
+    if (output == nullptr || outputSize < NK_SYNC_BEACON_V2_ADV_LEN || NK_SYNC_BEACON_V2_ADV_LEN > 31) {
+      return false;
+    }
+    uint8_t pos = 0;
+    output[pos++] = 2;
+    output[pos++] = ESP_BLE_AD_TYPE_FLAG;
+    output[pos++] = 0x06;
+    output[pos++] = static_cast<uint8_t>(NK_SYNC_BEACON_V2_MFG_LEN + 1);
+    output[pos++] = ESP_BLE_AD_MANUFACTURER_SPECIFIC_TYPE;
+    output[pos++] = static_cast<uint8_t>(NK_SYNC_BEACON_COMPANY_ID & 0xFF);
+    output[pos++] = static_cast<uint8_t>(NK_SYNC_BEACON_COMPANY_ID >> 8);
+    memcpy(&output[pos], &beacon, sizeof(beacon));
+    pos += sizeof(beacon);
+    outputLen = pos;
+    return true;
+  }
+
   bool publish(const BeaconMasterSettings& settings)
   {
     if (advertising == nullptr) {
@@ -1189,22 +1281,56 @@ private:
       return false;
     }
 
-    NkSyncBeaconV1 beacon;
-    beacon.magic0 = NK_SYNC_BEACON_MAGIC0;
-    beacon.magic1 = NK_SYNC_BEACON_MAGIC1;
-    beacon.version = NK_SYNC_BEACON_VERSION;
-    beacon.groupId = constrain(settings.group, static_cast<uint8_t>(1), static_cast<uint8_t>(4));
-    beacon.flags = 0;
-    beacon.seq = ++seq;
-    beacon.pattern = constrain(settings.pattern, static_cast<uint8_t>(1), static_cast<uint8_t>(PATTERN_COUNT));
-    beacon.brightness = settings.brightness;
-    beacon.phaseMs = phaseMs(settings);
-    beacon.beatMs = beatMs(settings);
-    beacon.crc = computeCrc(beacon);
-
     uint8_t advData[31];
     uint8_t advLen = 0;
-    if (!buildAdvertisingData(beacon, advData, sizeof(advData), advLen)) {
+    const bool v2 = settings.version == NK_SYNC_BEACON_VERSION_V2;
+    const uint8_t group = constrain(settings.group, static_cast<uint8_t>(1), static_cast<uint8_t>(4));
+    const uint8_t pattern = constrain(settings.pattern, static_cast<uint8_t>(1), static_cast<uint8_t>(PATTERN_COUNT));
+    const uint8_t brightness = settings.brightness;
+    const uint16_t currentSeq = ++seq;
+    const uint32_t phase = phaseMs(settings);
+    const uint16_t beat = beatMs(settings);
+    uint16_t crc = 0;
+
+    bool built = false;
+    if (v2) {
+      NkSyncBeaconV2 beacon{};
+      beacon.magic0 = NK_SYNC_BEACON_MAGIC0;
+      beacon.magic1 = NK_SYNC_BEACON_MAGIC1;
+      beacon.version = NK_SYNC_BEACON_VERSION_V2;
+      beacon.groupId = group;
+      beacon.flags = 0;
+      beacon.seq = currentSeq;
+      beacon.pattern = pattern;
+      beacon.brightness = brightness;
+      beacon.phaseMs = phase;
+      beacon.beatMs = beat;
+      beacon.audioEnergy = settings.energy;
+      beacon.audioBass = settings.bass;
+      beacon.audioMid = settings.mid;
+      beacon.audioTreble = settings.treble;
+      beacon.audioConfidence = settings.confidence;
+      beacon.crc = computeCrc(beacon);
+      crc = beacon.crc;
+      built = buildAdvertisingData(beacon, advData, sizeof(advData), advLen);
+    } else {
+      NkSyncBeaconV1 beacon{};
+      beacon.magic0 = NK_SYNC_BEACON_MAGIC0;
+      beacon.magic1 = NK_SYNC_BEACON_MAGIC1;
+      beacon.version = NK_SYNC_BEACON_VERSION;
+      beacon.groupId = group;
+      beacon.flags = 0;
+      beacon.seq = currentSeq;
+      beacon.pattern = pattern;
+      beacon.brightness = brightness;
+      beacon.phaseMs = phase;
+      beacon.beatMs = beat;
+      beacon.crc = computeCrc(beacon);
+      crc = beacon.crc;
+      built = buildAdvertisingData(beacon, advData, sizeof(advData), advLen);
+    }
+
+    if (!built) {
       lastError = "payload too long";
       broadcasting = false;
       Serial.println("beacon: err payload too long");
@@ -1222,23 +1348,32 @@ private:
     advertising->start();
 
     lastPayloadHex = hexBytes(advData, advLen);
+    lastPayloadLen = advLen;
+    lastVersion = v2 ? NK_SYNC_BEACON_VERSION_V2 : NK_SYNC_BEACON_VERSION_V1;
     lastError = "broadcasting";
     nextTxMs = millis() + BEACON_MASTER_TX_INTERVAL_MS;
     if (seq <= 3 || seq % 10 == 0) {
       Serial.print("beacon: tx seq=");
       Serial.print(seq);
+      Serial.print(" version=v");
+      Serial.print(lastVersion);
+      Serial.print(" payload_len=");
+      Serial.print(lastPayloadLen);
       Serial.print(" group=");
-      Serial.print(beacon.groupId);
+      Serial.print(group);
       Serial.print(" pattern=");
-      Serial.print(beacon.pattern);
+      Serial.print(pattern);
       Serial.print(" brightness=");
-      Serial.print(beacon.brightness);
+      Serial.print(brightness);
       Serial.print(" phase=");
-      Serial.print(beacon.phaseMs);
+      Serial.print(phase);
       Serial.print(" beat=");
-      Serial.print(beacon.beatMs);
+      Serial.print(beat);
+      if (v2) {
+        printAudioValues(settings);
+      }
       Serial.print(" crc=0x");
-      Serial.print(beacon.crc, HEX);
+      Serial.print(crc, HEX);
       Serial.print(" adv=");
       Serial.println(lastPayloadHex);
     }
@@ -1250,6 +1385,8 @@ private:
   uint16_t seq = 0;
   unsigned long startedAtMs = 0;
   unsigned long nextTxMs = 0;
+  uint8_t lastPayloadLen = 0;
+  uint8_t lastVersion = NK_SYNC_BEACON_VERSION_V1;
   String lastPayloadHex;
   String lastError = "idle";
 };
@@ -2773,39 +2910,66 @@ void drawBleCard()
   drawFooter("S scan  ENTER conn  D disc  B reset");
 }
 
-const char* const BEACON_MASTER_FIELDS[] = {"Power", "Group", "Pattern", "Bright", "BPM"};
+const char* const BEACON_MASTER_FIELDS[] = {
+    "Power", "Version", "Group", "Pattern", "Bright", "BPM", "Energy", "Bass", "Mid", "Treble", "Conf"};
 constexpr int BEACON_MASTER_FIELD_COUNT = sizeof(BEACON_MASTER_FIELDS) / sizeof(BEACON_MASTER_FIELDS[0]);
+constexpr int BEACON_MASTER_V1_FIELD_COUNT = 6;
+
+int activeBeaconMasterFieldCount()
+{
+  return beaconMasterSettings.version == NK_SYNC_BEACON_VERSION_V2 ? BEACON_MASTER_FIELD_COUNT
+                                                                   : BEACON_MASTER_V1_FIELD_COUNT;
+}
 
 void drawBeaconMasterCard()
 {
   drawTextFit("Beacon Master", 8, CONTENT_Y + 5, 100, COLOR_MUTED);
-  drawTextFit(beaconBroadcaster.active() ? "ON" : "OFF", 184, CONTENT_Y + 5, 48,
+  String mode = String("V") + String(beaconMasterSettings.version) + " " +
+                (beaconBroadcaster.active() ? "ON" : "OFF");
+  drawTextFit(mode, 174, CONTENT_Y + 5, 58,
               beaconBroadcaster.active() ? COLOR_OK : COLOR_WARN);
 
   String values[] = {
       beaconBroadcaster.active() ? "ON" : "OFF",
+      String("V") + String(beaconMasterSettings.version),
       String(beaconMasterSettings.group),
       String(beaconMasterSettings.pattern),
       String(beaconMasterSettings.brightness),
       String(beaconMasterSettings.bpm),
+      String(beaconMasterSettings.energy),
+      String(beaconMasterSettings.bass),
+      String(beaconMasterSettings.mid),
+      String(beaconMasterSettings.treble),
+      String(beaconMasterSettings.confidence),
   };
 
-  for (int i = 0; i < BEACON_MASTER_FIELD_COUNT; ++i) {
-    int x = 8 + (i % 3) * 76;
-    int y = CONTENT_Y + 22 + (i / 3) * 30;
+  const bool v2 = beaconMasterSettings.version == NK_SYNC_BEACON_VERSION_V2;
+  const int fieldCount = activeBeaconMasterFieldCount();
+  const int columns = v2 ? 4 : 3;
+  const int tileWidth = v2 ? 55 : 70;
+  const int xStep = v2 ? 59 : 76;
+  const int yStart = v2 ? 18 : 22;
+  const int yStep = v2 ? 21 : 30;
+  const int tileHeight = v2 ? 19 : 24;
+  for (int i = 0; i < fieldCount; ++i) {
+    int x = (v2 ? 5 : 8) + (i % columns) * xStep;
+    int y = CONTENT_Y + yStart + (i / columns) * yStep;
     bool active = i == app.selectedBeaconMasterField;
     uint16_t bg = active ? COLOR_ACCENT_DARK : COLOR_PANEL_DARK;
-    uiCanvas.fillRoundRect(x, y, 70, 24, 3, bg);
-    drawTextFit(BEACON_MASTER_FIELDS[i], x + 5, y + 5, 60, COLOR_MUTED, bg);
-    drawTextFit(values[i], x + 5, y + 16, 60, active ? COLOR_TEXT : COLOR_ACCENT, bg);
+    uiCanvas.fillRoundRect(x, y, tileWidth, tileHeight, 3, bg);
+    drawTextFit(BEACON_MASTER_FIELDS[i], x + 4, y + (v2 ? 2 : 5), tileWidth - 8, COLOR_MUTED, bg);
+    drawTextFit(values[i], x + 4, y + (v2 ? 11 : 16), tileWidth - 8, active ? COLOR_TEXT : COLOR_ACCENT, bg);
   }
 
-  drawTextFit("Phase " + String(beaconBroadcaster.phaseMs(beaconMasterSettings)) + "ms", 10, CONTENT_Y + 82, 92,
+  drawTextFit("Phase " + String(beaconBroadcaster.phaseMs(beaconMasterSettings)) + "ms", 8, CONTENT_Y + 82, 94,
               COLOR_TEXT);
-  drawTextFit("Seq " + String(beaconBroadcaster.currentSeq()), 112, CONTENT_Y + 82, 58, COLOR_TEXT);
-  drawTextFit("Beat " + String(beaconBroadcaster.beatMs(beaconMasterSettings)) + "ms", 174, CONTENT_Y + 82, 58,
+  drawTextFit("Seq " + String(beaconBroadcaster.currentSeq()), 106, CONTENT_Y + 82, 54, COLOR_TEXT);
+  drawTextFit("Beat " + String(beaconBroadcaster.beatMs(beaconMasterSettings)) + "ms", 164, CONTENT_Y + 82, 68,
               COLOR_TEXT);
-  drawTextFit(shortText(beaconBroadcaster.payloadHex(), 36), 10, CONTENT_Y + 96, 218,
+  String payload = beaconBroadcaster.payloadHex();
+  drawTextFit(payload.substring(0, min(36, static_cast<int>(payload.length()))), 10, CONTENT_Y + 91, 218,
+              beaconBroadcaster.active() ? COLOR_MUTED : COLOR_PANEL_LIGHT);
+  drawTextFit(payload.length() > 36 ? payload.substring(36) : "", 10, CONTENT_Y + 100, 218,
               beaconBroadcaster.active() ? COLOR_MUTED : COLOR_PANEL_LIGHT);
   drawFooter("ENTER start/stop  C field  W/S edit  T tap");
 }
@@ -5521,14 +5685,28 @@ void changeValue(int delta)
       break;
     case Card::BeaconMaster:
       if (app.selectedBeaconMasterField == 1) {
-        beaconMasterSettings.group = static_cast<uint8_t>(wrapRange(beaconMasterSettings.group, 1, 4, 1, delta));
+        beaconMasterSettings.version = static_cast<uint8_t>(
+            wrapRange(beaconMasterSettings.version, NK_SYNC_BEACON_VERSION_V1, NK_SYNC_BEACON_VERSION_V2, 1, delta));
       } else if (app.selectedBeaconMasterField == 2) {
-        beaconMasterSettings.pattern = static_cast<uint8_t>(wrapRange(beaconMasterSettings.pattern, 1, PATTERN_COUNT, 1, delta));
+        beaconMasterSettings.group = static_cast<uint8_t>(wrapRange(beaconMasterSettings.group, 1, 4, 1, delta));
       } else if (app.selectedBeaconMasterField == 3) {
+        beaconMasterSettings.pattern = static_cast<uint8_t>(wrapRange(beaconMasterSettings.pattern, 1, PATTERN_COUNT, 1, delta));
+      } else if (app.selectedBeaconMasterField == 4) {
         beaconMasterSettings.brightness = static_cast<uint8_t>(
             wrappedValue(brightnessLevels, BRIGHTNESS_LEVEL_COUNT, beaconMasterSettings.brightness, delta));
-      } else if (app.selectedBeaconMasterField == 4) {
+      } else if (app.selectedBeaconMasterField == 5) {
         beaconMasterSettings.bpm = static_cast<uint16_t>(wrapRange(beaconMasterSettings.bpm, 40, 240, 1, delta));
+      } else if (app.selectedBeaconMasterField == 6) {
+        beaconMasterSettings.energy = static_cast<uint8_t>(wrapRange(beaconMasterSettings.energy, 0, 255, 1, delta));
+      } else if (app.selectedBeaconMasterField == 7) {
+        beaconMasterSettings.bass = static_cast<uint8_t>(wrapRange(beaconMasterSettings.bass, 0, 255, 1, delta));
+      } else if (app.selectedBeaconMasterField == 8) {
+        beaconMasterSettings.mid = static_cast<uint8_t>(wrapRange(beaconMasterSettings.mid, 0, 255, 1, delta));
+      } else if (app.selectedBeaconMasterField == 9) {
+        beaconMasterSettings.treble = static_cast<uint8_t>(wrapRange(beaconMasterSettings.treble, 0, 255, 1, delta));
+      } else if (app.selectedBeaconMasterField == 10) {
+        beaconMasterSettings.confidence =
+            static_cast<uint8_t>(wrapRange(beaconMasterSettings.confidence, 0, 255, 1, delta));
       }
       break;
     case Card::Ble:
@@ -6129,7 +6307,7 @@ void handleWordChar(char c)
     return;
   }
   if ((c == 'c' || c == 'C') && static_cast<Card>(app.selectedCard) == Card::BeaconMaster) {
-    app.selectedBeaconMasterField = (app.selectedBeaconMasterField + 1) % BEACON_MASTER_FIELD_COUNT;
+    app.selectedBeaconMasterField = (app.selectedBeaconMasterField + 1) % activeBeaconMasterFieldCount();
     app.dirty = true;
     return;
   }

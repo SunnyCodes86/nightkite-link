@@ -28,7 +28,7 @@ Ausführliche deutsche Dokumentation: [docs/README.de.md](docs/README.de.md)
 - Device, play mode, sync and wireless/beacon diagnostic cards
 - Sync Test card for preparing master/follower two-controller beacon tests
 - Sync Diag card for Firmware 4.0 PatternClock and beacon apply diagnostics
-- Experimental Cardputer Beacon Master card for V1-compatible BLE sync advertising
+- Experimental Cardputer Beacon Master card for V1 and V2 audio-test BLE sync advertising
 - Brightness, strip length, active pattern, smoothing and autoplay settings
 - Pattern list with cycle, invert and Firmware 4.0 sync classification state
 - Pattern detail and bulk actions
@@ -63,10 +63,12 @@ identity, play mode, sync and wireless configuration. An experimental BLE Scan
 card can connect to Firmware 4.0 RM2/BLE controllers and use the same NK4 command
 path over GATT. BLE GATT remains for configuration/status/control only; the
 experimental Beacon Master card is a separate show mode that sends
-NightKite Sync Beacon V1-compatible non-connectable BLE advertisements directly
-from the Cardputer. It does not require firmware changes on NightKite Multi
-controllers and does not keep a BLE-GATT controller connection open while
-broadcasting. There is no microphone or audio analysis in this step. The UF2
+NightKite Sync Beacon V1 or V2 non-connectable BLE advertisements directly from
+the Cardputer. V1 remains compatible with unchanged NightKite Multi controllers;
+V2 audio-test mode requires controller firmware with V2 receive support
+(`4cfa6a0` or newer). Broadcasting does not keep a BLE-GATT controller
+connection open. Energy, bass, mid, treble and confidence are manual test values;
+there is no microphone, FFT or audio analysis in this step. The UF2
 Mass Storage flasher is present as an experimental service/recovery workflow
 and expects the controller to be manually placed into BOOTSEL/Mass Storage mode.
 
@@ -78,8 +80,17 @@ USB inspection only. To test the Cardputer Beacon Master, configure existing
 controllers as followers with `play_mode=sync`, `sync_enabled=1`,
 `sync_role=follower`, matching `sync_group` 1-4, and `wireless_enabled=1`; then
 start the Beacon Master card with the same group, pattern, brightness and BPM.
-The transmitted payload is Firmware-4.0 V1-compatible and the serial monitor
-prints beacon start/stop state plus sampled advertising payload hex for debug.
+Choose V1 for the established compatible path or V2 to edit the five manual
+audio values. The serial monitor prints version, payload length, audio test
+values for V2, and sampled advertising payload hex. V2 uses 29 of the 31 legacy
+advertising bytes and does not add a local name or service data.
+
+Controller diagnostics for the two modes:
+
+```text
+NK4 seq=10 cmd=get section=sync
+NK4 seq=20 cmd=audio_sync_status
+```
 
 Firmware 4.0 diagnostics now include PatternClock and pattern classification
 fields. The pattern list marks patterns as `S` sync-ready, `P` partial-sync, `L`

@@ -32,7 +32,7 @@ Implemented or present in the current code:
 - Pattern list with cycle and invert state
 - Pattern detail configuration with cycle and invert toggles
 - Sync Test card for preparing Firmware 4.0 master/follower beacon tests
-- Experimental Beacon Master card for Cardputer-originated Sync Beacon V1 BLE advertising
+- Experimental Beacon Master card for Cardputer-originated Sync Beacon V1 and V2 audio-test BLE advertising
 - Bulk pattern actions:
   - save all current pattern states
   - enable all patterns for cycle
@@ -82,19 +82,30 @@ Normal CLI configuration uses the existing NightKite USB CLI. No NightKite Multi
 firmware changes are required for that path as long as the controller provides
 the expected CLI commands.
 
-The experimental Beacon Master card also works with unchanged Firmware 4.0
-controllers. It broadcasts NightKite Sync Beacon V1-compatible BLE manufacturer
-data from the Cardputer as non-connectable advertising. It is a separate show
-mode from BLE GATT configuration and does not keep a controller GATT connection
-open while broadcasting. This first version has no microphone input and no audio
-analysis.
+The experimental Beacon Master card broadcasts NightKite Sync Beacon V1 or V2
+BLE manufacturer data from the Cardputer as non-connectable advertising. V1
+continues to work with unchanged Firmware 4.0 controllers. V2 audio-test mode
+requires NightKite Multi firmware with V2 receive support (`4cfa6a0` or newer).
+The mode is separate from BLE GATT configuration and does not keep a controller
+GATT connection open while broadcasting. V2 energy, bass, mid, treble and
+confidence are manual test values. There is no microphone input, FFT or audio
+beat analysis.
 
 To test it, configure one or more NightKite Multi controllers as followers:
 `play_mode=sync`, `sync_enabled=1`, `sync_role=follower`, matching
 `sync_group` 1-4, and `wireless_enabled=1`. Then open the Beacon Master card,
 choose the same group plus pattern, brightness and BPM, and press `Enter` to
-start or stop broadcasting. The serial monitor prints beacon start/stop messages
-and sampled advertising payload hex for diagnostics.
+start or stop broadcasting. Select V1 for the established path or V2 to edit the
+five audio test values. V2 uses a 22-byte beacon payload and a 29-byte legacy
+advertisement, with no local name or service data. The serial monitor prints
+version, payload length, V2 audio values and sampled payload hex.
+
+Controller diagnostics:
+
+```text
+NK4 seq=10 cmd=get section=sync
+NK4 seq=20 cmd=audio_sync_status
+```
 
 ## Build and Upload
 
