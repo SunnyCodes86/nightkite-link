@@ -1,0 +1,18 @@
+{
+  "profile_version": 2,
+  "project": "NightKite Link",
+  "target": "NightKite Multi",
+  "settings": {
+    "brightness": 159,
+    "strip_length": 25,
+    "active_pattern": 22,
+    "smoothing": 40,
+    "autoplay": {
+      "enabled": true,
+      "interval_seconds": 20
+    },
+    "patterns": [
+      {"id": 1, "name": "Rainbow", "cycle_enabled": true, "inverted": false}
+    ]
+  }
+}
