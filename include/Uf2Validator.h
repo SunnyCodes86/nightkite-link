@@ -2,16 +2,7 @@
 
 #include <Arduino.h>
 #include <SD.h>
-
-enum class Uf2ValidationResult {
-  Ok,
-  FileMissing,
-  EmptyFile,
-  SizeNotAligned,
-  OpenFailed,
-  ReadFailed,
-  InvalidMagic,
-};
+#include "Uf2ValidationCore.h"
 
 struct Uf2ValidationInfo {
   Uf2ValidationResult result = Uf2ValidationResult::OpenFailed;
@@ -22,6 +13,6 @@ struct Uf2ValidationInfo {
 
 class Uf2Validator {
 public:
-  static Uf2ValidationInfo validate(const String& path);
+  static Uf2ValidationInfo validate(const String& path, Uf2Target target);
   static const char* message(Uf2ValidationResult result);
 };

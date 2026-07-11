@@ -211,13 +211,18 @@ Profile:
 
 ## Profilformat
 
-Profile werden als JSON geschrieben, aber ohne ArduinoJson verarbeitet. Das
-Laden ist bewusst einfach gehalten und liest die Schlüssel, die der aktuelle
-Code nutzt.
+Profile werden mit einem größenbegrenzten JSON-Decoder geschrieben und gelesen.
+Fehlerhafte, abgeschnittene, zu große, nicht unterstützte oder typ-/bereichsfalsche
+Profile werden abgewiesen, bevor sie den geladenen Profilzustand ersetzen.
 
 Aktuell gespeicherte Struktur. `profile_version: 2` ergänzt optionale
 Firmware-4.0-Felder. Ältere Profile bleiben lesbar; fehlende Schlüssel behalten
 den aktuellen Wert bzw. den Default.
+Fehlen die kompakten Pattern-Masken, dienen `patterns[].cycle_enabled` und
+`patterns[].inverted` als Kompatibilitäts-Fallback. Beim Speichern wird zuerst
+eine temporäre Datei vollständig geschrieben und geprüft. Ein unterbrochener
+Overwrite behält eine wiederherstellbare `.bak`-Datei, die beim nächsten
+Profil-Scan zurückgespielt wird.
 
 ```json
 {
@@ -274,8 +279,9 @@ Die aktuelle Tastaturbehandlung verarbeitet diese Eingaben:
 
 | Taste | Aktion |
 | --- | --- |
-| `A` / `D` | Vorherige / nächste Card |
-| `W` / `S` | Wert editieren oder Auswahl bewegen |
+| Pfeil links / rechts | Vorherige / nächste Card |
+| Pfeil hoch / runter | Wert editieren oder Auswahl bewegen |
+| `A` / `D`, `W` / `S` | Fallbacks für die entsprechenden Pfeiltasten |
 | `Enter` | Anwenden, öffnen, bestätigen oder im Flash-Workflow fortfahren |
 | `Backspace` / `DEL` | Zurück oder abbrechen, wo unterstützt |
 | `Tab` | Nächste Card |
@@ -283,10 +289,10 @@ Die aktuelle Tastaturbehandlung verarbeitet diese Eingaben:
 | `T` | Tap-Tempo auf der Audio-Beacon-Card |
 | `C` | Editierbares Feld wählen, Firmware-Ziel umschalten oder Pattern-Cycle toggeln |
 | `I` | Pattern-Invert toggeln oder ausgewähltes Profil auf der Profiles-Card löschen |
-| `,` / `<` | Vorherige Card |
-| `/` / `?` | Nächste Card |
-| `;` / `:` | Gleiche Richtung wie `W` |
-| `.` / `>` | Gleiche Richtung wie `S` |
+
+Die physischen Cardputer-Pfeiltasten liefern die von der Tastaturbibliothek
+verwendeten Satzzeichen-Aliase. Footer zeigen deshalb zuerst kompakte
+ASCII-Pfeile und nur die wichtigsten vollständigen Hinweise, die in 240 px passen.
 
 Während kritischer Firmware-Kopierzustände ist die normale Card-Navigation
 gesperrt. Abbrechen ist nur in sicheren Flash-Zuständen möglich.
@@ -307,11 +313,11 @@ Live-Funktionen nach vorne und Diagnose-/Servicefunktionen nach hinten:
 `Controller Sync`, `Controller Radio`, `Motion Service`, `Sync Diagnostics`,
 `Sync Setup Test` und `Firmware Update`.
 
-Auf `Patterns` wechselt `W` / `S` das Controller-Pattern als Live-Vorschau.
+Auf `Patterns` wechselt Pfeil hoch/runter das Controller-Pattern als Live-Vorschau.
 `Enter` öffnet die Detailansicht für Cycle und Invert.
 
 Die Statusleiste oben zeigt kompakt Transport/Protokoll (`USB LEG` oder
-`USB NK4`), Controller-Name oder Short-ID, Play-/Rollen-Token, Controller-Akku
+`USB NK4`), kompakte Queue (`Q0`...`Q9+` oder `Q!`), Play-/Rollen-Token, Controller-Akku
 falls verfügbar und Cardputer-Akku. Der Firmware-Flasher verwendet eigene
 Workflow-Screens für Bestätigung, BOOTSEL-Anweisung, Warten, Fortschritt, Reboot
 und Fehler.
@@ -493,6 +499,11 @@ Live-Änderungen wie Brightness oder aktives Pattern werden sofort an den
 Controller gesendet, sind aber erst nach `save` persistent. Auf der Controller-Card
 ist `S save` die klare Persistenz-Aktion.
 
+Pattern-Änderungen bleiben nach erfolgreichem Live-Befehl als `UNSAVED`
+markiert. Erst die bestätigte persistente `save`-Antwort des Controllers löscht
+die Markierung. Nach fehlgeschlagenem oder abgelaufenem Save bleibt `UNSAVED`
+aktiv.
+
 `C reset USB` setzt nur den Link-seitigen USB-/Protokollzustand zurück. Das ist
 kein Controller-Werkreset.
 
@@ -542,15 +553,21 @@ UF2-Validierung:
 - Datei existiert
 - Dateigröße ist größer als null
 - Dateigröße ist durch 512 teilbar
-- Magic-Werte im ersten UF2-Block sind gültig
+- Magic-Werte, Payload-Größe, Nummerierung und Blockanzahl jedes UF2-Blocks sind gültig
+- jede angegebene UF2-Family passt zum gewählten RP2040- oder RP2350-Ziel
+- Dateien ohne Family-ID werden abgelehnt, weil sie nicht sicher zugeordnet werden können
+- das verbundene BOOTSEL-Gerät hat vor dem ersten Schreibzugriff Raspberry Pis USB-VID
+  und die erwartete RP2040- oder RP2350-Boot-PID
+- alle Schreib-, VFS-Flush-/Close- und Unmount-Vorgänge müssen erfolgreich sein
 
-Family-ID-Erkennung ist vorhanden, aber eine harte zielabhängige
-Family-ID-Prüfung ist im Code als TODO markiert.
+Erfolg wird erst angezeigt, wenn die komplette Datei übertragen wurde und sich das
+passende BOOTSEL-Gerät für den Neustart getrennt hat. Ein Reboot-Timeout wird als
+Fehler und nicht als erfolgreicher Flash-Vorgang gemeldet.
 
 Warnungen:
 
 - Während des Kopierens nicht trennen.
-- Nur UF2-Dateien verwenden, die zum Controller passen.
+- Das gewählte Ziel muss sowohl zur UF2-Family als auch zum verbundenen Controller passen.
 - Der Flasher ist experimental / work in progress.
 - Der Flasher ist ein Service-/Recovery-Workflow und kein normaler
   NightKite-CLI-Befehl.

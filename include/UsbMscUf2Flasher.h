@@ -4,6 +4,7 @@
 #include <FS.h>
 #include <cstdio>
 #include <stddef.h>
+#include "Uf2ValidationCore.h"
 #include "usb/msc_host.h"
 
 enum class FlashResult {
@@ -11,6 +12,7 @@ enum class FlashResult {
   SdNotReady,
   FileMissing,
   InvalidUf2,
+  WrongTargetDevice,
   UsbHostInitFailed,
   NoMassStorageDevice,
   MountFailed,
@@ -42,7 +44,7 @@ public:
   bool isRunning() const;
   bool isMassStorageConnected() const;
 
-  bool startFlash(const String& sdUf2Path, const String& displayName, bool directSectorWrite = false);
+  bool startFlash(const String& sdUf2Path, const String& displayName, Uf2Target target);
   void poll();
   void cancel();
 
@@ -68,10 +70,10 @@ private:
   void cleanup();
   bool installMscHost();
   bool prepareDevice();
-  bool prepareDirectDevice(msc_host_device_handle_t device);
+  bool prepareDirectDevice(msc_host_device_handle_t device, const msc_host_device_info_t& info);
   bool mountVfsDevice(msc_host_device_handle_t device);
   bool copyChunk();
-  void finishCopy();
+  bool finishCopy();
   void updatePercent();
 
   State state = State::Idle;
@@ -83,6 +85,7 @@ private:
   bool mscInstalled = false;
   bool deviceInstalled = false;
   bool directSectorWrite = false;
+  Uf2Target expectedTarget = Uf2Target::Rp2040;
   bool vfsMounted = false;
   uint32_t targetSectorSize = 0;
   uint32_t targetSectorCount = 0;

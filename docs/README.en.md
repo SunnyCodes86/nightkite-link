@@ -202,11 +202,17 @@ Profiles:
 
 ## Profile Format
 
-Profiles are written as JSON without ArduinoJson. Loading is intentionally
-simple and reads the keys used by the current code.
+Profiles are written and parsed with a bounded JSON decoder. Malformed,
+truncated, oversized, unsupported-version, wrong-type and out-of-range profiles
+are rejected before they can replace the loaded profile state.
 
 Current saved structure. `profile_version: 2` adds optional Firmware 4.0 fields.
 Older profiles remain readable; missing keys keep the current/default value.
+When compact pattern masks are absent, `patterns[].cycle_enabled` and
+`patterns[].inverted` are used as the compatibility fallback. Profile saves are
+written to a temporary file and verified before replacement; an interrupted
+overwrite keeps a recoverable `.bak` copy that is restored on the next profile
+scan.
 
 ```json
 {
@@ -263,8 +269,9 @@ The current keyboard handling processes these controls:
 
 | Key | Action |
 | --- | --- |
-| `A` / `D` | Previous / next card |
-| `W` / `S` | Edit value or move selection |
+| Left / right arrow | Previous / next card |
+| Up / down arrow | Edit value or move selection |
+| `A` / `D`, `W` / `S` | Fallback aliases for the corresponding arrow keys |
 | `Enter` | Apply, open, confirm, or continue in flash workflow |
 | `Backspace` / `DEL` | Back or cancel where supported |
 | `Tab` | Next card |
@@ -272,10 +279,10 @@ The current keyboard handling processes these controls:
 | `C` | Select editable field, toggle firmware target, or toggle pattern cycle depending on card |
 | `T` | Tap tempo on the Audio Beacon card |
 | `I` | Toggle pattern invert, or delete selected profile on the Profiles card |
-| `,` / `<` | Previous card |
-| `/` / `?` | Next card |
-| `;` / `:` | Same direction as `W` |
-| `.` / `>` | Same direction as `S` |
+
+The physical Cardputer arrow keys produce the punctuation aliases used by the
+keyboard library. Footer hints therefore show compact ASCII arrows first and
+only include the highest-priority complete hints that fit the 240 px width.
 
 During critical firmware copy states, normal card navigation is locked. Cancel
 is only accepted in safe flash states.
@@ -295,11 +302,11 @@ the front and diagnostics/service at the back: `Status`, `Pattern Live`,
 `Controller Radio`, `Motion Service`, `Sync Diagnostics`, `Sync Setup Test`,
 and `Firmware Update`.
 
-On `Patterns`, `W` / `S` changes the controller pattern as a live preview.
+On `Patterns`, up/down changes the controller pattern as a live preview.
 `Enter` opens the cycle/invert detail view.
 
 The top status bar shows compact transport/protocol state (`USB LEG` or
-`USB NK4`), controller name or short ID, play/role tokens, controller battery
+`USB NK4`), compact queue state (`Q0`...`Q9+` or `Q!`), play/role tokens, controller battery
 when available and Cardputer battery. The firmware flasher uses its own workflow
 screens for confirmation, BOOTSEL instructions, waiting, progress, reboot and
 error states.
@@ -476,6 +483,10 @@ Live changes such as brightness or active pattern are sent to the controller
 immediately, but they are only persistent after `save`. On the Controller card,
 `S save` is the explicit persistence action.
 
+Pattern changes remain marked `UNSAVED` after their live command succeeds. The
+marker is cleared only after the controller confirms the persistent `save`.
+A failed or timed-out save leaves `UNSAVED` active.
+
 `C reset USB` only resets Link's USB/protocol session. It is not a controller
 factory reset.
 
@@ -524,15 +535,21 @@ UF2 validation checks:
 - file exists
 - file size is greater than zero
 - file size is divisible by 512
-- first UF2 block magic values are valid
+- every UF2 block has valid magic, payload size, numbering and block count
+- every declared UF2 family matches the selected RP2040 or RP2350 target
+- files without a family ID are rejected because they cannot be matched safely
+- the connected BOOTSEL device has Raspberry Pi's USB VID and the expected
+  RP2040 or RP2350 boot PID before any data is written
+- all writes, VFS flush/close and unmount operations must succeed
 
-Family ID detection is present, but target-specific family validation is marked
-as a TODO in the code.
+Success is shown only after the full copy has completed and the matched BOOTSEL
+device disconnects for reboot. A reboot timeout is reported as an error, not as
+successful flashing.
 
 Warnings:
 
 - Do not unplug during copying.
-- Use only UF2 files intended for the selected controller family.
+- The selected target must match both the UF2 family and connected controller.
 - This flasher is experimental / work in progress.
 - This is a service/recovery workflow and not a normal NightKite CLI command.
 
