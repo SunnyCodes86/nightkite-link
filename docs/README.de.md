@@ -12,9 +12,9 @@ NightKite-USB-CLI. Für den normalen Konfigurationsablauf sind keine Änderungen
 an der NightKite-Multi-Firmware erforderlich, solange die erwarteten CLI-Befehle
 vorhanden sind.
 
-Die 240-x-135-px-Oberfläche ist in vier Aufgabenbereiche gegliedert: `LIVE`,
-`SHOW`, `SETUP` und `SERVICE`. Jeder Screen hat eine Hauptaufgabe, eine kompakte
-Statusleiste und kontextbezogene Tastenhinweise.
+Die Oberfläche ist kartenbasiert, weil das Display des Cardputer-Adv sehr klein
+ist. Eine Card zeigt jeweils eine Hauptfunktion oder eine kleine Gruppe
+zusammenhängender Einstellungen.
 
 ## Funktionen
 
@@ -24,17 +24,17 @@ Im aktuellen Code vorhanden:
 - PCM-basierte Startup-, Tasten-, Navigations-, Confirm-, Cancel-, Success- und Error-Sounds
 - USB-Verbindungsstatus
 - Controller-/CLI-Verbindungsstatus mit Timeout-Erkennung
-- Brightness-Draft mit explizitem Live-Apply und Persistent-Save-Feedback
+- Helligkeit anzeigen und direkt beim Ändern senden
 - Striplänge anzeigen und als Entwurfswert konfigurieren
-- Aktives Pattern mit sequenzieller Draft-Auswahl und explizitem Apply
+- Aktives Pattern anzeigen und direkt beim Ändern senden
 - Smoothing anzeigen und als Entwurfswert konfigurieren
 - Accelerometer- und Gyro-Range konfigurieren
 - Motion-Service-Card mit FPS-Anzeige und Kalibrieraktionen
 - Autoplay-Status und Autoplay-Intervall konfigurieren
 - Pattern-Liste mit Cycle- und Invert-Status
-- Pattern-Cycle/Invert-Toggles und bestätigtes Bulk-Overlay
-- Geführtes Sync Setup für Firmware-4.0-Master/Follower-Beacon-Tests
-- Experimentelle Audio-Beacon-Run/Tune-Screens mit V1/V2-Manual- und Cardputer-Mikrofon-Audio-Sync-Modi
+- Pattern-Detailansicht mit Cycle- und Invert-Toggles
+- Sync-Setup-Test-Card zum Vorbereiten von Firmware-4.0-Master/Follower-Beacon-Tests
+- Experimentelle Audio-Beacon-Card mit V1/V2-Manual- und Cardputer-Mikrofon-Audio-Sync-Modi
 - Bulk-Aktionen für Patterns:
   - aktuelle Pattern-Zustände speichern
   - alle Patterns für Cycle aktivieren
@@ -207,8 +207,7 @@ Profile:
 
 - liegen unter `/profiles/`
 - verwenden `.json`
-- behalten benutzerdefinierte Namen und können im Profiles-Screen gespeichert,
-  geladen, angewendet, umbenannt, gelöscht und aktualisiert werden
+- neue Profile werden als `profile_001.json` bis `profile_999.json` benannt
 
 ## Profilformat
 
@@ -219,8 +218,6 @@ Code nutzt.
 Aktuell gespeicherte Struktur. `profile_version: 2` ergänzt optionale
 Firmware-4.0-Felder. Ältere Profile bleiben lesbar; fehlende Schlüssel behalten
 den aktuellen Wert bzw. den Default.
-Der Writer bleibt bei `profile_version: 2`; das UI-Redesign führt keine
-Formatmigration durch.
 
 ```json
 {
@@ -277,54 +274,47 @@ Die aktuelle Tastaturbehandlung verarbeitet diese Eingaben:
 
 | Taste | Aktion |
 | --- | --- |
-| Pfeil links / rechts | Bereich wechseln oder ausgewählten Wert ändern |
-| Pfeil hoch / runter | Auswahl, Feld oder Pattern-Gruppe wechseln |
-| `A` / `D`, `W` / `S` | Fallbacks für die entsprechenden Pfeiltasten |
+| `A` / `D` | Vorherige / nächste Card |
+| `W` / `S` | Wert editieren oder Auswahl bewegen |
 | `Enter` | Anwenden, öffnen, bestätigen oder im Flash-Workflow fortfahren |
 | `Backspace` / `DEL` | Zurück oder abbrechen, wo unterstützt |
-| `R` | Aktuellen Screen aktualisieren oder neu scannen |
-| `H` | LIVE Home öffnen |
-| `?` | Kontext-Hilfe öffnen |
-| `1`…`9` | Pattern, Brightness, Audio, Profiles, Sync, Connect, Save, Diagnostics, Firmware |
-| `C` / `I` / `B` | Pattern Cycle, Invert oder Bulk; `C` öffnet Audio Tune aus Audio Run |
-| `T` | Tap-Tempo im Audio Beacon |
-
-Footer-Hinweise zeigen Pfeiltasten zuerst und enthalten bewusst nur die
-wichtigsten Aktionen, die auf das 240-px-Display passen.
+| `Tab` | Nächste Card |
+| `R` | Aktuelle Card bzw. Controllerdaten neu lesen, wo implementiert |
+| `T` | Tap-Tempo auf der Audio-Beacon-Card |
+| `C` | Editierbares Feld wählen, Firmware-Ziel umschalten oder Pattern-Cycle toggeln |
+| `I` | Pattern-Invert toggeln oder ausgewähltes Profil auf der Profiles-Card löschen |
+| `,` / `<` | Vorherige Card |
+| `/` / `?` | Nächste Card |
+| `;` / `:` | Gleiche Richtung wie `W` |
+| `.` / `>` | Gleiche Richtung wie `S` |
 
 Während kritischer Firmware-Kopierzustände ist die normale Card-Navigation
 gesperrt. Abbrechen ist nur in sicheren Flash-Zuständen möglich.
 
-Editierbare Screens halten einen lokalen Draft, solange ein Feld pending ist.
+Editierbare Cards halten einen lokalen Draft, solange ein Feld pending ist.
 Automatische Controller-Refreshes aktualisieren weiter den Controller-State,
 überschreiben aber den aktiven Draft nicht. Pending-Felder sind mit `*`
-markiert; `Enter` wendet sie live an, `Backspace` / `DEL` verwirft die lokale
-Änderung. Eine live angewendete Änderung bleibt als `UNSAVED` sichtbar.
-Shortcut `7` stellt `save` in die Queue; erst die bestätigte Controller-Antwort
-entfernt das Badge.
+markiert; `Enter` wendet sie an, `Backspace` / `DEL` verwirft die lokale
+Änderung.
 
 ## UI-Konzept
 
-Das Routing ersetzt den alten flachen 17-Card-Carousel:
+NightKite Link nutzt ein Card-based Interface statt eines großen klassischen
+Menüs, weil das Display nur 240 x 135 px groß ist. Die flache Reihenfolge stellt
+Live-Funktionen nach vorne und Diagnose-/Servicefunktionen nach hinten:
+`Status`, `Pattern Live`, `Brightness`, `Play`, `Audio Beacon`, `Patterns`,
+`Pattern Bulk`, `Profiles`, `Controller`, `BLE Connect`, `Controller Setup`,
+`Controller Sync`, `Controller Radio`, `Motion Service`, `Sync Diagnostics`,
+`Sync Setup Test` und `Firmware Update`.
 
-- `LIVE`: Cockpit mit Pattern, Brightness, Play/Sync, Audio, letzter Meldung
-  und Unsaved-State.
-- `SHOW`: Pattern, Brightness, Play, Audio Run/Tune, Profiles und Sync Setup.
-- `SETUP`: Strip + Smooth, Motion/IMU, Wireless, Device Name und Save/Defaults.
-- `SERVICE`: Sync Diagnostics, Status Dump, Connect, Firmware Update und
-  bestätigter Factory Reset.
-
-In Pattern wechseln links/rechts sequenziell durch die Firmware-IDs
-(`1, 2, 3, ... 27`), hoch/runter verschiebt den Feldfokus. Patterns 23-27
-bleiben Teil der normalen Reihenfolge und tragen das Audio-Kategorielabel.
-`Enter` wendet die angezeigte Pattern-ID an. Audio Run zeigt Broadcast und
-Live-Meter; Audio Tune enthält die Analyseparameter.
+Auf `Patterns` wechselt `W` / `S` das Controller-Pattern als Live-Vorschau.
+`Enter` öffnet die Detailansicht für Cycle und Invert.
 
 Die Statusleiste oben zeigt kompakt Transport/Protokoll (`USB LEG` oder
-`USB NK4`), Controller-Name oder Short-ID, Command Queue (`Q0`, `Q3` oder
-`Q!`), Play-/Rollen-Token, Controller-Akku falls verfügbar und Cardputer-Akku.
-Der Firmware-Flasher verwendet eigene Workflow-Screens für Bestätigung,
-BOOTSEL-Anweisung, Warten, Fortschritt, Reboot und Fehler.
+`USB NK4`), Controller-Name oder Short-ID, Play-/Rollen-Token, Controller-Akku
+falls verfügbar und Cardputer-Akku. Der Firmware-Flasher verwendet eigene
+Workflow-Screens für Bestätigung, BOOTSEL-Anweisung, Warten, Fortschritt, Reboot
+und Fehler.
 
 ## Controller-Kommunikation
 
@@ -405,7 +395,7 @@ Beispiel `cmd=set brightness=...`, `cmd=set play_mode=manual|autoplay|sync`,
 `cmd=set wireless_enabled=0|1`, `cmd=set wireless_profile=...`,
 `cmd=set enabled_mask=...` und `cmd=set inverted_mask=...`.
 
-Der BLE-NK4-Service aus Firmware 4.0 kann experimentell über den Connect-Screen
+Der BLE-NK4-Service aus Firmware 4.0 kann experimentell über die BLE-Connect-Card
 verwendet werden. NightKite Link scannt nach `NK-...`-Geräten oder der
 NightKite-Service-UUID, verbindet genau einen Controller und nutzt denselben
 NK4-Parser wie USB. TX-Notify-Chunks werden bis zum Zeilenende `\n`
@@ -420,18 +410,18 @@ Controller-Firmware so etwas später anbietet.
 
 ## Zwei-Controller-Sync-Setup-Test
 
-Für Firmware-4.0-Controller mit USB NK4 bietet Sync Setup einen geführten
-Ablauf für Rolle, Gruppe, Wireless-Profil, Apply, Save und Diagnostics.
+Für Firmware-4.0-Controller mit USB NK4 bietet die Sync-Setup-Test-Card einen
+kompakten Setup- und Diagnoseablauf für die ersten Master/Follower-Beacon-Tests.
 Sie ist nur Konfigurator und Diagnoseansicht. BLE NK4 kann zur Konfiguration
 genutzt werden, ist aber kein Echtzeit-Sync-Pfad und leitet keinen Sync weiter.
 
 Typischer Master-Ablauf:
 
 1. Controller A per USB verbinden und `USB NK4` prüfen.
-2. Sync Setup öffnen.
+2. Sync Setup Test öffnen.
 3. Gruppe wählen, meist `Group 1`, und Wireless-Profil wählen, meist
    `balanced`.
-4. Master wählen und `Apply` ausführen.
+4. `Configure Master` ausführen.
 5. `Save` ausführen.
 
 `Configure Master` stellt folgende Befehle in die Queue:
@@ -532,7 +522,7 @@ USB-Mass-Storage-Modus des RP2040/RP2350-Controllers.
 Aktueller Ablauf:
 
 1. Eine `.uf2`-Firmwaredatei nach `/firmware/` auf der SD-Karte kopieren.
-2. `SERVICE` > Firmware Update öffnen oder `9` drücken.
+2. Firmware Update öffnen.
 3. UF2-Datei mit `W` / `S` auswählen.
 4. Ziellabel mit `C` wählen (`RP2040` oder `RP2350`).
 5. `Enter` drücken.

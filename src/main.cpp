@@ -7,7 +7,6 @@
 #include "SoundManager.h"
 #include "CardputerAudioSync.h"
 #include "ControllerBatteryParser.h"
-#include "UiRouting.h"
 #include "Uf2Validator.h"
 #include "UsbMscUf2Flasher.h"
 #include <BLEDevice.h>
@@ -38,7 +37,7 @@ constexpr uint16_t COLOR_ERR = 0xF800;
 constexpr int SCREEN_W = 240;
 constexpr int SCREEN_H = 135;
 constexpr int STATUS_H = 14;
-constexpr int FOOTER_H = 16;
+constexpr int FOOTER_H = 13;
 constexpr int CONTENT_Y = STATUS_H;
 constexpr int CONTENT_H = SCREEN_H - STATUS_H - FOOTER_H;
 constexpr int MAX_CLI_LINE_CHARS = 4096;
@@ -344,14 +343,13 @@ constexpr int CARD_COUNT = 17;
 
 enum class Mode : uint8_t {
   Cards,
+  PatternDetail,
   ConfirmBulk,
   ConfirmProfileDelete,
   ProfileNameInput,
   ConfirmProfileOverwrite,
   ConfirmProfileApply,
   ConfirmFactoryReset,
-  DeviceNameInput,
-  Help,
 };
 
 enum class FlashUiState : uint8_t {
@@ -409,14 +407,8 @@ struct AppState {
   String profileNameInput;
   String pendingProfileName;
   String pendingProfilePath;
-  UiArea area = UiArea::Live;
-  UiView view = UiView::LiveHome;
-  UiView previousView = UiView::LiveHome;
-  int selectedHubItem = 0;
-  // ponytail: legacy backend dispatch adapter; navigation is owned by area/view above.
   int selectedCard = 0;
-  int selectedPatternId = 1;
-  int selectedPatternField = 0;
+  int selectedPatternIndex = 0;
   int selectedBleIndex = 0;
   int selectedBeaconMasterField = 0;
   int selectedProfileAction = 0;
@@ -483,6 +475,8 @@ bool startupSoundPlayed = false;
 unsigned long splashStartMs = 0;
 String editValue;
 bool editBool = false;
+bool detailCycle = false;
+bool detailInvert = false;
 bool brightnessDirty = false;
 bool patternDirty = false;
 int draftBrightness = -1;
@@ -507,7 +501,6 @@ bool draftWirelessEnabled = false;
 String draftWirelessProfile = "unknown";
 int syncTestGroup = 1;
 String syncTestProfile = "balanced";
-String syncTestRole = "standalone";
 uint8_t configDirtyMask = 0;
 uint8_t playDirtyMask = 0;
 uint8_t syncDirtyMask = 0;
@@ -537,35 +530,6 @@ bool ensureSdReady();
 void syncEditFromCard();
 void discardAllDrafts();
 String beaconAgeText();
-String bytesKb(size_t bytes);
-
-Card activeCard()
-{
-  switch (app.view) {
-    case UiView::Pattern: return Card::PatternList;
-    case UiView::Brightness: return Card::Brightness;
-    case UiView::Play: return Card::Play;
-    case UiView::AudioRun:
-    case UiView::AudioTune: return Card::BeaconMaster;
-    case UiView::Profiles: return Card::Profiles;
-    case UiView::StripSmooth: return Card::Config;
-    case UiView::Motion: return Card::Calibration;
-    case UiView::Wireless: return Card::Wireless;
-    case UiView::DeviceName:
-    case UiView::SaveDefaults: return Card::Device;
-    case UiView::SyncSetup: return Card::SyncTest;
-    case UiView::SyncDiagnostics: return Card::SyncDiag;
-    case UiView::Connect: return Card::Ble;
-    case UiView::StatusDump: return Card::Device;
-    case UiView::Firmware: return Card::Firmware;
-    case UiView::LiveHome:
-    case UiView::SetupHub:
-    case UiView::ServiceHub:
-    case UiView::Confirm:
-    case UiView::Help:
-    default: return Card::Status;
-  }
-}
 
 bool flashCopyAudioQuiet()
 {
@@ -1148,13 +1112,6 @@ struct BeaconMasterSettings {
 };
 
 BeaconMasterSettings beaconMasterSettings;
-BeaconMasterSettings audioTuneOriginal;
-BeaconMasterSettings audioTuneDraft;
-bool audioTuneDirty = false;
-bool controllerUnsaved = false;
-PatternPersistenceState patternPersistence;
-bool profileRenamePending = false;
-String profileRenameSource;
 unsigned long beaconMasterLastTapMs = 0;
 CardputerAudioSync cardputerAudioSync;
 
@@ -1925,46 +1882,12 @@ uint32_t controllerPatternMask()
   return patternMaskForCount(controllerPatternCount());
 }
 
-char patternClassTag(int patternId);
-
 const char* patternName(int patternId)
 {
   if (patternId >= 1 && patternId <= PATTERN_COUNT) {
     return PATTERN_NAMES[patternId];
   }
   return "--";
-}
-
-const char* patternCategory(int patternId)
-{
-  if (isAudioPattern(patternId)) {
-    return "AUDIO";
-  }
-  switch (patternId) {
-    case 3:
-    case 17:
-    case 22:
-      return "MOTION";
-    case 5:
-    case 11:
-    case 12:
-    case 13:
-    case 20:
-    case 21:
-      return "REACTIVE";
-    default:
-      return "BASIC";
-  }
-}
-
-const char* patternClassLabel(int patternId)
-{
-  switch (patternClassTag(patternId)) {
-    case 'S': return "SYNC";
-    case 'P': return "PARTIAL";
-    case 'L': return "LOCAL";
-    default: return "UNKNOWN";
-  }
 }
 
 void ensurePatternModel()
@@ -1980,23 +1903,6 @@ void ensurePatternModel()
     pattern.name = patternName(id);
     app.settings.patterns.push_back(pattern);
   }
-}
-
-int getPatternIndexById(int patternId)
-{
-  ensurePatternModel();
-  for (size_t index = 0; index < app.settings.patterns.size(); ++index) {
-    if (app.settings.patterns[index].id == patternId) {
-      return static_cast<int>(index);
-    }
-  }
-  return -1;
-}
-
-PatternConfig* getPatternMetaById(int patternId)
-{
-  int index = getPatternIndexById(patternId);
-  return index >= 0 ? &app.settings.patterns[index] : nullptr;
 }
 
 void applyPatternMasks(uint32_t enabledMask, uint32_t invertedMask, bool updateEnabled, bool updateInverted)
@@ -2157,22 +2063,6 @@ uint32_t currentInvertedMask()
   return mask;
 }
 
-void markPatternUnsaved()
-{
-  patternPersistence.markChanged();
-  controllerUnsaved = true;
-  app.dirty = true;
-}
-
-void confirmControllerSave()
-{
-  int activePattern = app.settings.activePattern >= 1 ? app.settings.activePattern : app.selectedPatternId;
-  patternPersistence.confirmSave(activePattern, currentEnabledMask(), currentInvertedMask());
-  app.patternEditsPending = false;
-  controllerUnsaved = false;
-  app.dirty = true;
-}
-
 String shortText(String text, int chars);
 
 class NightKiteCommands {
@@ -2323,9 +2213,6 @@ String nk4CommandLabel(const String& command);
 
 void enqueueCommandEntry(const String& command, bool nk4Raw = false, CommandClass commandClass = CommandClass::User)
 {
-  if (command == "save" || command == "cmd=save") {
-    patternPersistence.requestSave();
-  }
   CommandQueueEntry entry;
   entry.command = command;
   entry.nk4Raw = nk4Raw;
@@ -2337,7 +2224,6 @@ void enqueueCommandEntry(const String& command, bool nk4Raw = false, CommandClas
       if (it->commandClass == CommandClass::OptionalInit || it->commandClass == CommandClass::Poll) {
         commandQueue.insert(it, entry);
         app.lastCommand = command;
-        app.dirty = true;
         Serial.print("bleq: user priority label=");
         Serial.println(nk4CommandLabel(command));
         return;
@@ -2346,7 +2232,6 @@ void enqueueCommandEntry(const String& command, bool nk4Raw = false, CommandClas
   }
   commandQueue.push_back(entry);
   app.lastCommand = command;
-  app.dirty = true;
 }
 
 void queueBleInitialRefresh()
@@ -2435,7 +2320,6 @@ void handleNk4CommandOk(const String& command)
     return;
   }
   if (command == "cmd=save") {
-    confirmControllerSave();
     setStatus("Saved", COLOR_OK);
     return;
   }
@@ -2937,19 +2821,6 @@ int dirtyDraftCount()
   return count;
 }
 
-String pendingFieldsText()
-{
-  String fields;
-  if (brightnessDirty) fields += "BRI ";
-  if (patternDirty || app.patternEditsPending || patternPersistence.unsaved) fields += "PAT ";
-  if (playDirtyMask) fields += "PLAY ";
-  if (configDirtyMask) fields += "SET ";
-  if (wirelessDirtyMask) fields += "RAD ";
-  if (controllerUnsaved) fields += "SAVE";
-  fields.trim();
-  return fields;
-}
-
 bool autoRefreshPaused()
 {
   if (dirtyDraftCount() > 0 || nk4Pending || !commandQueue.empty()) {
@@ -3073,48 +2944,30 @@ void drawStatusBar()
 {
   auto& d = uiCanvas;
   d.fillRect(0, 0, SCREEN_W, STATUS_H, COLOR_PANEL_DARK);
-  String controller = app.controllerConnected ? shortText(controllerLabel(), 7) : "--";
-  int queued = static_cast<int>(commandQueue.size()) + (nk4Pending ? 1 : 0);
-  bool queueWarning = app.controllerError || app.bleState == BleClientState::Error || app.bleState == BleClientState::Lost;
-  String queueToken = queueWarning ? "Q!" : queued > 9 ? "Q9+" : "Q" + String(queued);
-  String modeToken = app.play.playMode == "sync"
-                         ? (app.sync.role == "follower" ? "FOL" : app.sync.role == "master" ? "MAS" : "SYNC") +
-                               String(" G") + showInt(app.sync.group)
-                         : app.play.playMode == "autoplay" ? "AUTO" : "MAN";
-  String controllerBattery =
-      app.settings.controllerBatteryPercent >= 0 ? String(app.settings.controllerBatteryPercent) : "--";
-  String linkBattery = app.cardputerBatteryPercent >= 0 ? String(app.cardputerBatteryPercent) : "--";
-  String line = String(transportToken()) + " " + protocolToken() + " " + controller + " " + queueToken + " " +
-                modeToken + " C" + controllerBattery + " L" + linkBattery;
-  drawTextFit(line, 3, 4, SCREEN_W - 6, queueWarning ? COLOR_WARN : COLOR_TEXT, COLOR_PANEL_DARK);
+  String cp = app.cardputerBatteryPercent >= 0 ? String(app.cardputerBatteryPercent) + "%" : "--";
+  String transport = connectionToken();
+  String play = app.protocolMode == ProtocolMode::Nk4 ? playToken() + "/" + roleToken() : "CTRL";
+  bool cliBusy = !commandQueue.empty() || patternSyncInProgress;
+  int queuedCount = static_cast<int>(commandQueue.size());
+  String queueText = nk4Pending && queuedCount > 0 ? "Q:1+" + String(queuedCount) : "Q:" + String(queuedCount + (nk4Pending ? 1 : 0));
+  uint16_t queueColor = cliBusy ? COLOR_WARN : COLOR_MUTED;
+  String nkStatus = controllerBatteryStatusText();
+
+  drawTextFit(transport, 3, 4, 48, app.controllerError ? COLOR_WARN : COLOR_TEXT, COLOR_PANEL_DARK);
+  drawTextFit(play, 54, 4, 43, app.protocolMode == ProtocolMode::Nk4 ? COLOR_OK : COLOR_MUTED, COLOR_PANEL_DARK);
+  drawTextFit(queueText, 100, 4, 48, queueColor, COLOR_PANEL_DARK);
+  if (app.controllerConnected && app.settings.hasControllerBattery) {
+    const bool batteryWarning = compactControllerBatteryStateLabel(app.settings.controllerBatteryState.c_str())[0] != '\0';
+    drawTextFit(nkStatus, 151, 4, 47, batteryWarning ? COLOR_WARN : COLOR_OK, COLOR_PANEL_DARK);
+  }
+  drawTextFit(String("L:") + cp, 201, 4, 36, app.cardputerCharging ? COLOR_OK : COLOR_ACCENT, COLOR_PANEL_DARK);
 }
 
 void drawFooter(const String& help)
 {
   auto& d = uiCanvas;
   d.fillRect(0, SCREEN_H - FOOTER_H, SCREEN_W, FOOTER_H, COLOR_PANEL);
-  drawTextFit(help, 3, SCREEN_H - 11, SCREEN_W - 6, COLOR_MUTED, COLOR_PANEL);
-}
-
-void drawFooterHints(const String& primary, const String& secondary = "", const String& tertiary = "")
-{
-  auto& d = uiCanvas;
-  d.fillRect(0, SCREEN_H - FOOTER_H, SCREEN_W, FOOTER_H, COLOR_PANEL);
-  d.setFont(&fonts::Font0);
-  d.setTextSize(1);
-  String line = primary;
-  const String hints[] = {secondary, tertiary};
-  for (const String& hint : hints) {
-    if (hint.length() == 0) {
-      continue;
-    }
-    String candidate = line + "  " + hint;
-    if (d.textWidth(candidate) > SCREEN_W - 6) {
-      break;
-    }
-    line = candidate;
-  }
-  drawTextFit(line, 3, SCREEN_H - 11, SCREEN_W - 6, COLOR_MUTED, COLOR_PANEL);
+  drawTextFit(help, 3, SCREEN_H - 9, SCREEN_W - 6, COLOR_MUTED, COLOR_PANEL);
 }
 
 void drawTitle(const String& title)
@@ -3132,75 +2985,6 @@ void drawBigValue(const String& value, int y, uint16_t color = COLOR_ACCENT)
   d.setFont(&fonts::Font0);
 }
 
-void drawHeroValue(const String& value, int y, uint16_t color = COLOR_ACCENT)
-{
-  drawBigValue(value, y, color);
-}
-
-void drawSlider(int x, int y, int w, int value, int minValue, int maxValue, uint16_t color = COLOR_ACCENT)
-{
-  drawBar(x, y, w, 9, value, minValue, maxValue, color);
-}
-
-void drawChips(const String& chips, int x, int y, uint16_t color = COLOR_ACCENT)
-{
-  uiCanvas.fillRoundRect(x, y, min(226, static_cast<int>(chips.length()) * 6 + 10), 15, 3, COLOR_PANEL_DARK);
-  drawTextFit(chips, x + 5, y + 5, 216, color, COLOR_PANEL_DARK);
-}
-
-void drawUnsavedBadge(bool unsaved)
-{
-  if (!unsaved) {
-    return;
-  }
-  uiCanvas.fillRoundRect(178, CONTENT_Y + 3, 54, 14, 3, COLOR_WARN);
-  drawTextFit("UNSAVED", 184, CONTENT_Y + 7, 44, COLOR_BG, COLOR_WARN);
-}
-
-void drawToast()
-{
-  drawTextFit(shortText(app.statusMessage, 36), 8, CONTENT_Y + CONTENT_H - 10, 224, app.statusColor);
-}
-
-void drawHubList(const char* title, const char* const* entries, int count, int selected)
-{
-  drawTextFit(title, 8, CONTENT_Y + 5, 120, COLOR_MUTED);
-  for (int i = 0; i < count; ++i) {
-    int y = CONTENT_Y + 22 + i * 18;
-    bool active = i == selected;
-    uint16_t bg = active ? COLOR_ACCENT_DARK : COLOR_PANEL_DARK;
-    uiCanvas.fillRoundRect(8, y, 224, 16, 2, bg);
-    drawTextFit(String(active ? "> " : "  ") + entries[i], 14, y + 5, 210, active ? COLOR_TEXT : COLOR_MUTED, bg);
-  }
-}
-
-void drawFieldList(const char* const* labels, const String* values, int count, int selected, uint8_t dirtyMask = 0)
-{
-  for (int i = 0; i < count; ++i) {
-    int y = CONTENT_Y + 22 + i * 17;
-    bool active = i == selected;
-    uint16_t bg = active ? COLOR_ACCENT_DARK : COLOR_PANEL_DARK;
-    uiCanvas.fillRoundRect(8, y, 224, 15, 2, bg);
-    drawTextFit(String(active ? "> " : "  ") + labels[i] + ((dirtyMask & (1 << i)) ? "*" : ""), 13, y + 5, 112,
-                (dirtyMask & (1 << i)) ? COLOR_WARN : COLOR_MUTED, bg);
-    drawTextFit(values[i], 130, y + 5, 96, active ? COLOR_TEXT : COLOR_ACCENT, bg);
-  }
-}
-
-void drawConfirm(const String& title, const String& detail)
-{
-  drawTextFit(title, 14, CONTENT_Y + 30, 212, COLOR_WARN);
-  drawTextFit(detail, 14, CONTENT_Y + 54, 212, COLOR_TEXT);
-  drawFooter("ENTER confirm  DEL cancel");
-}
-
-void drawProgress(int percent, size_t copiedBytes, size_t totalBytes)
-{
-  drawSlider(12, CONTENT_Y + 43, 160, percent, 0, 100, COLOR_OK);
-  drawTextFit(String(percent) + "%", 183, CONTENT_Y + 46, 45, COLOR_OK);
-  drawTextFit(bytesKb(copiedBytes) + " / " + bytesKb(totalBytes) + " KB", 12, CONTENT_Y + 65, 150, COLOR_TEXT);
-}
-
 void drawStatusTile(int x, int y, int w, int h, const String& label, const String& value, uint16_t color)
 {
   auto& d = uiCanvas;
@@ -3214,26 +2998,19 @@ void drawStatusTile(int x, int y, int w, int h, const String& label, const Strin
 
 void drawStatusCard()
 {
-  int pattern = app.settings.activePattern;
-  drawTextFit("LIVE", 8, CONTENT_Y + 5, 50, COLOR_MUTED);
-  drawHeroValue(pattern >= 0 ? String(pattern) : "--", CONTENT_Y + 20);
-  drawTextFit(patternName(pattern), 64, CONTENT_Y + 25, 166, COLOR_TEXT);
-  drawTextFit("Brightness " + showInt(app.settings.brightness), 64, CONTENT_Y + 43, 120, COLOR_MUTED);
-  drawSlider(64, CONTENT_Y + 56, 164, app.settings.brightness, 0, 255);
-  String state = app.play.playMode == "sync"
-                     ? String("SYNC ") + roleToken() + " G" + showInt(app.sync.group) +
-                           (app.sync.locked ? " LOCK" : " WAIT")
-                     : app.play.playMode;
-  if (beaconBroadcaster.active()) {
-    state += " AUDIO";
-  }
-  drawChips(state, 8, CONTENT_Y + 68, app.sync.locked ? COLOR_OK : COLOR_ACCENT);
-  String pending = pendingFieldsText();
-  drawTextFit(pending.length() ? "Pending: " + pending : "Saved", 8, CONTENT_Y + 86, 224,
-              pending.length() ? COLOR_WARN : COLOR_MUTED);
-  drawUnsavedBadge(dirtyDraftCount() > 0 || controllerUnsaved);
-  drawToast();
-  drawFooter("ENTER refresh  1 Pat 2 Bri 7 Save");
+  drawTitle("Status");
+  drawStatusTile(6, CONTENT_Y + 25, 53, 27, "USB", app.usbConnected ? "OK" : "--", app.usbConnected ? COLOR_OK : COLOR_WARN);
+  drawStatusTile(64, CONTENT_Y + 25, 53, 27, "CTRL", app.controllerConnected ? (app.controllerError ? "ERR" : "OK") : "--",
+                 app.controllerError ? COLOR_ERR : (app.controllerConnected ? COLOR_OK : COLOR_WARN));
+  drawStatusTile(122, CONTENT_Y + 25, 53, 27, "Bright", showInt(app.settings.brightness), COLOR_ACCENT);
+  drawStatusTile(181, CONTENT_Y + 25, 53, 27, "Pattern", showInt(app.settings.activePattern), COLOR_ACCENT);
+
+  drawStatusTile(6, CONTENT_Y + 58, 53, 27, "Strip", showInt(app.settings.stripLength), COLOR_TEXT);
+  drawStatusTile(64, CONTENT_Y + 58, 53, 27, "Smooth", showInt(app.settings.smoothing), COLOR_TEXT);
+  drawStatusTile(122, CONTENT_Y + 58, 53, 27, "Auto", app.settings.autoplayEnabled ? "ON" : "OFF",
+                 app.settings.autoplayEnabled ? COLOR_OK : COLOR_MUTED);
+  drawStatusTile(181, CONTENT_Y + 58, 53, 27, "Int", showInt(app.settings.autoplayIntervalSeconds) + "s", COLOR_TEXT);
+  drawFooter("A/D cards  R refresh");
 }
 
 void drawDeviceCard()
@@ -3255,23 +3032,22 @@ void drawDeviceCard()
               COLOR_TEXT);
   drawTextFit("Cfg " + app.diagnostics.configValid, 125, CONTENT_Y + 74, 105,
               app.diagnostics.configValid == "1" || app.diagnostics.configValid == "true" ? COLOR_OK : COLOR_MUTED);
-  drawFooter("ENTER refresh  R refresh  DEL back");
+  drawFooter(app.transportMode == TransportMode::Ble ? "R read  S save  B BLE disc" : "R read  S save  C USB  F defaults");
 }
 
 void drawBleCard()
 {
-  drawTextFit("CONNECT", 8, CONTENT_Y + 5, 90, COLOR_MUTED);
+  drawTextFit("BLE Connect", 8, CONTENT_Y + 5, 90, COLOR_MUTED);
   String status = app.transportMode == TransportMode::Ble && app.protocolMode == ProtocolMode::Nk4
                       ? "Conn " + shortText(controllerLabel(), 10)
                       : app.bleStatus;
-  drawTextFit(String("USB ") + (app.usbConnected ? protocolToken() : "--") + "  BLE " + shortText(status, 10), 88,
-              CONTENT_Y + 5, 144,
+  drawTextFit(status.length() ? status : "BLE idle", 112, CONTENT_Y + 5, 120,
               app.transportMode == TransportMode::Ble ? COLOR_OK : COLOR_ACCENT);
-  drawChips("USB preferred/stable  BLE experimental", 8, CONTENT_Y + 19, COLOR_WARN);
   if (app.bleDevices.empty()) {
-    drawTextFit("No NK BLE scan result", 12, CONTENT_Y + 45, 180, COLOR_MUTED);
+    drawTextFit("No NK BLE", 12, CONTENT_Y + 35, 130, COLOR_MUTED);
+    drawTextFit("S scan", 12, CONTENT_Y + 53, 80, COLOR_ACCENT);
   } else {
-    int visible = 3;
+    int visible = 4;
     int start = 0;
     if (app.selectedBleIndex >= visible) {
       start = app.selectedBleIndex - visible + 1;
@@ -3279,7 +3055,7 @@ void drawBleCard()
     for (int row = 0; row < visible && start + row < static_cast<int>(app.bleDevices.size()); ++row) {
       int idx = start + row;
       const auto& device = app.bleDevices[idx];
-      int y = CONTENT_Y + 40 + row * 18;
+      int y = CONTENT_Y + 20 + row * 18;
       bool active = idx == app.selectedBleIndex;
       uint16_t bg = active ? COLOR_ACCENT_DARK : COLOR_PANEL_DARK;
       uiCanvas.fillRoundRect(6, y, 228, 16, 2, bg);
@@ -3290,7 +3066,7 @@ void drawBleCard()
       drawTextFit(shortText(device.address, 14), 148, y + 5, 82, COLOR_MUTED, bg);
     }
   }
-  drawFooter("R scan ENTER connect D disconnect B USB reset");
+  drawFooter("S scan  ENTER conn  D disc  B reset");
 }
 
 const char* const BEACON_MASTER_MANUAL_FIELDS[] = {
@@ -3307,37 +3083,32 @@ int activeBeaconMasterFieldCount()
                                                                   : BEACON_MASTER_FIELD_COUNT;
 }
 
-int beaconMasterFieldCount(const BeaconMasterSettings& settings)
-{
-  return settings.mode == BeaconMasterMode::V1Manual ? BEACON_MASTER_V1_FIELD_COUNT : BEACON_MASTER_FIELD_COUNT;
-}
-
-String beaconMasterFieldValueFor(const BeaconMasterSettings& settings, int field)
+String beaconMasterFieldValue(int field)
 {
   switch (field) {
     case 0: return beaconBroadcaster.active() ? "ON" : "OFF";
-    case 1: return beaconModeShortLabel(settings.mode);
-    case 2: return String(settings.group);
-    case 3: return String(settings.pattern);
-    case 4: return String(settings.brightness);
-    case 5: return String(settings.bpm);
+    case 1: return beaconModeShortLabel(beaconMasterSettings.mode);
+    case 2: return String(beaconMasterSettings.group);
+    case 3: return String(beaconMasterSettings.pattern);
+    case 4: return String(beaconMasterSettings.brightness);
+    case 5: return String(beaconMasterSettings.bpm);
     case 6:
-      return beaconModeUsesMic(settings) ? String(settings.sensitivity) : String(settings.energy);
+      return beaconModeUsesMic(beaconMasterSettings) ? String(beaconMasterSettings.sensitivity)
+                                                     : String(beaconMasterSettings.energy);
     case 7:
-      return beaconModeUsesMic(settings) ? String(settings.noiseGate) : String(settings.bass);
+      return beaconModeUsesMic(beaconMasterSettings) ? String(beaconMasterSettings.noiseGate)
+                                                     : String(beaconMasterSettings.bass);
     case 8:
-      return beaconModeUsesMic(settings) ? String(settings.smoothing) : String(settings.mid);
+      return beaconModeUsesMic(beaconMasterSettings) ? String(beaconMasterSettings.smoothing)
+                                                     : String(beaconMasterSettings.mid);
     case 9:
-      return beaconModeUsesMic(settings) ? (settings.beatDetect ? "ON" : "OFF") : String(settings.treble);
+      return beaconModeUsesMic(beaconMasterSettings) ? (beaconMasterSettings.beatDetect ? "ON" : "OFF")
+                                                     : String(beaconMasterSettings.treble);
     case 10:
-      return beaconModeUsesMic(settings) ? (settings.micPaused ? "ON" : "OFF") : String(settings.confidence);
+      return beaconModeUsesMic(beaconMasterSettings) ? (beaconMasterSettings.micPaused ? "ON" : "OFF")
+                                                     : String(beaconMasterSettings.confidence);
     default: return "--";
   }
-}
-
-String beaconMasterFieldValue(int field)
-{
-  return beaconMasterFieldValueFor(beaconMasterSettings, field);
 }
 
 void drawManualBeaconMasterCard()
@@ -3431,53 +3202,6 @@ void drawBeaconMasterCard()
                                         : "ENT start  C field  W/S edit  T tap");
 }
 
-void drawAudioRunView()
-{
-  AudioSyncDspOutput audio = currentAudioOutput(beaconMasterSettings);
-  BeaconAudioValues values = effectiveBeaconAudioValues(beaconMasterSettings);
-  drawTextFit("AUDIO BEACON", 8, CONTENT_Y + 5, 100, COLOR_MUTED);
-  drawChips(String(beaconBroadcaster.active() ? "RUNNING" : "STOPPED") + "  " +
-                beaconModeShortLabel(beaconMasterSettings.mode),
-            8, CONTENT_Y + 20, beaconBroadcaster.active() ? COLOR_OK : COLOR_WARN);
-  drawTextFit("G" + String(beaconMasterSettings.group) + "  P" + String(beaconMasterSettings.pattern) + " " +
-                  shortText(patternName(beaconMasterSettings.pattern), 16),
-              8, CONTENT_Y + 41, 222, COLOR_TEXT);
-  drawTextFit("BRI " + String(beaconMasterSettings.brightness) + "  BPM " + String(audio.bpm) + "  BEAT " +
-                  (values.beat ? "*" : "-"),
-              8, CONTENT_Y + 55, 222, values.beat ? COLOR_OK : COLOR_ACCENT);
-  drawTextFit("CONF " + String(values.confidence) + "  ENERGY " + String(values.energy), 8, CONTENT_Y + 69, 222,
-              COLOR_TEXT);
-  if (beaconModeUsesFullAudio(beaconMasterSettings)) {
-    drawTextFit("B " + String(values.bass) + "  M " + String(values.mid) + "  T " + String(values.treble), 8,
-                CONTENT_Y + 83, 150, COLOR_MUTED);
-  }
-  drawTextFit("TX " + String(beaconBroadcaster.currentSeq()) + "  " + shortText(beaconBroadcaster.status(), 18), 128,
-              CONTENT_Y + 83, 104, beaconBroadcaster.active() ? COLOR_OK : COLOR_WARN);
-  drawFooterHints(beaconBroadcaster.active() ? "Ent Stop" : "Ent Start", "C Tune", "Back");
-}
-
-void drawAudioTuneView()
-{
-  const char* const* labels = beaconModeUsesMic(audioTuneDraft) ? BEACON_MASTER_MIC_FIELDS
-                                                                : BEACON_MASTER_MANUAL_FIELDS;
-  int fieldCount = beaconMasterFieldCount(audioTuneDraft);
-  int selected = constrain(app.selectedBeaconMasterField, 1, fieldCount - 1);
-  int start = constrain(selected - 2, 1, max(1, fieldCount - 5));
-  drawTextFit("AUDIO TUNE", 8, CONTENT_Y + 5, 100, COLOR_MUTED);
-  for (int row = 0; row < 5 && start + row < fieldCount; ++row) {
-    int field = start + row;
-    int y = CONTENT_Y + 21 + row * 17;
-    bool active = field == selected;
-    uint16_t bg = active ? COLOR_ACCENT_DARK : COLOR_PANEL_DARK;
-    uiCanvas.fillRoundRect(8, y, 224, 15, 2, bg);
-    drawTextFit(String(active ? "> " : "  ") + labels[field], 13, y + 5, 112, COLOR_MUTED, bg);
-    drawTextFit(beaconMasterFieldValueFor(audioTuneDraft, field), 130, y + 5, 96,
-                active ? COLOR_TEXT : COLOR_ACCENT, bg);
-  }
-  drawUnsavedBadge(audioTuneDirty);
-  drawFooterHints("^v Field", "<> Value", "Ent Apply");
-}
-
 const char* const PLAY_MODES[] = {"manual", "autoplay", "sync"};
 constexpr int PLAY_MODE_COUNT = sizeof(PLAY_MODES) / sizeof(PLAY_MODES[0]);
 const char* const BOOT_MODES[] = {"last", "manual", "autoplay", "sync"};
@@ -3509,39 +3233,35 @@ String optionWithDelta(const char* const* options, int count, const String& valu
 
 void drawPlayCard()
 {
-  drawTextFit("PLAY", 8, CONTENT_Y + 5, 70, COLOR_MUTED);
+  drawTextFit(String("Play") + (playDirtyMask ? "*" : ""), 8, CONTENT_Y + 5, 70, playDirtyMask ? COLOR_WARN : COLOR_MUTED);
   String unavailable = !app.usbConnected ? "No controller"
                        : (usbProbePending || app.protocolMode == ProtocolMode::Probing) ? "Detecting..."
                                                                                         : "NK4 required";
-  String modeValue = (playDirtyMask & PLAY_DIRTY_MODE) ? draftPlayMode : app.play.playMode;
-  drawChips(String(modeValue == "manual" ? "[MANUAL]" : "MANUAL") + "  " +
-                (modeValue == "autoplay" ? "[AUTO]" : "AUTO") + "  " +
-                (modeValue == "sync" ? "[SYNC]" : "SYNC"),
-            8, CONTENT_Y + 21);
-  const char* labels[] = {"Mode", "Boot", "Autoplay", "Interval"};
+  String labels[] = {"Mode", "Boot", "Auto", "Interval"};
   String values[] = {
-      modeValue,
+      (playDirtyMask & PLAY_DIRTY_MODE) ? draftPlayMode : app.play.playMode,
       (playDirtyMask & PLAY_DIRTY_BOOT) ? draftBootMode : app.play.bootMode,
       ((playDirtyMask & PLAY_DIRTY_AUTOPLAY) ? draftPlayAutoplayEnabled : app.settings.autoplayEnabled) ? "ON" : "OFF",
-      modeValue == "autoplay"
-          ? showInt((playDirtyMask & PLAY_DIRTY_INTERVAL) ? draftPlayAutoplayIntervalSeconds
-                                                          : app.settings.autoplayIntervalSeconds) +
-                " s"
-          : "--",
+      showInt((playDirtyMask & PLAY_DIRTY_INTERVAL) ? draftPlayAutoplayIntervalSeconds
+                                                     : app.settings.autoplayIntervalSeconds) +
+          "s",
   };
   for (int i = 0; i < 4; ++i) {
-    int y = CONTENT_Y + 40 + i * 15;
+    int x = 8 + (i % 2) * 116;
+    int y = CONTENT_Y + 24 + (i / 2) * 34;
     bool active = i == app.selectedPlayField;
     uint16_t bg = active ? COLOR_ACCENT_DARK : COLOR_PANEL_DARK;
-    uiCanvas.fillRoundRect(8, y, 224, 13, 2, bg);
-    drawTextFit(String(active ? "> " : "  ") + labels[i] + ((playDirtyMask & (1 << i)) ? "*" : ""), 13, y + 4,
-                112, (playDirtyMask & (1 << i)) ? COLOR_WARN : COLOR_MUTED, bg);
-    drawTextFit(values[i], 130, y + 4, 96, active ? COLOR_TEXT : COLOR_ACCENT, bg);
+    uiCanvas.fillRoundRect(x, y, 108, 28, 3, bg);
+    bool dirtyField = (playDirtyMask & (1 << i)) != 0;
+    drawTextFit(String(labels[i]) + (dirtyField ? "*" : ""), x + 5, y + 6, 48, dirtyField ? COLOR_WARN : COLOR_MUTED, bg);
+    drawTextFit(values[i], x + 48, y + 6, 55, active ? COLOR_TEXT : COLOR_ACCENT, bg);
   }
-  drawTextFit("Active P" + showInt(app.settings.activePattern), 150, CONTENT_Y + 5, 80, COLOR_TEXT);
-  drawUnsavedBadge(playDirtyMask != 0 || controllerUnsaved);
-  drawFooter(app.protocolMode == ProtocolMode::Nk4 ? "W/S field A/D draft ENTER apply 7 save"
-                                                   : "ENTER apply - " + unavailable);
+  drawTextFit("SyncAuto " + String(app.sync.syncAutoplay ? "ON" : "OFF") + " M " +
+                  String(app.sync.masterAutoplay ? "ON" : "OFF") + " Next " +
+                  (app.sync.autoplayNextMs >= 0 ? String(app.sync.autoplayNextMs) + "ms" : "--"),
+              10, CONTENT_Y + 92, 218, app.sync.masterAutoplay ? COLOR_OK : COLOR_MUTED);
+  drawFooter(app.protocolMode == ProtocolMode::Nk4 ? (playDirtyMask ? "PEND  ENTER set  DEL cancel" : "C field  W/S edit")
+                                                   : unavailable);
 }
 
 const char* const SYNC_ROLES[] = {"standalone", "master", "follower"};
@@ -3590,8 +3310,8 @@ void drawSyncCard()
 const char* const WIRELESS_PROFILES[] = {"long_range", "balanced", "fast_sync"};
 constexpr int WIRELESS_PROFILE_COUNT = sizeof(WIRELESS_PROFILES) / sizeof(WIRELESS_PROFILES[0]);
 
-const char* const SYNC_TEST_ACTIONS[] = {"Role Master", "Role Follower", "Role Standalone", "Group",
-                                         "Wireless profile", "Apply", "Save", "Diagnostics"};
+const char* const SYNC_TEST_ACTIONS[] = {"Configure Master", "Configure Follower", "Save", "Refresh Sync",
+                                         "Group", "Profile", "Name Master", "Name Follower", "Play SYNC"};
 constexpr int SYNC_TEST_ACTION_COUNT = sizeof(SYNC_TEST_ACTIONS) / sizeof(SYNC_TEST_ACTIONS[0]);
 
 String boolShort(bool value)
@@ -3724,38 +3444,34 @@ void queueSyncTestRoleSetup(const char* role, const char* name)
   }
   int group = selectedSyncTestGroup();
   String profile = selectedSyncTestProfile();
-  if (String(role) == "standalone") {
-    sendCommand("set sync_enabled=0 sync_role=standalone");
-    setStatus("Standalone setup sent", COLOR_ACCENT);
-  } else {
-    sendCommand(String("set name=") + name);
-    sendCommand("set play_mode=sync");
-    sendCommand(String("set sync_enabled=1 sync_group=") + group + " sync_role=" + role);
-    sendCommand("set wireless_enabled=1 wireless_profile=" + profile);
-    setStatus(String(role[0] == 'm' ? "Master" : "Follower") + " setup sent", COLOR_ACCENT);
-  }
+  sendCommand(String("set name=") + name);
+  sendCommand("set play_mode=sync");
+  sendCommand(String("set sync_enabled=1 sync_group=") + group + " sync_role=" + role);
+  sendCommand("set wireless_enabled=1 wireless_profile=" + profile);
+  setStatus(String(role[0] == 'm' ? "Master" : "Follower") + " setup sent", COLOR_ACCENT);
 }
 
 void drawSyncTestCard()
 {
-  drawTextFit("SYNC SETUP", 8, CONTENT_Y + 4, 110, COLOR_MUTED);
-  drawTextFit(shortText(syncTestRole, 9) + " G" + String(selectedSyncTestGroup()), 124, CONTENT_Y + 4, 108, COLOR_ACCENT);
+  drawTextFit("Sync Setup Test", 8, CONTENT_Y + 4, 110, COLOR_MUTED);
+  drawTextFit("G" + String(selectedSyncTestGroup()) + " " + shortText(selectedSyncTestProfile(), 9), 124, CONTENT_Y + 4,
+              108, COLOR_ACCENT);
   if (!app.usbConnected) {
     drawTextFit("No controller", 12, CONTENT_Y + 34, 160, COLOR_WARN);
     drawTextFit("Connect USB", 12, CONTENT_Y + 52, 120, COLOR_MUTED);
-    drawFooter("ENTER select  6 Connect");
+    drawFooter("Disconnected");
     return;
   }
   if (usbProbePending || app.protocolMode == ProtocolMode::Probing) {
     drawTextFit("Detecting...", 12, CONTENT_Y + 34, 150, COLOR_ACCENT);
     drawTextFit("Please wait", 12, CONTENT_Y + 52, 120, COLOR_MUTED);
-    drawFooter("ENTER select  R refresh");
+    drawFooter("USB protocol detect");
     return;
   }
   if (app.protocolMode != ProtocolMode::Nk4) {
     drawTextFit("Firmware 4.0 / NK4", 12, CONTENT_Y + 34, 180, COLOR_WARN);
     drawTextFit("required", 12, CONTENT_Y + 52, 120, COLOR_WARN);
-    drawFooter("ENTER select  USB NK4 required");
+    drawFooter("USB NK4 required");
     return;
   }
 
@@ -3769,24 +3485,35 @@ void drawSyncTestCard()
     int y = CONTENT_Y + 18 + row * 18;
     bool active = idx == app.selectedSyncTestAction;
     uint16_t bg = active ? COLOR_ACCENT_DARK : COLOR_PANEL_DARK;
-    uiCanvas.fillRoundRect(6, y, 118, 16, 2, bg);
+    uiCanvas.fillRoundRect(6, y, 112, 16, 2, bg);
     String label = SYNC_TEST_ACTIONS[idx];
-    if (idx == 3) {
+    if (idx == 4) {
       label += " " + String(selectedSyncTestGroup());
-    } else if (idx == 4) {
+    } else if (idx == 5) {
       label += " " + shortText(selectedSyncTestProfile(), 8);
     }
-    drawTextFit(String(active ? "> " : "  ") + label, 10, y + 5, 110, active ? COLOR_TEXT : COLOR_MUTED, bg);
+    drawTextFit(String(active ? "> " : "  ") + label, 10, y + 5, 104, active ? COLOR_TEXT : COLOR_MUTED, bg);
   }
 
-  drawTextFit("1 Role " + shortText(syncTestRole, 8), 130, CONTENT_Y + 18, 102, COLOR_TEXT);
-  drawTextFit("2 Group " + String(selectedSyncTestGroup()), 130, CONTENT_Y + 32, 102, COLOR_TEXT);
-  drawTextFit("3 Radio " + shortText(selectedSyncTestProfile(), 7), 130, CONTENT_Y + 46, 102, COLOR_TEXT);
-  drawTextFit("4 Apply P " + playToken(), 130, CONTENT_Y + 60, 102, COLOR_ACCENT);
-  drawTextFit("5 Save 6 Diag " + lockedText(), 130, CONTENT_Y + 74, 102, app.sync.locked ? COLOR_OK : COLOR_MUTED);
-  drawTextFit("TX" + String(app.sync.beaconTxCount) + " RX" + String(app.sync.beaconRxCount) + " A" + beaconAgeText(),
-              130, CONTENT_Y + 88, 102, COLOR_TEXT);
-  drawFooterHints("^v Step", "<> Value", "Ent Run");
+  drawTextFit(shortText(controllerLabel(), 12) + " " + shortText(app.identity.shortId, 7), 124, CONTENT_Y + 18, 108,
+              COLOR_TEXT);
+  drawTextFit("P " + playToken() + " " + roleToken() + " G" + showInt(app.sync.group), 124, CONTENT_Y + 32, 108,
+              COLOR_ACCENT);
+  drawTextFit("S " + boolShort(app.sync.enabled) + " " + shortText(app.sync.state, 8) + " " + lockedText(), 124,
+              CONTENT_Y + 46, 108, app.sync.locked ? COLOR_OK : COLOR_MUTED);
+  drawTextFit("R " + radioModeText() + " W " + wirelessProfileText(), 124, CONTENT_Y + 62, 108,
+              app.sync.radioMode == "gatt" ? COLOR_WARN : COLOR_TEXT);
+  drawTextFit("TX " + String(app.sync.beaconTxCount) + " RX " + String(app.sync.beaconRxCount),
+              124, CONTENT_Y + 76, 108, COLOR_TEXT);
+  drawTextFit("E " + String(app.sync.beaconCrcErrors) + "/" + String(app.sync.beaconGroupMismatch) + " A" +
+                  beaconAgeText(),
+              124, CONTENT_Y + 90, 108, (app.sync.beaconCrcErrors || app.sync.beaconGroupMismatch) ? COLOR_WARN : COLOR_MUTED);
+
+  String hint = app.sync.radioMode == "gatt" ? "GATT active - beacon off"
+                : app.sync.role == "master" ? "Master: no BLE client"
+                : app.sync.role == "follower" ? "Follower: expect RX"
+                                              : "USB config only";
+  drawFooter(hint);
 }
 
 void drawSyncDiagCard()
@@ -3794,17 +3521,17 @@ void drawSyncDiagCard()
   drawTextFit("Sync Diagnostics", 8, CONTENT_Y + 4, 108, COLOR_MUTED);
   if (!app.usbConnected) {
     drawTextFit("No controller", 12, CONTENT_Y + 34, 160, COLOR_WARN);
-    drawFooter("ENTER refresh  6 Connect");
+    drawFooter("Disconnected");
     return;
   }
   if (usbProbePending || app.protocolMode == ProtocolMode::Probing) {
     drawTextFit("Detecting...", 12, CONTENT_Y + 34, 150, COLOR_ACCENT);
-    drawFooter("ENTER refresh  detecting");
+    drawFooter("USB protocol detect");
     return;
   }
   if (app.protocolMode != ProtocolMode::Nk4) {
     drawTextFit("Firmware 4.0 / NK4", 12, CONTENT_Y + 34, 180, COLOR_WARN);
-    drawFooter("ENTER refresh  USB NK4 required");
+    drawFooter("USB NK4 required");
     return;
   }
 
@@ -3823,36 +3550,41 @@ void drawSyncDiagCard()
   drawTextFit("Apply " + String(app.sync.syncApplyCount), 124, CONTENT_Y + 62, 108, COLOR_TEXT);
   drawTextFit("Skip " + String(app.sync.syncApplySkipped) + " " + shortText(app.sync.syncApplyReason, 8), 8,
               CONTENT_Y + 76, 108, app.sync.syncApplySkipped > 0 ? COLOR_WARN : COLOR_MUTED);
-  drawTextFit("Reason " + shortText(app.sync.syncApplyReason, 10), 124, CONTENT_Y + 76, 108, COLOR_TEXT);
-  drawTextFit("CRC " + String(app.sync.beaconCrcErrors), 8, CONTENT_Y + 90, 108,
-              app.sync.beaconCrcErrors ? COLOR_WARN : COLOR_MUTED);
-  drawTextFit("Group " + String(app.sync.beaconGroupMismatch), 124, CONTENT_Y + 90, 108,
-              app.sync.beaconGroupMismatch ? COLOR_WARN : COLOR_MUTED);
-  drawFooter("ENTER refresh  R refresh  DEL back");
+  drawTextFit("Lat " + msText(app.sync.lastPatternChangeLatencyMs), 124, CONTENT_Y + 76, 108, COLOR_TEXT);
+  drawTextFit("Auto " + boolShort(app.sync.syncAutoplay) + " M " + boolShort(app.sync.masterAutoplay), 8, CONTENT_Y + 90,
+              108, app.sync.masterAutoplay ? COLOR_OK : COLOR_MUTED);
+  drawTextFit(syncDiagnosticPatternText(), 124, CONTENT_Y + 90, 108, COLOR_TEXT);
+  drawFooter("R refresh  USB config only");
 }
 
 void drawWirelessCard()
 {
-  drawTextFit("WIRELESS", 8, CONTENT_Y + 5, 112, COLOR_MUTED);
+  drawTextFit(String("Controller Radio") + (wirelessDirtyMask ? "*" : ""), 8, CONTENT_Y + 5, 112,
+              wirelessDirtyMask ? COLOR_WARN : COLOR_MUTED);
   String unavailable = !app.usbConnected ? "No controller"
                        : (usbProbePending || app.protocolMode == ProtocolMode::Probing) ? "Detecting..."
                                                                                         : "NK4 required";
-  const char* labels[] = {"Wireless", "Profile"};
+  String labels[] = {"Enable", "Profile", "Radio", "TX", "RX", "CRC"};
   String values[] = {((wirelessDirtyMask & WIRELESS_DIRTY_ENABLED) ? draftWirelessEnabled : app.wireless.enabled) ? "ON" : "OFF",
-                     (wirelessDirtyMask & WIRELESS_DIRTY_PROFILE) ? draftWirelessProfile : app.wireless.profile};
-  drawFieldList(labels, values, 2, app.selectedWirelessField, wirelessDirtyMask);
-  drawChips(String("BLE ") + (app.wireless.bleSupported ? "SUPPORTED" : "--") + " " +
-                (app.wireless.bleEnabled ? "ON" : "OFF"),
-            8, CONTENT_Y + 62);
-  drawTextFit("SYNC " + String(app.wireless.syncRadioActive ? "ACTIVE" : "OFF") + "  RADIO " + radioModeText(), 8,
-              CONTENT_Y + 82, 220, COLOR_TEXT);
-  if (app.wireless.bleConnected || app.sync.radioMode == "gatt") {
-    drawTextFit("GATT may interfere with beacon diagnostics", 8, CONTENT_Y + 96, 224, COLOR_WARN);
+                     (wirelessDirtyMask & WIRELESS_DIRTY_PROFILE) ? draftWirelessProfile : app.wireless.profile, app.sync.radioMode,
+                     String(app.sync.beaconTxCount), String(app.sync.beaconRxCount), String(app.sync.beaconCrcErrors)};
+  for (int i = 0; i < 6; ++i) {
+    int x = 8 + (i % 3) * 76;
+    int y = CONTENT_Y + 20 + (i / 3) * 30;
+    bool editable = i == 0 || i == 1;
+    bool active = editable && i == app.selectedWirelessField;
+    bool dirtyField = (i == 0 && (wirelessDirtyMask & WIRELESS_DIRTY_ENABLED)) ||
+                      (i == 1 && (wirelessDirtyMask & WIRELESS_DIRTY_PROFILE));
+    uint16_t bg = active ? COLOR_ACCENT_DARK : COLOR_PANEL_DARK;
+    uiCanvas.fillRoundRect(x, y, 70, 24, 3, bg);
+    drawTextFit(String(labels[i]) + (dirtyField ? "*" : ""), x + 5, y + 5, 60, dirtyField ? COLOR_WARN : COLOR_MUTED, bg);
+    drawTextFit(values[i], x + 5, y + 16, 60, active ? COLOR_TEXT : COLOR_ACCENT, bg);
   }
-  drawUnsavedBadge(wirelessDirtyMask != 0 || controllerUnsaved);
+  drawTextFit(String("BLE ") + (app.wireless.bleSupported ? "yes" : "--") + " " + shortText(app.wireless.bleName, 12), 10,
+              CONTENT_Y + 82, 218, COLOR_TEXT);
   drawFooter(app.protocolMode == ProtocolMode::Nk4
-                 ? "W/S field A/D draft ENTER apply 7 save"
-                 : "ENTER apply - " + unavailable);
+                 ? (wirelessDirtyMask ? "PEND  ENTER set  DEL cancel" : "C field  W/S edit")
+                 : unavailable);
 }
 
 void drawValueCard(const String& title, const String& value, const String& sub, const String& help)
@@ -3878,10 +3610,8 @@ void drawBrightnessCard()
   d.setTextColor(COLOR_MUTED, COLOR_BG);
   d.drawString("/255", 92, CONTENT_Y + 38);
   d.setFont(&fonts::Font0);
-  drawSlider(10, CONTENT_Y + 75, 218, value, 0, 255, COLOR_ACCENT);
-  drawChips("95 127 159 191 223 255", 10, CONTENT_Y + 88, COLOR_MUTED);
-  drawUnsavedBadge(brightnessDirty || controllerUnsaved);
-  drawFooterHints("<> Value", "Ent Apply", "7 Save");
+  drawBar(10, CONTENT_Y + 75, 150, 9, value, 0, 255, COLOR_ACCENT);
+  drawFooter(brightnessDirty ? "PEND live  DEL cancel" : "W/S live");
 }
 
 void drawPatternCard()
@@ -3904,16 +3634,30 @@ void drawPatternCard()
 
 void drawConfigCard()
 {
-  const char* labels[] = {"Strip length", "Smoothing"};
+  const char* labels[] = {"Strip", "Smooth", "Accel", "Gyro", "Auto", "Interval"};
   String values[] = {
       showInt(draftStripLength) + " LED",
       showInt(draftSmoothing),
+      showInt(draftAccelRange) + "g",
+      showInt(draftGyroRange),
+      draftAutoplayEnabled ? "ON" : "OFF",
+      showInt(draftAutoplayIntervalSeconds) + " s",
   };
-  drawTextFit("STRIP + SMOOTH", 8, CONTENT_Y + 5, 130, COLOR_MUTED);
-  drawFieldList(labels, values, 2, constrain(app.selectedConfigField, 0, 1), configDirtyMask & 0x03);
-  drawChips("FPS " + app.settings.fps + "  BOOT " + app.settings.bootCalibration, 8, CONTENT_Y + 62, COLOR_TEXT);
-  drawUnsavedBadge((configDirtyMask & 0x03) != 0 || controllerUnsaved);
-  drawFooter("W/S field A/D draft ENTER apply 7 save");
+  drawTextFit(String("Controller Setup") + (configDirtyMask ? "*" : ""), 8, CONTENT_Y + 6, 140,
+              configDirtyMask ? COLOR_WARN : COLOR_MUTED);
+  for (int i = 0; i < 6; ++i) {
+    int x = 8 + (i % 3) * 76;
+    int y = CONTENT_Y + 25 + (i / 3) * 34;
+    int w = 70;
+    bool active = i == app.selectedConfigField;
+    bool dirtyField = (configDirtyMask & configFieldMask(i)) != 0;
+    uint16_t bg = active ? COLOR_ACCENT_DARK : COLOR_PANEL_DARK;
+    uiCanvas.fillRoundRect(x, y, w, 28, 3, bg);
+    drawTextFit(String(labels[i]) + (dirtyField ? "*" : ""), x + 5, y + 6, w - 10,
+                dirtyField ? COLOR_WARN : COLOR_MUTED, bg);
+    drawTextFit(values[i], x + 5, y + 18, w - 10, active ? COLOR_TEXT : COLOR_ACCENT, bg);
+  }
+  drawFooter(configDirtyMask ? "PEND  ENTER set  DEL cancel" : "C field  W/S edit");
 }
 
 const char* const CAL_ACTIONS[] = {"Refresh FPS", "Quick calib", "Precise calib", "Boot quick/off"};
@@ -3921,48 +3665,50 @@ constexpr int CAL_ACTION_COUNT = sizeof(CAL_ACTIONS) / sizeof(CAL_ACTIONS[0]);
 
 void drawCalibrationCard()
 {
-  drawTextFit("MOTION / IMU", 8, CONTENT_Y + 5, 140, COLOR_MUTED);
-  drawChips("ACC " + showInt(app.settings.accelRange) + "g  GYRO " + showInt(app.settings.gyroRange), 8,
-            CONTENT_Y + 20);
-  drawTextFit("IMU " + app.diagnostics.imu + "  FPS " + app.settings.fps + "  BOOT " + app.settings.bootCalibration, 8,
-              CONTENT_Y + 40, 224, COLOR_TEXT);
+  drawTextFit("Motion Service", 8, CONTENT_Y + 5, 140, COLOR_MUTED);
+  drawStatusTile(8, CONTENT_Y + 23, 68, 28, "FPS", app.settings.fps, COLOR_ACCENT);
+  drawStatusTile(84, CONTENT_Y + 23, 68, 28, "Boot", app.settings.bootCalibration, COLOR_TEXT);
+  drawStatusTile(160, CONTENT_Y + 23, 68, 28, "Pattern", showInt(app.settings.activePattern), COLOR_TEXT);
 
   for (int i = 0; i < CAL_ACTION_COUNT; ++i) {
     int x = i < 2 ? 8 + i * 116 : 8 + (i - 2) * 116;
-    int y = i < 2 ? CONTENT_Y + 60 : CONTENT_Y + 80;
+    int y = i < 2 ? CONTENT_Y + 58 : CONTENT_Y + 78;
     bool active = i == app.selectedCalAction;
     uint16_t bg = active ? COLOR_ACCENT_DARK : COLOR_PANEL_DARK;
     uiCanvas.fillRoundRect(x, y, 108, 16, 2, bg);
     drawTextFit(String(active ? "> " : "  ") + CAL_ACTIONS[i], x + 5, y + 5, 98, active ? COLOR_TEXT : COLOR_MUTED, bg);
   }
-  drawFooter("W/S action ENTER run DEL back");
+  drawFooter("W/S select  ENTER run");
 }
 
 void drawPatternListCard()
 {
   ensurePatternModel();
+  drawTextFit("Patterns", 8, CONTENT_Y + 4, 110, COLOR_MUTED);
   const int availablePatterns = controllerPatternCount();
-  app.selectedPatternId = constrain(app.selectedPatternId, 1, availablePatterns);
-  PatternConfig* pattern = getPatternMetaById(app.selectedPatternId);
-  if (pattern == nullptr) {
-    app.selectedPatternId = 1;
-    pattern = getPatternMetaById(1);
+  app.selectedPatternIndex = constrain(app.selectedPatternIndex, 0, availablePatterns - 1);
+  int rowH = 20;
+  int visible = 4;
+  int start = 0;
+  if (app.selectedPatternIndex >= visible) {
+    start = app.selectedPatternIndex - visible + 1;
   }
-  drawTextFit("PATTERN", 8, CONTENT_Y + 5, 70, COLOR_MUTED);
-  char id[4];
-  snprintf(id, sizeof(id), "%02d", pattern->id);
-  drawHeroValue(id, CONTENT_Y + 19);
-  drawTextFit(pattern->name, 64, CONTENT_Y + 25, 166, COLOR_TEXT);
-  drawChips(String(patternCategory(pattern->id)) + "  " + patternClassLabel(pattern->id), 64, CONTENT_Y + 43);
-  drawChips(String("CYCLE ") + (pattern->cycleEnabled ? "ON" : "OFF") + "  INVERT " +
-                (pattern->inverted ? "ON" : "OFF"),
-            64, CONTENT_Y + 62, pattern->inverted ? COLOR_WARN : COLOR_OK);
-  const char* focus[] = {"PATTERN", "CYCLE", "INVERT"};
-  drawTextFit(String("Field ") + focus[app.selectedPatternField] + "  " + String(pattern->id) + "/" +
-                  String(availablePatterns),
-              8, CONTENT_Y + 84, 220, COLOR_MUTED);
-  drawUnsavedBadge(patternDirty || app.patternEditsPending || patternPersistence.unsaved);
-  drawFooterHints("<> Pattern", "^v Field", "Ent Set");
+  for (int row = 0; row < visible && start + row < availablePatterns; ++row) {
+    int idx = start + row;
+    const auto& pattern = app.settings.patterns[idx];
+    int y = CONTENT_Y + 17 + row * rowH;
+    bool active = idx == app.selectedPatternIndex;
+    uint16_t bg = active ? COLOR_ACCENT_DARK : COLOR_PANEL_DARK;
+    uiCanvas.fillRoundRect(5, y, SCREEN_W - 10, rowH - 2, 2, bg);
+    char line[40];
+    snprintf(line, sizeof(line), "%02d %c %c %c %s", pattern.id, patternClassTag(pattern.id),
+             pattern.cycleEnabled ? '+' : '-', pattern.inverted ? 'I' : 'N', pattern.name.c_str());
+    uiCanvas.setFont(&fonts::Font2);
+    uiCanvas.setTextSize(1);
+    drawTextFit(active ? String("> ") + line : String("  ") + line, 10, y + 3, 220, active ? COLOR_TEXT : COLOR_MUTED, bg);
+    uiCanvas.setFont(&fonts::Font0);
+  }
+  drawFooter("W/S LIVE  ENT detail  C cycle  I invert");
 }
 
 const char* const BULK_ACTIONS[] = {"Save all states", "Enable all cycle", "Disable all cycle", "Invert all", "Normal all"};
@@ -4055,7 +3801,7 @@ void drawFirmwareCard()
   if (app.firmwareFiles.empty()) {
     drawTextFit("No UF2 in /firmware", 12, CONTENT_Y + 52, 200, COLOR_WARN);
   }
-  drawFooterHints("^v File", "C Target", "Ent Flash");
+  drawFooter("W/S file  C target  R scan  ENTER flash");
 }
 
 bool flashWorkflowActive()
@@ -4138,7 +3884,10 @@ void drawFlashWorkflow()
       break;
     case FlashUiState::CopyingUf2:
       drawTextFit("Copying firmware", 12, CONTENT_Y + 21, 180, COLOR_TEXT);
-      drawProgress(app.flash.percent, app.flash.copiedBytes, app.flash.totalBytes);
+      drawProgressBar(12, CONTENT_Y + 43, 160, 13, app.flash.percent);
+      drawTextFit(String(app.flash.percent) + "%", 183, CONTENT_Y + 46, 45, COLOR_OK);
+      drawTextFit(bytesKb(app.flash.copiedBytes) + " / " + bytesKb(app.flash.totalBytes) + " KB", 12, CONTENT_Y + 65, 150,
+                  COLOR_MUTED);
       drawTextFit(shortText(app.flash.filename, 32), 12, CONTENT_Y + 80, 210, COLOR_TEXT);
       drawFooter("Do not unplug");
       break;
@@ -4183,31 +3932,14 @@ String profileDisplayName(const String& fileName)
   return name;
 }
 
-bool loadedProfileDiffers()
-{
-  if (!app.hasLoadedProfile) {
-    return false;
-  }
-  return app.settings.brightness != app.loadedProfile.brightness ||
-         app.settings.stripLength != app.loadedProfile.stripLength ||
-         app.settings.activePattern != app.loadedProfile.activePattern ||
-         app.settings.smoothing != app.loadedProfile.smoothing ||
-         app.settings.enabledPatternMask != app.loadedProfile.enabledPatternMask ||
-         app.settings.invertedPatternMask != app.loadedProfile.invertedPatternMask;
-}
-
 void drawProfilesCard()
 {
-  drawTextFit("PROFILES", 8, CONTENT_Y + 5, 92, COLOR_MUTED);
+  drawTextFit("Profiles", 8, CONTENT_Y + 5, 92, COLOR_MUTED);
   uiCanvas.fillRoundRect(174, CONTENT_Y + 3, 58, 13, 2, app.sdReady ? COLOR_PANEL_DARK : COLOR_PANEL);
   drawTextFit(app.sdReady ? "SD OK" : "SD --", 179, CONTENT_Y + 7, 48, app.sdReady ? COLOR_OK : COLOR_WARN,
               app.sdReady ? COLOR_PANEL_DARK : COLOR_PANEL);
-  drawTextFit("Controller: current", 8, CONTENT_Y + 20, 108, COLOR_TEXT);
-  drawTextFit(String("Loaded: ") + (app.hasLoadedProfile ? shortText(app.loadedProfileName, 16) : "none"), 118,
-              CONTENT_Y + 20, 112, app.hasLoadedProfile ? COLOR_ACCENT : COLOR_MUTED);
-  drawChips(String(app.sdReady ? "SD OK" : "SD --") + "  " +
-                (loadedProfileDiffers() ? "DIFF" : app.hasLoadedProfile ? "MATCH" : "NO PROFILE"),
-            8, CONTENT_Y + 33, loadedProfileDiffers() ? COLOR_WARN : COLOR_OK);
+  drawTextFit(String("Loaded: ") + (app.hasLoadedProfile ? shortText(app.loadedProfileName, 20) : "none"), 8,
+              CONTENT_Y + 20, 220, app.hasLoadedProfile ? COLOR_ACCENT : COLOR_MUTED);
   int total = PROFILE_ACTION_COUNT + static_cast<int>(app.profileFiles.size());
   int visible = 3;
   int start = 0;
@@ -4216,10 +3948,10 @@ void drawProfilesCard()
   }
   for (int row = 0; row < visible && start + row < total; ++row) {
     int i = start + row;
-    int y = CONTENT_Y + 52 + row * 17;
+    int y = CONTENT_Y + 40 + row * 20;
     bool active = i == app.selectedProfileAction;
     uint16_t bg = active ? COLOR_ACCENT_DARK : COLOR_PANEL_DARK;
-    uiCanvas.fillRoundRect(8, y, 224, 15, 3, bg);
+    uiCanvas.fillRoundRect(8, y, 224, 18, 3, bg);
     bool action = i < PROFILE_ACTION_COUNT;
     String label = action ? String(PROFILE_ACTIONS[i]) : shortText(app.profileFiles[i - PROFILE_ACTION_COUNT], 22);
     String prefix = active ? "> " : "  ";
@@ -4229,21 +3961,21 @@ void drawProfilesCard()
         prefix = active ? ">*" : " *";
       }
     }
-    drawTextFit(prefix + label, 14, y + 5, action ? 132 : 168, active ? COLOR_TEXT : COLOR_MUTED, bg);
+    drawTextFit(prefix + label, 14, y + 6, action ? 132 : 168, active ? COLOR_TEXT : COLOR_MUTED, bg);
     if (!action) {
-      drawTextFit("ENT load", 177, y + 5, 50, COLOR_ACCENT, bg);
+      drawTextFit("ENT load", 177, y + 6, 50, COLOR_ACCENT, bg);
     }
   }
-  drawFooterHints("^v Select", "Ent Load", "N New");
+  drawFooter("W/S select  ENTER  I delete");
 }
 
 void drawProfileNameInput()
 {
-  drawTextFit(profileRenamePending ? "Rename Profile" : "Save Profile", 10, CONTENT_Y + 12, 160, COLOR_MUTED);
+  drawTextFit("Save Profile", 10, CONTENT_Y + 12, 160, COLOR_MUTED);
   drawTextFit("Name:", 12, CONTENT_Y + 34, 70, COLOR_TEXT);
   uiCanvas.fillRoundRect(12, CONTENT_Y + 51, 216, 21, 3, COLOR_PANEL_DARK);
   drawTextFit(shortText(app.profileNameInput + "_", 32), 18, CONTENT_Y + 58, 204, COLOR_ACCENT, COLOR_PANEL_DARK);
-  drawFooter(profileRenamePending ? "Type name ENTER rename DEL erase" : "Type name ENTER save DEL erase");
+  drawFooter("Type name  ENTER save  DEL delete");
 }
 
 void drawConfirmProfileOverwrite()
@@ -4291,9 +4023,23 @@ void drawSplashScreen()
   d.setTextDatum(top_left);
 }
 
+void drawPatternDetail()
+{
+  ensurePatternModel();
+  const auto& pattern = app.settings.patterns[app.selectedPatternIndex];
+  drawTextFit("Pattern " + String(pattern.id), 8, CONTENT_Y + 8, 100, COLOR_MUTED);
+  drawTextFit(pattern.name, 8, CONTENT_Y + 24, 220, COLOR_ACCENT);
+  drawTextFit(String("Cycle: ") + (detailCycle ? "ON" : "OFF"), 12, CONTENT_Y + 50, 150, detailCycle ? COLOR_OK : COLOR_MUTED);
+  drawTextFit(String("Invert: ") + (detailInvert ? "ON" : "OFF"), 12, CONTENT_Y + 68, 150, detailInvert ? COLOR_WARN : COLOR_MUTED);
+  drawFooter("C cycle  I invert  ENTER apply  ESC back");
+}
+
 void drawConfirmBulk()
 {
-  drawBulkCard();
+  drawTextFit(String(BULK_ACTIONS[app.selectedBulkAction]) + "?", 12, CONTENT_Y + 34, 220, COLOR_WARN);
+  drawTextFit("ENTER yes", 12, CONTENT_Y + 58, 120, COLOR_TEXT);
+  drawTextFit("ESC cancel", 12, CONTENT_Y + 74, 120, COLOR_MUTED);
+  drawFooter("Confirm bulk action");
 }
 
 void drawConfirmProfileDelete()
@@ -4311,84 +4057,6 @@ bool profileModalActive()
 {
   return mode == Mode::ProfileNameInput || mode == Mode::ConfirmProfileOverwrite ||
          mode == Mode::ConfirmProfileApply;
-}
-
-void drawSetupHub()
-{
-  static const char* const entries[] = {"Strip + Smooth", "Motion / IMU", "Wireless", "Device Name",
-                                         "Save / Defaults"};
-  drawHubList("SETUP", entries, 5, app.selectedHubItem);
-  drawFooter("W/S select ENTER open A/D area");
-}
-
-void drawServiceHub()
-{
-  static const char* const entries[] = {"Sync Diagnostics", "Status Dump", "Firmware Update", "Factory Reset"};
-  drawHubList("SERVICE", entries, 4, app.selectedHubItem);
-  drawFooter("W/S select ENTER open A/D area");
-}
-
-void drawDeviceNameView()
-{
-  drawTextFit("DEVICE NAME", 8, CONTENT_Y + 5, 100, COLOR_MUTED);
-  drawHeroValue(shortText(controllerLabel(), 12), CONTENT_Y + 28);
-  drawTextFit("Firmware 4 / NK4 only", 8, CONTENT_Y + 76, 170, COLOR_MUTED);
-  drawFooter("ENTER edit  DEL back");
-}
-
-void drawDeviceNameInput()
-{
-  drawTextFit("EDIT DEVICE NAME", 8, CONTENT_Y + 12, 160, COLOR_MUTED);
-  uiCanvas.fillRoundRect(12, CONTENT_Y + 42, 216, 24, 3, COLOR_PANEL_DARK);
-  drawTextFit(shortText(app.profileNameInput + "_", 32), 18, CONTENT_Y + 50, 204, COLOR_ACCENT, COLOR_PANEL_DARK);
-  drawFooter("Type name ENTER apply DEL erase");
-}
-
-void drawSaveDefaultsView()
-{
-  drawTextFit("SAVE / DEFAULTS", 8, CONTENT_Y + 5, 130, COLOR_MUTED);
-  drawChips(dirtyDraftCount() ? "UNSAVED CHANGES" : "CONTROLLER CURRENT", 8, CONTENT_Y + 25,
-            dirtyDraftCount() ? COLOR_WARN : COLOR_OK);
-  drawTextFit("7 saves current state persistently", 8, CONTENT_Y + 50, 220, COLOR_TEXT);
-  drawTextFit("F opens confirmed factory reset", 8, CONTENT_Y + 68, 220, COLOR_WARN);
-  drawFooter("ENTER save  F defaults  DEL back");
-}
-
-const char* viewHelp(UiView view)
-{
-  switch (view) {
-    case UiView::LiveHome: return "Live operating cockpit";
-    case UiView::Pattern: return "Select and edit patterns";
-    case UiView::Brightness: return "Adjust controller brightness";
-    case UiView::Play: return "Choose operating mode";
-    case UiView::AudioRun: return "Run Cardputer beacon master";
-    case UiView::AudioTune: return "Tune audio analysis";
-    case UiView::Profiles: return "Manage compatible SD profiles";
-    case UiView::SetupHub: return "Open rare controller setup";
-    case UiView::StripSmooth: return "Set strip length and smoothing";
-    case UiView::Motion: return "Inspect and calibrate IMU";
-    case UiView::Wireless: return "Configure controller wireless";
-    case UiView::DeviceName: return "Edit controller name";
-    case UiView::SaveDefaults: return "Save or reset controller";
-    case UiView::SyncSetup: return "Guided master/follower setup";
-    case UiView::SyncDiagnostics: return "Troubleshoot beacon sync";
-    case UiView::Connect: return "Manage USB and BLE";
-    case UiView::ServiceHub: return "Open service tools";
-    case UiView::StatusDump: return "Inspect controller status";
-    case UiView::Firmware: return "Safe UF2 firmware update";
-    default: return "NightKite Link";
-  }
-}
-
-void drawHelpOverlay()
-{
-  drawTextFit("HELP", 8, CONTENT_Y + 5, 60, COLOR_MUTED);
-  drawTextFit("<> area/value   ^v field", 8, CONTENT_Y + 21, 224, COLOR_TEXT);
-  drawTextFit("ENT primary   DEL back/cancel   R refresh", 8, CONTENT_Y + 36, 224, COLOR_TEXT);
-  drawTextFit("H Live  1 Pat 2 Bri 3 Audio 4 Profiles", 8, CONTENT_Y + 51, 224, COLOR_TEXT);
-  drawTextFit("5 Sync 6 Connect 7 Save 8 Diag 9 FW", 8, CONTENT_Y + 66, 224, COLOR_TEXT);
-  drawTextFit(viewHelp(app.view), 8, CONTENT_Y + 84, 224, COLOR_MUTED);
-  drawFooterHints("Ent Close", "Back");
 }
 
 void render()
@@ -4415,6 +4083,8 @@ void render()
 
   if (flashWorkflowActive()) {
     drawFlashWorkflow();
+  } else if (mode == Mode::PatternDetail) {
+    drawPatternDetail();
   } else if (mode == Mode::ConfirmBulk) {
     drawConfirmBulk();
   } else if (mode == Mode::ConfirmProfileDelete) {
@@ -4427,73 +4097,58 @@ void render()
     drawConfirmProfileApply();
   } else if (mode == Mode::ConfirmFactoryReset) {
     drawConfirmFactoryReset();
-  } else if (mode == Mode::DeviceNameInput) {
-    drawDeviceNameInput();
-  } else if (mode == Mode::Help) {
-    drawHelpOverlay();
   } else {
-    switch (app.view) {
-      case UiView::LiveHome:
+    switch (static_cast<Card>(app.selectedCard)) {
+      case Card::Status:
         drawStatusCard();
         break;
-      case UiView::StatusDump:
+      case Card::Device:
         drawDeviceCard();
         break;
-      case UiView::Connect:
+      case Card::Ble:
         drawBleCard();
         break;
-      case UiView::AudioRun:
-        drawAudioRunView();
+      case Card::BeaconMaster:
+        drawBeaconMasterCard();
         break;
-      case UiView::AudioTune:
-        drawAudioTuneView();
-        break;
-      case UiView::Play:
+      case Card::Play:
         drawPlayCard();
         break;
-      case UiView::Wireless:
+      case Card::Sync:
+        drawSyncCard();
+        break;
+      case Card::Wireless:
         drawWirelessCard();
         break;
-      case UiView::SyncSetup:
+      case Card::SyncTest:
         drawSyncTestCard();
         break;
-      case UiView::SyncDiagnostics:
+      case Card::SyncDiag:
         drawSyncDiagCard();
         break;
-      case UiView::Brightness:
+      case Card::Brightness:
         drawBrightnessCard();
         break;
-      case UiView::StripSmooth:
+      case Card::Config:
         drawConfigCard();
         break;
-      case UiView::Motion:
+      case Card::Calibration:
         drawCalibrationCard();
         break;
-      case UiView::Pattern:
+      case Card::ActivePattern:
+        drawPatternCard();
+        break;
+      case Card::PatternList:
         drawPatternListCard();
         break;
-      case UiView::Firmware:
+      case Card::PatternBulk:
+        drawBulkCard();
+        break;
+      case Card::Firmware:
         drawFirmwareCard();
         break;
-      case UiView::Profiles:
+      case Card::Profiles:
         drawProfilesCard();
-        break;
-      case UiView::SetupHub:
-        drawSetupHub();
-        break;
-      case UiView::ServiceHub:
-        drawServiceHub();
-        break;
-      case UiView::DeviceName:
-        drawDeviceNameView();
-        break;
-      case UiView::SaveDefaults:
-        drawSaveDefaultsView();
-        break;
-      case UiView::Confirm:
-      case UiView::Help:
-      default:
-        drawStatusCard();
         break;
     }
   }
@@ -4943,8 +4598,6 @@ void applyLoadedProfile()
     return;
   }
   setStatus("Applying profile...", COLOR_ACCENT);
-  controllerUnsaved = true;
-  patternPersistence.markChanged();
   markTransferCompleteSoundPending();
   const int supportedPatterns = controllerPatternCount();
   const uint32_t supportedMask = controllerPatternMask();
@@ -5030,8 +4683,6 @@ void startProfileNameInput()
     return;
   }
   app.profileNameInput = app.hasLoadedProfile ? app.loadedProfileName : "";
-  profileRenamePending = false;
-  profileRenameSource = "";
   app.pendingProfileName = "";
   app.pendingProfilePath = "";
   mode = Mode::ProfileNameInput;
@@ -5050,31 +4701,6 @@ void submitProfileNameInput()
   if (path.length() == 0) {
     setStatus("Invalid name", COLOR_ERR);
     app.dirty = true;
-    return;
-  }
-  if (profileRenamePending) {
-    if (path == profileRenameSource) {
-      mode = Mode::Cards;
-      profileRenamePending = false;
-      return;
-    }
-    if (SD.exists(path)) {
-      setStatus("Profile name exists", COLOR_WARN);
-      return;
-    }
-    if (!SD.rename(profileRenameSource, path)) {
-      setStatus("Rename failed", COLOR_ERR);
-      return;
-    }
-    if (app.loadedProfilePath == profileRenameSource) {
-      app.loadedProfilePath = path;
-      app.loadedProfileName = profileDisplayName(path);
-    }
-    profileRenamePending = false;
-    profileRenameSource = "";
-    mode = Mode::Cards;
-    setStatus("Profile renamed", COLOR_OK);
-    refreshProfileList();
     return;
   }
   app.pendingProfileName = profileDisplayName(base);
@@ -5474,9 +5100,6 @@ bool parseNk4Line(const String& parsed)
     }
     String code = valueForKey(parsed, "code");
     String msg = valueForKey(parsed, "msg");
-    if (matchedCommand == "cmd=save") {
-      patternPersistence.saveFailed();
-    }
     if (matchedCommand == "cmd=defaults confirm=1") {
       commandQueue.clear();
       setStatus("Factory reset failed", COLOR_ERR);
@@ -5515,11 +5138,6 @@ void parseNightKiteLine(const String& line)
     app.controllerConnected = true;
     app.controllerError = false;
     lastRxMs = millis();
-    String lower = parsed;
-    lower.toLowerCase();
-    if (patternPersistence.savePending && lower.indexOf("save") >= 0) {
-      confirmControllerSave();
-    }
 
     parseIntFieldUnlessDirty(parsed, "pattern", app.settings.activePattern, patternDirty);
     parseIntFieldUnlessDirty(parsed, "active_pattern", app.settings.activePattern, patternDirty);
@@ -5635,8 +5253,6 @@ void resetControllerSession(TransportMode nextTransportMode = TransportMode::Usb
   app.diagnostics = DiagnosticsState{};
   brightnessDirty = false;
   patternDirty = false;
-  controllerUnsaved = false;
-  patternPersistence = PatternPersistenceState{};
   configDirtyMask = 0;
   playDirtyMask = 0;
   syncDirtyMask = 0;
@@ -6091,12 +5707,6 @@ void syncEditFromCard()
         editValue = showInt(app.settings.activePattern);
       }
       break;
-    case Card::PatternList:
-      if (!patternDirty && app.settings.activePattern >= 1) {
-        app.selectedPatternId = constrain(app.settings.activePattern, 1, controllerPatternCount());
-        draftActivePattern = app.selectedPatternId;
-      }
-      break;
     case Card::Calibration:
       editValue = "";
       break;
@@ -6106,55 +5716,30 @@ void syncEditFromCard()
   }
 }
 
-void setRoute(UiView view)
+void changeCard(int delta)
 {
-  if (view != app.view) {
-    app.previousView = app.view;
-  }
-  app.view = view;
-  app.area = areaForView(view);
-  app.selectedCard = static_cast<int>(activeCard());
-  if (view == UiView::Pattern && !patternDirty && app.settings.activePattern >= 1) {
-    app.selectedPatternId = constrain(app.settings.activePattern, 1, controllerPatternCount());
-    draftActivePattern = app.selectedPatternId;
+  app.selectedCard += delta;
+  if (app.selectedCard < 0) {
+    app.selectedCard = CARD_COUNT - 1;
+  } else if (app.selectedCard >= CARD_COUNT) {
+    app.selectedCard = 0;
   }
   mode = Mode::Cards;
   syncEditFromCard();
-  if (view == UiView::Profiles && app.profileFiles.empty() && app.sdReady) {
+  if (static_cast<Card>(app.selectedCard) == Card::Profiles && app.profileFiles.empty() && app.sdReady) {
     refreshProfileList();
   }
-  if (view == UiView::StatusDump && app.controllerConnected) {
+  if (static_cast<Card>(app.selectedCard) == Card::Device && app.controllerConnected) {
     requestControllerBattery(true);
   }
-  if (view == UiView::Firmware && app.firmwareFiles.empty() && app.sdReady) {
+  if (static_cast<Card>(app.selectedCard) == Card::Firmware && app.firmwareFiles.empty() && app.sdReady) {
     refreshFirmwareList();
-  }
-  if (view == UiView::AudioTune) {
-    audioTuneOriginal = beaconMasterSettings;
-    audioTuneDraft = beaconMasterSettings;
-    audioTuneDirty = false;
-    app.selectedBeaconMasterField = max(1, app.selectedBeaconMasterField);
   }
   app.dirty = true;
 }
 
-void changeCard(int delta)
-{
-  app.area = adjacentArea(app.area, delta);
-  app.selectedHubItem = 0;
-  setRoute(homeView(app.area));
-}
-
 void refreshCurrentCard()
 {
-  if (app.view == UiView::Profiles) {
-    refreshProfileList();
-    return;
-  }
-  if (app.view == UiView::Firmware) {
-    refreshFirmwareList();
-    return;
-  }
   if (static_cast<Card>(app.selectedCard) == Card::Ble) {
     startBleScan();
     return;
@@ -6236,7 +5821,6 @@ void togglePatternCycle(int patternIndex, bool sendNow)
   if (sendNow) {
     noteActivePatternMayFollowCycleToggle(pattern.id);
     sendCommand(NightKiteCommands::setPatternCycle(pattern.id, pattern.cycleEnabled));
-    markPatternUnsaved();
   } else {
     setStatus("Cycle changed locally", COLOR_WARN);
     app.patternEditsPending = true;
@@ -6259,28 +5843,11 @@ void togglePatternInvert(int patternIndex, bool sendNow)
   }
   if (sendNow) {
     sendCommand(NightKiteCommands::setPatternInvert(pattern.id, pattern.inverted));
-    markPatternUnsaved();
   } else {
     setStatus("Invert changed locally", COLOR_WARN);
     app.patternEditsPending = true;
   }
   app.dirty = true;
-}
-
-void togglePatternCycleById(int patternId, bool sendNow)
-{
-  int index = getPatternIndexById(patternId);
-  if (index >= 0) {
-    togglePatternCycle(index, sendNow);
-  }
-}
-
-void togglePatternInvertById(int patternId, bool sendNow)
-{
-  int index = getPatternIndexById(patternId);
-  if (index >= 0) {
-    togglePatternInvert(index, sendNow);
-  }
 }
 
 void startFirmwareFlash();
@@ -6292,57 +5859,6 @@ void sendLiveEditCommand(const String& command, const String& status)
   }
   sendCommand(command, false);
   setStatus(status, COLOR_ACCENT);
-}
-
-void changeAudioTuneValue(int delta)
-{
-  int field = app.selectedBeaconMasterField;
-  if (field == 1) {
-    audioTuneDraft.mode = static_cast<BeaconMasterMode>(
-        wrapRange(static_cast<int>(audioTuneDraft.mode), static_cast<int>(BeaconMasterMode::V1Manual),
-                  static_cast<int>(BeaconMasterMode::V2MicFull), 1, delta));
-  } else if (field == 2) {
-    audioTuneDraft.group = static_cast<uint8_t>(wrapRange(audioTuneDraft.group, 1, 4, 1, delta));
-  } else if (field == 3) {
-    audioTuneDraft.pattern = static_cast<uint8_t>(wrapRange(audioTuneDraft.pattern, 1, PATTERN_COUNT, 1, delta));
-  } else if (field == 4) {
-    audioTuneDraft.brightness = static_cast<uint8_t>(
-        wrappedValue(brightnessLevels, BRIGHTNESS_LEVEL_COUNT, audioTuneDraft.brightness, delta));
-  } else if (field == 5) {
-    audioTuneDraft.bpm = static_cast<uint16_t>(wrapRange(audioTuneDraft.bpm, 40, 240, 1, delta));
-  } else if (field == 6) {
-    if (beaconModeUsesMic(audioTuneDraft)) {
-      audioTuneDraft.sensitivity = static_cast<uint8_t>(wrapRange(audioTuneDraft.sensitivity, 25, 200, 5, delta));
-    } else {
-      audioTuneDraft.energy = static_cast<uint8_t>(wrapRange(audioTuneDraft.energy, 0, 255, 1, delta));
-    }
-  } else if (field == 7) {
-    if (beaconModeUsesMic(audioTuneDraft)) {
-      audioTuneDraft.noiseGate = static_cast<uint8_t>(wrapRange(audioTuneDraft.noiseGate, 0, 100, 5, delta));
-    } else {
-      audioTuneDraft.bass = static_cast<uint8_t>(wrapRange(audioTuneDraft.bass, 0, 255, 1, delta));
-    }
-  } else if (field == 8) {
-    if (beaconModeUsesMic(audioTuneDraft)) {
-      audioTuneDraft.smoothing = static_cast<uint8_t>(wrapRange(audioTuneDraft.smoothing, 0, 100, 5, delta));
-    } else {
-      audioTuneDraft.mid = static_cast<uint8_t>(wrapRange(audioTuneDraft.mid, 0, 255, 1, delta));
-    }
-  } else if (field == 9) {
-    if (beaconModeUsesMic(audioTuneDraft)) {
-      audioTuneDraft.beatDetect = !audioTuneDraft.beatDetect;
-    } else {
-      audioTuneDraft.treble = static_cast<uint8_t>(wrapRange(audioTuneDraft.treble, 0, 255, 1, delta));
-    }
-  } else if (field == 10) {
-    if (beaconModeUsesMic(audioTuneDraft)) {
-      audioTuneDraft.micPaused = !audioTuneDraft.micPaused;
-    } else {
-      audioTuneDraft.confidence = static_cast<uint8_t>(wrapRange(audioTuneDraft.confidence, 0, 255, 1, delta));
-    }
-  }
-  audioTuneDirty = true;
-  app.dirty = true;
 }
 
 void changeValue(int delta)
@@ -6489,6 +6005,11 @@ void changeValue(int delta)
       draftBrightness = wrappedValue(brightnessLevels, BRIGHTNESS_LEVEL_COUNT, draftBrightness, delta);
       editValue = String(draftBrightness);
       brightnessDirty = true;
+      sendLiveEditCommand(NightKiteCommands::setBrightness(draftBrightness), "Brightness sent");
+      if (app.protocolMode == ProtocolMode::Legacy) {
+        app.settings.brightness = draftBrightness;
+        brightnessDirty = false;
+      }
       break;
     case Card::Config:
       if (app.selectedConfigField == 0) {
@@ -6547,13 +6068,15 @@ void changeValue(int delta)
       app.selectedCalAction = constrain(app.selectedCalAction + delta, 0, CAL_ACTION_COUNT - 1);
       break;
     case Card::PatternList:
-      if (delta < 0) {
-        app.selectedPatternId = getPrevPatternId(app.selectedPatternId, controllerPatternCount());
-      } else {
-        app.selectedPatternId = getNextPatternId(app.selectedPatternId, controllerPatternCount());
-      }
-      draftActivePattern = app.selectedPatternId;
+      app.selectedPatternIndex =
+          constrain(app.selectedPatternIndex + delta, 0, controllerPatternCount() - 1);
+      draftActivePattern = app.selectedPatternIndex + 1;
       patternDirty = true;
+      sendLiveEditCommand(NightKiteCommands::setPattern(draftActivePattern), "Pattern sent");
+      app.settings.activePattern = draftActivePattern;
+      if (app.protocolMode == ProtocolMode::Legacy) {
+        patternDirty = false;
+      }
       break;
     case Card::PatternBulk:
       app.selectedBulkAction = constrain(app.selectedBulkAction + delta, 0, BULK_ACTION_COUNT - 1);
@@ -6646,8 +6169,6 @@ void applyCurrentCard()
         if (playDirtyMask & PLAY_DIRTY_INTERVAL) {
           sendCommand("set autoplay_interval=" + String(draftPlayAutoplayIntervalSeconds));
         }
-        controllerUnsaved = true;
-        setStatus("Play applied - save needed", COLOR_WARN);
       }
       break;
     case Card::Sync:
@@ -6682,36 +6203,35 @@ void applyCurrentCard()
         if (wirelessDirtyMask & WIRELESS_DIRTY_PROFILE) {
           sendCommand("set wireless_profile=" + draftWirelessProfile);
         }
-        controllerUnsaved = true;
-        setStatus("Wireless applied - save needed", COLOR_WARN);
       }
       break;
     case Card::SyncTest:
-      if (app.selectedSyncTestAction == 0) {
-        syncTestRole = "master";
-        setStatus("Step 1 role Master", COLOR_ACCENT);
-      } else if (app.selectedSyncTestAction == 1) {
-        syncTestRole = "follower";
-        setStatus("Step 1 role Follower", COLOR_ACCENT);
-      } else if (app.selectedSyncTestAction == 2) {
-        syncTestRole = "standalone";
-        setStatus("Step 1 role Standalone", COLOR_ACCENT);
-      } else if (app.selectedSyncTestAction == 3) {
+      if (app.selectedSyncTestAction == 4) {
         syncTestGroup = wrapRange(selectedSyncTestGroup(), 1, 4, 1, 1);
         setStatus("Sync group " + String(syncTestGroup), COLOR_ACCENT);
-      } else if (app.selectedSyncTestAction == 4) {
+      } else if (app.selectedSyncTestAction == 5) {
         syncTestProfile = optionWithDelta(WIRELESS_PROFILES, WIRELESS_PROFILE_COUNT, selectedSyncTestProfile(), 1);
         setStatus("Wireless " + syncTestProfile, COLOR_ACCENT);
-      } else if (app.selectedSyncTestAction == 7) {
-        setRoute(UiView::SyncDiagnostics);
       } else if (!requireNk4Controller()) {
         break;
-      } else if (app.selectedSyncTestAction == 5) {
-        queueSyncTestRoleSetup(syncTestRole.c_str(), syncTestRole == "master" ? "NK-Master" : "NK-Follower");
-        controllerUnsaved = true;
-      } else if (app.selectedSyncTestAction == 6) {
+      } else if (app.selectedSyncTestAction == 0) {
+        queueSyncTestRoleSetup("master", "NK-Master");
+      } else if (app.selectedSyncTestAction == 1) {
+        queueSyncTestRoleSetup("follower", "NK-Follower");
+      } else if (app.selectedSyncTestAction == 2) {
         sendCommand("save");
         setStatus("Save queued", COLOR_ACCENT);
+      } else if (app.selectedSyncTestAction == 3) {
+        queueSyncTestRefresh();
+      } else if (app.selectedSyncTestAction == 6) {
+        sendCommand("set name=NK-Master");
+        setStatus("Name Master sent", COLOR_ACCENT);
+      } else if (app.selectedSyncTestAction == 7) {
+        sendCommand("set name=NK-Follower");
+        setStatus("Name Follower sent", COLOR_ACCENT);
+      } else if (app.selectedSyncTestAction == 8) {
+        sendCommand("set play_mode=sync");
+        setStatus("Play SYNC sent", COLOR_ACCENT);
       }
       break;
     case Card::Brightness:
@@ -6719,10 +6239,6 @@ void applyCurrentCard()
         setStatus("No edit pending", COLOR_MUTED);
       } else {
         sendCommand(NightKiteCommands::setBrightness(draftBrightness));
-        app.settings.brightness = draftBrightness;
-        brightnessDirty = false;
-        controllerUnsaved = true;
-        setStatus("Brightness applied - save needed", COLOR_WARN);
         if (app.protocolMode != ProtocolMode::Nk4) {
           brightnessDirty = false;
         }
@@ -6770,10 +6286,6 @@ void applyCurrentCard()
             configDirtyMask &= ~CONFIG_DIRTY_INTERVAL;
           }
         }
-        if (pendingConfigDirty) {
-          controllerUnsaved = true;
-          setStatus("Setup applied - save needed", COLOR_WARN);
-        }
       }
       app.dirty = true;
       break;
@@ -6782,7 +6294,6 @@ void applyCurrentCard()
         setStatus("No edit pending", COLOR_MUTED);
       } else {
         sendCommand(NightKiteCommands::setPattern(draftActivePattern));
-        markPatternUnsaved();
         if (app.protocolMode != ProtocolMode::Nk4) {
           patternDirty = false;
         }
@@ -6804,13 +6315,13 @@ void applyCurrentCard()
       break;
     case Card::PatternList: {
       ensurePatternModel();
-      app.selectedPatternId = constrain(app.selectedPatternId, 1, controllerPatternCount());
-      draftActivePattern = app.selectedPatternId;
-      sendCommand(NightKiteCommands::setPattern(draftActivePattern));
-      app.settings.activePattern = draftActivePattern;
-      patternDirty = false;
-      markPatternUnsaved();
-      setStatus("Pattern applied - save needed", COLOR_WARN);
+      app.selectedPatternIndex =
+          constrain(app.selectedPatternIndex, 0, controllerPatternCount() - 1);
+      const auto& pattern = app.settings.patterns[app.selectedPatternIndex];
+      detailCycle = pattern.cycleEnabled;
+      detailInvert = pattern.inverted;
+      mode = Mode::PatternDetail;
+      app.dirty = true;
       break;
     }
     case Card::PatternBulk:
@@ -6965,6 +6476,25 @@ void updateFlashWorkflow()
   }
 }
 
+void applyPatternDetail()
+{
+  ensurePatternModel();
+  auto& pattern = app.settings.patterns[app.selectedPatternIndex];
+  bool cycleChanged = detailCycle != pattern.cycleEnabled;
+  bool invertChanged = detailInvert != pattern.inverted;
+  pattern.cycleEnabled = detailCycle;
+  pattern.inverted = detailInvert;
+  if (cycleChanged) {
+    sendCommand(NightKiteCommands::setPatternCycle(pattern.id, detailCycle));
+  }
+  if (invertChanged) {
+    sendCommand(NightKiteCommands::setPatternInvert(pattern.id, detailInvert));
+  }
+  setStatus("Pattern update sent", COLOR_OK);
+  mode = Mode::Cards;
+  app.dirty = true;
+}
+
 void deleteSelectedProfile()
 {
   int profileIndex = app.selectedProfileAction - PROFILE_ACTION_COUNT;
@@ -7018,122 +6548,8 @@ void runBulkAction()
       sendCommand(NightKiteCommands::setAllInvert(false));
       break;
   }
-  if (app.selectedBulkAction != 0) {
-    markPatternUnsaved();
-  }
   mode = Mode::Cards;
   app.dirty = true;
-}
-
-void moveSelection(int delta)
-{
-  switch (app.view) {
-    case UiView::SetupHub:
-      app.selectedHubItem = constrain(app.selectedHubItem + delta, 0, 4);
-      break;
-    case UiView::ServiceHub:
-      app.selectedHubItem = constrain(app.selectedHubItem + delta, 0, 3);
-      break;
-    case UiView::Pattern:
-      app.selectedPatternField = constrain(app.selectedPatternField + delta, 0, 2);
-      break;
-    case UiView::Play:
-      app.selectedPlayField = constrain(app.selectedPlayField + delta, 0, 3);
-      break;
-    case UiView::AudioTune:
-      app.selectedBeaconMasterField =
-          constrain(app.selectedBeaconMasterField + delta, 1, beaconMasterFieldCount(audioTuneDraft) - 1);
-      break;
-    case UiView::Profiles:
-      app.selectedProfileAction = constrain(app.selectedProfileAction + delta, 0,
-          max(0, PROFILE_ACTION_COUNT + static_cast<int>(app.profileFiles.size()) - 1));
-      break;
-    case UiView::StripSmooth:
-      app.selectedConfigField = constrain(app.selectedConfigField + delta, 0, 1);
-      break;
-    case UiView::Motion:
-      app.selectedCalAction = constrain(app.selectedCalAction + delta, 0, CAL_ACTION_COUNT - 1);
-      break;
-    case UiView::Wireless:
-      app.selectedWirelessField = constrain(app.selectedWirelessField + delta, 0, 1);
-      break;
-    case UiView::SyncSetup:
-      app.selectedSyncTestAction = constrain(app.selectedSyncTestAction + delta, 0, SYNC_TEST_ACTION_COUNT - 1);
-      break;
-    case UiView::Connect:
-      if (!app.bleDevices.empty()) {
-        app.selectedBleIndex = constrain(app.selectedBleIndex + delta, 0, static_cast<int>(app.bleDevices.size()) - 1);
-      }
-      break;
-    case UiView::Firmware:
-      app.selectedFirmwareFileIndex = constrain(app.selectedFirmwareFileIndex + delta, 0,
-          max(0, static_cast<int>(app.firmwareFiles.size()) - 1));
-      break;
-    default:
-      break;
-  }
-  app.dirty = true;
-}
-
-void changeSyncSetupValue(int delta)
-{
-  if (app.selectedSyncTestAction <= 2) {
-    syncTestRole = optionWithDelta(SYNC_ROLES, SYNC_ROLE_COUNT, syncTestRole, delta);
-  } else if (app.selectedSyncTestAction == 3) {
-    syncTestGroup = wrapRange(selectedSyncTestGroup(), 1, 4, 1, delta);
-  } else if (app.selectedSyncTestAction == 4) {
-    syncTestProfile = optionWithDelta(WIRELESS_PROFILES, WIRELESS_PROFILE_COUNT, selectedSyncTestProfile(), delta);
-  }
-  app.dirty = true;
-}
-
-void saveControllerState()
-{
-  if (!app.controllerConnected) {
-    setStatus("No controller", COLOR_WARN);
-    return;
-  }
-  sendCommand("save");
-  setStatus("Save queued", COLOR_ACCENT);
-}
-
-bool applyRouteAction()
-{
-  if (app.view == UiView::SyncDiagnostics) {
-    refreshCurrentCard();
-    return true;
-  }
-  if (app.view == UiView::SetupHub) {
-    static const UiView views[] = {UiView::StripSmooth, UiView::Motion, UiView::Wireless, UiView::DeviceName,
-                                   UiView::SaveDefaults};
-    setRoute(views[constrain(app.selectedHubItem, 0, 4)]);
-    return true;
-  }
-  if (app.view == UiView::ServiceHub) {
-    if (app.selectedHubItem == 0) setRoute(UiView::SyncDiagnostics);
-    else if (app.selectedHubItem == 1) setRoute(UiView::StatusDump);
-    else if (app.selectedHubItem == 2) setRoute(UiView::Firmware);
-    else startFactoryResetConfirm();
-    return true;
-  }
-  if (app.view == UiView::AudioTune) {
-    beaconMasterSettings = audioTuneDraft;
-    audioTuneDirty = false;
-    setRoute(UiView::AudioRun);
-    setStatus("Audio tune applied", COLOR_OK);
-    return true;
-  }
-  if (app.view == UiView::DeviceName) {
-    app.profileNameInput = app.identity.name;
-    mode = Mode::DeviceNameInput;
-    app.dirty = true;
-    return true;
-  }
-  if (app.view == UiView::SaveDefaults) {
-    saveControllerState();
-    return true;
-  }
-  return false;
 }
 
 void handleWordChar(char c)
@@ -7141,75 +6557,90 @@ void handleWordChar(char c)
   if (flashWorkflowActive()) {
     return;
   }
-  if (mode == Mode::ProfileNameInput || mode == Mode::DeviceNameInput) {
+
+  if (mode == Mode::ProfileNameInput) {
     if (app.profileNameInput.length() < 40 && c >= 32 && c <= 126) {
       app.profileNameInput += c;
       app.dirty = true;
     }
     return;
   }
-  if (mode == Mode::ConfirmBulk) {
-    if (isUiUpKey(c)) {
-      app.selectedBulkAction = constrain(app.selectedBulkAction - 1, 0, BULK_ACTION_COUNT - 1);
+
+  if (mode == Mode::PatternDetail) {
+    if (c == 'c' || c == 'C') {
+      detailCycle = !detailCycle;
       app.dirty = true;
-    } else if (isUiDownKey(c)) {
-      app.selectedBulkAction = constrain(app.selectedBulkAction + 1, 0, BULK_ACTION_COUNT - 1);
+    } else if (c == 'i' || c == 'I') {
+      detailInvert = !detailInvert;
       app.dirty = true;
     }
     return;
   }
-  if (mode != Mode::Cards) {
+
+  if (mode == Mode::ConfirmFactoryReset) {
     return;
   }
 
-  if (isGlobalViewShortcut(c)) {
-    setRoute(shortcutView(c));
+  if (static_cast<Card>(app.selectedCard) == Card::Ble) {
+    if (c == 's' || c == 'S' || c == 'r' || c == 'R') {
+      startBleScan();
+      return;
+    }
+    if (c == 'd' || c == 'D' || c == 'b' || c == 'B') {
+      disconnectBleDevice();
+      return;
+    }
+  }
+  if ((c == 'b' || c == 'B') && static_cast<Card>(app.selectedCard) == Card::Device &&
+      app.transportMode == TransportMode::Ble) {
+    disconnectBleDevice();
     return;
   }
-  if (c == '?') {
-    mode = Mode::Help;
+
+  if ((c == 'c' || c == 'C') && static_cast<Card>(app.selectedCard) == Card::Config) {
+    app.selectedConfigField = (app.selectedConfigField + 1) % 6;
     app.dirty = true;
     return;
   }
-  if (c == '7') {
-    saveControllerState();
-    return;
-  }
-  if (c == 'r' || c == 'R') {
-    refreshCurrentCard();
-    return;
-  }
-  if (app.view == UiView::Pattern && (c == 'c' || c == 'C')) {
-    togglePatternCycleById(app.selectedPatternId, true);
-    setStatus("Cycle applied - save needed", COLOR_WARN);
-    return;
-  }
-  if (app.view == UiView::Pattern && (c == 'i' || c == 'I')) {
-    togglePatternInvertById(app.selectedPatternId, true);
-    setStatus("Invert applied - save needed", COLOR_WARN);
-    return;
-  }
-  if (app.view == UiView::Pattern && (c == 'b' || c == 'B')) {
-    mode = Mode::ConfirmBulk;
+  if ((c == 'c' || c == 'C') && static_cast<Card>(app.selectedCard) == Card::Play) {
+    app.selectedPlayField = (app.selectedPlayField + 1) % 4;
     app.dirty = true;
     return;
   }
-  if (app.view == UiView::AudioRun && (c == 'c' || c == 'C')) {
-    setRoute(UiView::AudioTune);
-    return;
-  }
-  if ((app.view == UiView::AudioRun || app.view == UiView::AudioTune) && (c == 't' || c == 'T')) {
-    unsigned long now = millis();
-    if (beaconMasterLastTapMs > 0 && now - beaconMasterLastTapMs >= 250 && now - beaconMasterLastTapMs <= 2000) {
-      uint16_t bpm = static_cast<uint16_t>(constrain(60000UL / (now - beaconMasterLastTapMs), 40UL, 240UL));
-      if (app.view == UiView::AudioTune) {
-        audioTuneDraft.bpm = bpm;
-        audioTuneDirty = true;
-      } else {
-        beaconMasterSettings.bpm = bpm;
-        cardputerAudioSync.tapTempo(bpm, now);
+  if ((c == 'c' || c == 'C') && static_cast<Card>(app.selectedCard) == Card::Sync) {
+    const int editable[] = {0, 1, 2, 5};
+    int current = 0;
+    for (int i = 0; i < 4; ++i) {
+      if (app.selectedSyncField == editable[i]) {
+        current = i;
+        break;
       }
-      setStatus("Tap " + String(bpm) + " BPM", COLOR_ACCENT);
+    }
+    app.selectedSyncField = editable[(current + 1) % 4];
+    app.dirty = true;
+    return;
+  }
+  if ((c == 'c' || c == 'C') && static_cast<Card>(app.selectedCard) == Card::Wireless) {
+    app.selectedWirelessField = app.selectedWirelessField == 0 ? 1 : 0;
+    app.dirty = true;
+    return;
+  }
+  if ((c == 'c' || c == 'C') && static_cast<Card>(app.selectedCard) == Card::BeaconMaster) {
+    app.selectedBeaconMasterField = (app.selectedBeaconMasterField + 1) % activeBeaconMasterFieldCount();
+    app.dirty = true;
+    return;
+  }
+  if ((c == 't' || c == 'T') && static_cast<Card>(app.selectedCard) == Card::BeaconMaster) {
+    unsigned long now = millis();
+    if (beaconMasterLastTapMs > 0) {
+      unsigned long interval = now - beaconMasterLastTapMs;
+      if (interval >= 250 && interval <= 2000) {
+        beaconMasterSettings.bpm = static_cast<uint16_t>(constrain(60000UL / interval, 40UL, 240UL));
+        cardputerAudioSync.tapTempo(beaconMasterSettings.bpm, now);
+        setStatus("Tap tempo " + String(beaconMasterSettings.bpm) + " BPM", COLOR_ACCENT);
+      } else {
+        setStatus("Tap again", COLOR_MUTED);
+      }
     } else {
       setStatus("Tap again", COLOR_MUTED);
     }
@@ -7217,76 +6648,98 @@ void handleWordChar(char c)
     app.dirty = true;
     return;
   }
-  if (app.view == UiView::Profiles && (c == 'n' || c == 'N')) {
-    startProfileNameInput();
-    return;
-  }
-  if (app.view == UiView::Profiles && (c == 'p' || c == 'P')) {
-    startApplyLoadedProfile();
-    return;
-  }
-  if (app.view == UiView::Profiles && (c == 'm' || c == 'M') &&
-      app.selectedProfileAction >= PROFILE_ACTION_COUNT) {
-    int index = app.selectedProfileAction - PROFILE_ACTION_COUNT;
-    if (index >= 0 && index < static_cast<int>(app.profileFiles.size())) {
-      profileRenameSource = "/profiles/" + app.profileFiles[index];
-      app.profileNameInput = profileDisplayName(app.profileFiles[index]);
-      profileRenamePending = true;
-      mode = Mode::ProfileNameInput;
-      app.dirty = true;
-    }
-    return;
-  }
-  if (app.view == UiView::Profiles && (c == 'i' || c == 'I') &&
-      app.selectedProfileAction >= PROFILE_ACTION_COUNT) {
-    mode = Mode::ConfirmProfileDelete;
-    app.dirty = true;
-    return;
-  }
-  if (app.view == UiView::Connect && (c == 'd' || c == 'D')) {
-    disconnectBleDevice();
-    return;
-  }
-  if (app.view == UiView::Connect && (c == 'b' || c == 'B')) {
+  if ((c == 'c' || c == 'C') && static_cast<Card>(app.selectedCard) == Card::Device) {
     manualUsbReconnect();
     return;
   }
-  if (app.view == UiView::Firmware && (c == 'c' || c == 'C')) {
+  if ((c == 'f' || c == 'F') && static_cast<Card>(app.selectedCard) == Card::Device) {
+    startFactoryResetConfirm();
+    return;
+  }
+  if ((c == 's' || c == 'S') && static_cast<Card>(app.selectedCard) == Card::Device) {
+    if (!app.usbConnected) {
+      setStatus("No controller", COLOR_WARN);
+    } else if (usbProbePending || app.protocolMode == ProtocolMode::Probing) {
+      setStatus("Detecting protocol...", COLOR_ACCENT);
+    } else {
+      sendCommand("save");
+      setStatus("Save queued", COLOR_ACCENT);
+    }
+    return;
+  }
+  if ((c == 'c' || c == 'C') && static_cast<Card>(app.selectedCard) == Card::Firmware) {
     app.selectedFirmwareTarget = (app.selectedFirmwareTarget + 1) % FIRMWARE_TARGET_COUNT;
     app.dirty = true;
     return;
   }
-  if (app.view == UiView::SaveDefaults && (c == 'f' || c == 'F')) {
-    startFactoryResetConfirm();
-    return;
+  if (c == 'c' || c == 'C') {
+    if (static_cast<Card>(app.selectedCard) == Card::ActivePattern) {
+      int patternId = draftActivePattern >= 1 && draftActivePattern <= PATTERN_COUNT ? draftActivePattern
+                                                                                     : app.settings.activePattern;
+      togglePatternCycle(patternId - 1, true);
+      return;
+    }
+    if (static_cast<Card>(app.selectedCard) == Card::PatternList) {
+      togglePatternCycle(app.selectedPatternIndex, false);
+      return;
+    }
+  }
+  if (c == 'i' || c == 'I') {
+    if (static_cast<Card>(app.selectedCard) == Card::ActivePattern) {
+      int patternId = draftActivePattern >= 1 && draftActivePattern <= PATTERN_COUNT ? draftActivePattern
+                                                                                     : app.settings.activePattern;
+      togglePatternInvert(patternId - 1, true);
+      return;
+    }
+    if (static_cast<Card>(app.selectedCard) == Card::PatternList) {
+      togglePatternInvert(app.selectedPatternIndex, false);
+      return;
+    }
+    if (static_cast<Card>(app.selectedCard) == Card::Profiles &&
+        app.selectedProfileAction >= PROFILE_ACTION_COUNT) {
+      mode = Mode::ConfirmProfileDelete;
+      app.dirty = true;
+      return;
+    }
   }
 
-  if (isUiUpKey(c)) {
-    moveSelection(-1);
-  } else if (isUiDownKey(c)) {
-    moveSelection(1);
-  } else if (isUiLeftKey(c) || isUiRightKey(c)) {
-    int delta = isUiLeftKey(c) ? -1 : 1;
-    if (app.view == UiView::LiveHome || app.view == UiView::SetupHub || app.view == UiView::ServiceHub) {
-      changeCard(delta);
-    } else {
-      if (app.view == UiView::AudioRun) {
-        app.selectedBeaconMasterField = 3;
-      }
-      if (app.view == UiView::AudioTune) {
-        changeAudioTuneValue(delta);
-      } else if (app.view == UiView::SyncSetup) {
-        changeSyncSetupValue(delta);
-      } else {
-        changeValue(delta);
-      }
-    }
+  switch (c) {
+    case 'a':
+    case 'A':
+    case ',':
+    case '<':
+      changeCard(-1);
+      break;
+    case 'd':
+    case 'D':
+    case '/':
+    case '?':
+      changeCard(1);
+      break;
+    case 'w':
+    case 'W':
+    case ';':
+    case ':':
+      changeValue(-1);
+      break;
+    case 's':
+    case 'S':
+    case '.':
+    case '>':
+      changeValue(1);
+      break;
+    case 'r':
+    case 'R':
+      refreshCurrentCard();
+      break;
+    default:
+      break;
   }
 }
 
 bool textInputActive()
 {
-  return mode == Mode::ProfileNameInput || mode == Mode::DeviceNameInput;
+  return mode == Mode::ProfileNameInput;
 }
 
 bool isPageChangeChar(char c)
@@ -7299,6 +6752,7 @@ bool isPageChangeChar(char c)
     case ',':
     case '<':
     case '/':
+    case '?':
       return true;
     default:
       return false;
@@ -7369,7 +6823,6 @@ void handleKeyboard()
   lastUserInputMs = millis();
   auto& status = M5Cardputer.Keyboard.keysState();
   playKeyboardSound(status);
-  DraftDisposition draftKey = draftDisposition(app.view, status.enter, status.del);
 
   if (flashWorkflowActive()) {
     if (status.enter) {
@@ -7402,21 +6855,8 @@ void handleKeyboard()
   }
 
   if (status.enter) {
-    if (mode == Mode::Help) {
-      mode = Mode::Cards;
-      app.dirty = true;
-    } else if (mode == Mode::DeviceNameInput) {
-      String name = app.profileNameInput;
-      name.trim();
-      if (name.length() == 0) {
-        setStatus("Name required", COLOR_WARN);
-      } else {
-        sendCommand("set name=" + name);
-        app.identity.name = name;
-        controllerUnsaved = true;
-        mode = Mode::Cards;
-        setStatus("Name applied - save needed", COLOR_WARN);
-      }
+    if (mode == Mode::PatternDetail) {
+      applyPatternDetail();
     } else if (mode == Mode::ConfirmBulk) {
       runBulkAction();
     } else if (mode == Mode::ConfirmProfileDelete) {
@@ -7434,42 +6874,31 @@ void handleKeyboard()
       queueControllerFactoryReset();
       mode = Mode::Cards;
       app.dirty = true;
-    } else if (!applyRouteAction()) {
+    } else {
       applyCurrentCard();
     }
     return;
   }
 
-  if (status.del || (status.opt && (profileModalActive() || mode == Mode::ConfirmFactoryReset ||
-                                    mode == Mode::DeviceNameInput))) {
-    if ((mode == Mode::ProfileNameInput || mode == Mode::DeviceNameInput) && status.del &&
-        app.profileNameInput.length() > 0) {
+  if (status.del || (status.opt && (profileModalActive() || mode == Mode::ConfirmFactoryReset))) {
+    if (mode == Mode::ProfileNameInput && status.del && app.profileNameInput.length() > 0) {
       app.profileNameInput.remove(app.profileNameInput.length() - 1);
-    } else if (mode == Mode::ConfirmBulk || mode == Mode::ConfirmProfileDelete ||
+    } else if (mode == Mode::PatternDetail || mode == Mode::ConfirmBulk || mode == Mode::ConfirmProfileDelete ||
                mode == Mode::ProfileNameInput || mode == Mode::ConfirmProfileOverwrite ||
-               mode == Mode::ConfirmProfileApply || mode == Mode::ConfirmFactoryReset ||
-               mode == Mode::DeviceNameInput || mode == Mode::Help) {
+               mode == Mode::ConfirmProfileApply || mode == Mode::ConfirmFactoryReset) {
       if (mode == Mode::ProfileNameInput || mode == Mode::ConfirmProfileOverwrite) {
         setStatus("Save cancelled", COLOR_WARN);
-        profileRenamePending = false;
-        profileRenameSource = "";
       } else if (mode == Mode::ConfirmProfileApply) {
         setStatus("Apply cancelled", COLOR_WARN);
       } else if (mode == Mode::ConfirmFactoryReset) {
         setStatus("Factory reset cancelled", COLOR_WARN);
       }
       mode = Mode::Cards;
-    } else if (app.view == UiView::AudioTune) {
-      beaconMasterSettings = audioTuneOriginal;
-      audioTuneDirty = false;
-      setRoute(UiView::AudioRun);
-      setStatus("Audio tune cancelled", COLOR_WARN);
-    } else if (draftKey == DraftDisposition::Cancel && currentCardHasDirtyDraft()) {
+    } else if (currentCardHasDirtyDraft()) {
       discardCurrentDraft();
-      UiView back = app.previousView;
-      setRoute(back);
-    } else if (app.view != UiView::LiveHome) {
-      setRoute(app.previousView);
+    } else if (app.selectedCard != 0) {
+      app.selectedCard = 0;
+      syncEditFromCard();
     }
     app.dirty = true;
     return;
@@ -7482,9 +6911,6 @@ void handleKeyboard()
 
   for (char c : status.word) {
     handleWordChar(c);
-  }
-  if (status.space && textInputActive()) {
-    handleWordChar(' ');
   }
 }
 
