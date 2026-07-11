@@ -395,9 +395,11 @@ In NK4 mode, existing UI actions are translated to NK4 requests such as
 The BLE NK4 service implemented by Firmware 4.0 can be used experimentally from
 the BLE Connect card. NightKite Link scans for `NK-...` devices or the NightKite
 service UUID, connects to one controller at a time, and uses the same NK4 parser
-as USB. TX Notify chunks are reassembled until newline `\n`. USB remains the
-stable recommended path. Link is a configurator and diagnostic tool; it does not
-relay real-time sync beacons or stream LED frames.
+as USB. Scanning runs in the background so keyboard, audio and UI updates remain
+active; connection attempts are bounded and can be retried after failure. TX
+Notify chunks are reassembled until newline `\n`. USB remains the stable
+recommended path. Link is a configurator and diagnostic tool; it does not relay
+real-time sync beacons or stream LED frames.
 
 Bulk invert currently maps to comma-separated `invert_pattern` /
 `normal_pattern` commands. A code comment marks a future dedicated

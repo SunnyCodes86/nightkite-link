@@ -3,9 +3,13 @@
 #include <SD.h>
 #include <SPI.h>
 #include <math.h>
+#include <memory>
+#include <mutex>
+#include <new>
 #include <vector>
 #include "M5Cardputer.h"
 #include "SoundManager.h"
+#include "BleLineBuffer.h"
 #include "CardputerAudioSync.h"
 #include "CommandQueuePolicy.h"
 #include "ControllerSessionPolicy.h"
@@ -69,12 +73,14 @@ constexpr unsigned long BLE_NK4_COMMAND_TIMEOUT_MS = 5000;
 constexpr unsigned long BLE_NK4_HELLO_TIMEOUT_MS = 5000;
 constexpr unsigned long BLE_NK4_LONG_TIMEOUT_MS = 10000;
 constexpr unsigned long BLE_NK4_MEDIUM_TIMEOUT_MS = 8000;
+constexpr unsigned long BLE_CONNECT_TIMEOUT_MS = 10000;
 constexpr unsigned long NK4_PROBE_TIMEOUT_MS = 1600;
 constexpr unsigned long NK4_MACHINE_DELAY_MS = 120;
 constexpr unsigned long BEACON_MASTER_TX_INTERVAL_MS = 100;
 constexpr unsigned long SPLASH_DURATION_MS = 1500;
 constexpr unsigned long STARTUP_SOUND_DELAY_MS = 180;
 constexpr int BLE_SCAN_SECONDS = 6;
+constexpr unsigned long BLE_SCAN_TIMEOUT_MS = BLE_SCAN_SECONDS * 1000UL + 2000UL;
 const char* const NK_BLE_SERVICE_UUID = "4e4b4000-6e69-6768-746b-000000000001";
 const char* const NK_BLE_RX_UUID = "4e4b4000-6e69-6768-746b-000000000002";
 const char* const NK_BLE_TX_UUID = "4e4b4000-6e69-6768-746b-000000000003";
@@ -307,6 +313,7 @@ struct BleDeviceEntry {
   String address;
   int rssi = 0;
   bool serviceMatch = false;
+  esp_ble_addr_type_t addressType = BLE_ADDR_TYPE_PUBLIC;
 };
 
 struct CommandQueueEntry {
@@ -689,18 +696,33 @@ DebugSerialTransport usbTransport;
 
 class BleNk4Transport : public NightKiteTransport {
 public:
-  void begin()
+  bool begin()
   {
     if (started) {
-      return;
+      return true;
     }
     ensureBleStackStarted();
+    scanCallbacks.reset(new (std::nothrow) ScanCallbacks(this));
+    clientCallbacks.reset(new (std::nothrow) ClientCallbacks(this));
+    if (!scanCallbacks || !clientCallbacks) {
+      setPhase(BleClientState::Error, "BLE err alloc");
+      return false;
+    }
+    activeInstance = this;
     started = true;
+    return true;
   }
 
   bool connected() override
   {
+    std::lock_guard<std::mutex> lock(stateMutex);
     return client != nullptr && client->isConnected() && rxCharacteristic != nullptr && txCharacteristic != nullptr;
+  }
+
+  bool clientConnected() const
+  {
+    std::lock_guard<std::mutex> lock(stateMutex);
+    return client != nullptr && client->isConnected();
   }
 
   void sendLine(const String& line) override
@@ -722,60 +744,98 @@ public:
 
   bool readLine(String& line) override
   {
-    if (lines.empty()) {
+    std::string bufferedLine;
+    if (!rxBuffer.pop(bufferedLine)) {
       return false;
     }
-    line = lines.front();
-    lines.erase(lines.begin());
+    line = bufferedLine.c_str();
     line.trim();
     return line.length() > 0;
   }
 
   void clearBuffers() override
   {
-    notifyBuffer = "";
-    lines.clear();
+    rxBuffer.clear();
   }
 
   bool scan()
   {
-    begin();
-    if (connected()) {
-      status = "Disconnect first";
-      state = BleClientState::Error;
+    if (!begin()) {
       return false;
     }
-    devices.clear();
-    status = "Scanning";
-    state = BleClientState::Scanning;
-    scanning = true;
+    if (clientConnected()) {
+      setPhase(BleClientState::Error, "Disconnect first");
+      return false;
+    }
+    {
+      std::lock_guard<std::mutex> lock(stateMutex);
+      if (scanning) {
+        status = "Scan busy";
+        return false;
+      }
+      devices.clear();
+      status = "Scanning";
+      state = BleClientState::Scanning;
+      scanning = true;
+      scanFinished = false;
+      scanStartedAt = millis();
+    }
     BLEScan* scan = BLEDevice::getScan();
-    scan->setAdvertisedDeviceCallbacks(new ScanCallbacks(this), true);
+    if (scan == nullptr) {
+      finishScan(true);
+      return false;
+    }
+    scan->setAdvertisedDeviceCallbacks(scanCallbacks.get(), true);
     scan->setActiveScan(true);
     scan->setInterval(100);
     scan->setWindow(80);
-    scan->start(BLE_SCAN_SECONDS, false);
-    scan->clearResults();
-    scanning = false;
-    status = devices.empty() ? "No NK BLE" : String("Found ") + devices.size();
-    state = devices.empty() ? BleClientState::Idle : BleClientState::Found;
-    return !devices.empty();
+    if (!scan->start(BLE_SCAN_SECONDS, scanCompleteCallback, false)) {
+      finishScan(true);
+      return false;
+    }
+    return true;
   }
 
   bool connectIndex(int index)
   {
-    if (index < 0 || index >= static_cast<int>(devices.size())) {
-      status = "No BLE device";
-      state = BleClientState::Error;
+    if (!begin()) {
       return false;
     }
-    disconnect();
-    begin();
+    BleDeviceEntry device;
+    {
+      std::lock_guard<std::mutex> lock(stateMutex);
+      if (scanning) {
+        status = "Scan busy";
+        state = BleClientState::Scanning;
+        return false;
+      }
+      if (index < 0 || index >= static_cast<int>(devices.size())) {
+        status = "No BLE device";
+        state = BleClientState::Error;
+        return false;
+      }
+      device = devices[index];
+    }
+    if (clientConnected()) {
+      setPhase(BleClientState::Connecting, "Disconnecting...");
+      return false;
+    }
+    clearBuffers();
     setPhase(BleClientState::Connecting, "Conn...");
     Serial.println("ble: connect");
-    client = BLEDevice::createClient();
-    client->setClientCallbacks(new ClientCallbacks(this));
-    if (client == nullptr || !client->connect(BLEAddress(devices[index].address.c_str()))) {
+    if (client == nullptr) {
+      client = BLEDevice::createClient();
+      if (client == nullptr) {
+        setPhase(BleClientState::Error, "BLE err alloc");
+        return false;
+      }
+      client->setClientCallbacks(clientCallbacks.get());
+    }
+    {
+      std::lock_guard<std::mutex> lock(stateMutex);
+      intentionalDisconnect = false;
+    }
+    if (!client->connect(BLEAddress(device.address.c_str()), device.addressType, BLE_CONNECT_TIMEOUT_MS)) {
       setPhase(BleClientState::Error, "BLE err conn");
       Serial.println("ble: err connect");
       disconnect();
@@ -783,7 +843,13 @@ public:
     }
     setPhase(BleClientState::Discovering, "Svc...");
     Serial.println("ble: connected");
-    BLERemoteService* service = client->getService(BLEUUID(NK_BLE_SERVICE_UUID));
+    BLEUUID serviceUuid(NK_BLE_SERVICE_UUID);
+    std::map<std::string, BLERemoteService*>* services = client->getServices();
+    BLERemoteService* service = nullptr;
+    if (services != nullptr) {
+      auto serviceIt = services->find(serviceUuid.toString().c_str());
+      service = serviceIt == services->end() ? nullptr : serviceIt->second;
+    }
     if (service == nullptr) {
       setPhase(BleClientState::Error, "BLE err no svc");
       Serial.println("ble: err no svc");
@@ -824,31 +890,41 @@ public:
       return false;
     }
     setPhase(BleClientState::Subscribing, "Notify...");
-    activeInstance = this;
-    txCharacteristic->registerForNotify(notifyCallback);
+    uint32_t callbackGeneration = 0;
+    {
+      std::lock_guard<std::mutex> lock(stateMutex);
+      callbackGeneration = ++notifyGeneration;
+    }
+    txCharacteristic->registerForNotify(
+        [this, callbackGeneration](BLERemoteCharacteristic*, uint8_t* data, size_t length, bool) {
+          onNotify(data, length, callbackGeneration);
+        });
     Serial.println("ble: notify ok");
     clearBuffers();
-    connectedName = devices[index].name.length() ? devices[index].name : devices[index].address;
+    {
+      std::lock_guard<std::mutex> lock(stateMutex);
+      connectedName = device.name.length() ? device.name : device.address;
+    }
     setPhase(BleClientState::Hello, "Hello...");
     return true;
   }
 
   void disconnect()
   {
+    bool wasConnected = false;
+    {
+      std::lock_guard<std::mutex> lock(stateMutex);
+      ++notifyGeneration;
+      wasConnected = client != nullptr && client->isConnected();
+      intentionalDisconnect = wasConnected;
+      rxCharacteristic = nullptr;
+      txCharacteristic = nullptr;
+      connectedName = "";
+    }
     clearBuffers();
-    if (client != nullptr) {
-      if (client->isConnected()) {
-        client->disconnect();
-      }
-      delete client;
-      client = nullptr;
+    if (wasConnected) {
+      client->disconnect();
     }
-    rxCharacteristic = nullptr;
-    txCharacteristic = nullptr;
-    if (activeInstance == this) {
-      activeInstance = nullptr;
-    }
-    connectedName = "";
   }
 
   void markHelloSent()
@@ -877,53 +953,60 @@ public:
     Serial.println("ble state: error");
   }
 
-  void markLost()
-  {
-    setPhase(BleClientState::Lost, "BLE lost");
-    Serial.println("ble: lost");
-    Serial.println("ble state: lost");
-  }
-
-  bool isScanning() const
-  {
-    return scanning;
-  }
-
   String statusText() const
   {
+    std::lock_guard<std::mutex> lock(stateMutex);
     return status;
   }
 
   BleClientState clientState() const
   {
+    std::lock_guard<std::mutex> lock(stateMutex);
     return state;
   }
 
   unsigned long lastNotifyAtMs() const
   {
+    std::lock_guard<std::mutex> lock(stateMutex);
     return lastNotifyAt;
   }
 
   String currentName() const
   {
+    std::lock_guard<std::mutex> lock(stateMutex);
     return connectedName;
   }
 
-  std::vector<BleDeviceEntry>& deviceList()
+  bool takeScanFinished(std::vector<BleDeviceEntry>& result)
   {
-    return devices;
+    std::lock_guard<std::mutex> lock(stateMutex);
+    if (!scanFinished) {
+      return false;
+    }
+    scanFinished = false;
+    result = devices;
+    return true;
+  }
+
+  bool expireScan(unsigned long now)
+  {
+    std::lock_guard<std::mutex> lock(stateMutex);
+    if (!scanning || now - scanStartedAt <= BLE_SCAN_TIMEOUT_MS) {
+      return false;
+    }
+    scanning = false;
+    scanFinished = true;
+    status = "BLE scan timeout";
+    state = BleClientState::Error;
+    return true;
   }
 
 private:
   void setPhase(BleClientState nextState, const String& text)
   {
+    std::lock_guard<std::mutex> lock(stateMutex);
     state = nextState;
     status = text;
-  }
-
-  static String shortBleName(const String& text)
-  {
-    return text.length() > 12 ? text.substring(0, 12) : text;
   }
 
   void addOrUpdate(const BleDeviceEntry& entry)
@@ -932,6 +1015,7 @@ private:
     if (!nightKiteName && !entry.serviceMatch) {
       return;
     }
+    std::lock_guard<std::mutex> lock(stateMutex);
     for (auto& device : devices) {
       if (device.address == entry.address) {
         device.name = entry.name.length() ? entry.name : device.name;
@@ -943,40 +1027,46 @@ private:
     devices.push_back(entry);
   }
 
-  void onNotify(uint8_t* data, size_t length)
+  void finishScan(bool failed = false)
   {
-    lastNotifyAt = millis();
-    Serial.print("ble: notify len=");
-    Serial.println(length);
-    Serial.print("ble: notify data=");
-    for (size_t i = 0; i < length && i < 24; ++i) {
-      char c = static_cast<char>(data[i]);
-      Serial.print(c >= 32 && c <= 126 ? c : '.');
+    std::lock_guard<std::mutex> lock(stateMutex);
+    if (!scanning) {
+      return;
     }
-    Serial.println();
-    for (size_t i = 0; i < length; ++i) {
-      char c = static_cast<char>(data[i]);
-      if (c == '\r') {
-        continue;
-      }
-      if (c == '\n') {
-        String line = notifyBuffer;
-        notifyBuffer = "";
-        line.trim();
-        if (line.length() > 0) {
-          Serial.print("ble: line=");
-          Serial.println(line.substring(0, min(80, static_cast<int>(line.length()))));
-          Serial.print("bleq: line len=");
-          Serial.println(line.length());
-          lines.push_back(line);
-        }
-      } else if (notifyBuffer.length() < MAX_CLI_LINE_CHARS) {
-        notifyBuffer += c;
-      } else {
-        notifyBuffer = "";
-        status = "BLE RX overflow";
-        Serial.println("bleq: rx overflow");
-      }
+    scanning = false;
+    scanFinished = true;
+    if (failed) {
+      status = "BLE scan failed";
+      state = BleClientState::Error;
+    } else {
+      status = devices.empty() ? "No NK BLE" : String("Found ") + devices.size();
+      state = devices.empty() ? BleClientState::Idle : BleClientState::Found;
+    }
+  }
+
+  void onNotify(uint8_t* data, size_t length, uint32_t callbackGeneration)
+  {
+    std::lock_guard<std::mutex> lock(stateMutex);
+    if (callbackGeneration != notifyGeneration) {
+      return;
+    }
+    lastNotifyAt = millis();
+    if (!rxBuffer.append(data, length)) {
+      status = "BLE RX overflow";
+    }
+  }
+
+  void onClientDisconnect()
+  {
+    std::lock_guard<std::mutex> lock(stateMutex);
+    ++notifyGeneration;
+    if (intentionalDisconnect) {
+      intentionalDisconnect = false;
+      state = BleClientState::Idle;
+      status = "BLE disconnected";
+    } else {
+      state = BleClientState::Lost;
+      status = "BLE lost";
     }
   }
 
@@ -989,6 +1079,7 @@ private:
       entry.name = advertisedDevice.haveName() ? String(advertisedDevice.getName().c_str()) : "";
       entry.address = String(advertisedDevice.getAddress().toString().c_str());
       entry.rssi = advertisedDevice.getRSSI();
+      entry.addressType = advertisedDevice.getAddressType();
       entry.serviceMatch = advertisedDevice.haveServiceUUID() &&
                            advertisedDevice.isAdvertisingService(BLEUUID(NK_BLE_SERVICE_UUID));
       owner->addOrUpdate(entry);
@@ -1003,16 +1094,16 @@ private:
     void onConnect(BLEClient*) override {}
     void onDisconnect(BLEClient*) override
     {
-      owner->markLost();
+      owner->onClientDisconnect();
     }
   private:
     BleNk4Transport* owner;
   };
 
-  static void notifyCallback(BLERemoteCharacteristic*, uint8_t* data, size_t length, bool)
+  static void scanCompleteCallback(BLEScanResults)
   {
     if (activeInstance != nullptr) {
-      activeInstance->onNotify(data, length);
+      activeInstance->finishScan();
     }
   }
 
@@ -1020,15 +1111,21 @@ private:
   BLEClient* client = nullptr;
   BLERemoteCharacteristic* rxCharacteristic = nullptr;
   BLERemoteCharacteristic* txCharacteristic = nullptr;
+  std::unique_ptr<ScanCallbacks> scanCallbacks;
+  std::unique_ptr<ClientCallbacks> clientCallbacks;
   std::vector<BleDeviceEntry> devices;
-  std::vector<String> lines;
-  String notifyBuffer;
+  BleLineBuffer rxBuffer{MAX_CLI_LINE_CHARS};
+  mutable std::mutex stateMutex;
   String status = "BLE idle";
   String connectedName;
   BleClientState state = BleClientState::Idle;
   unsigned long lastNotifyAt = 0;
+  unsigned long scanStartedAt = 0;
+  uint32_t notifyGeneration = 0;
   bool started = false;
   bool scanning = false;
+  bool scanFinished = false;
+  bool intentionalDisconnect = false;
 };
 
 BleNk4Transport* BleNk4Transport::activeInstance = nullptr;
@@ -3191,8 +3288,10 @@ void drawBleCard()
   drawTextFit(status.length() ? status : "BLE idle", 112, CONTENT_Y + 5, 120,
               app.transportMode == TransportMode::Ble ? COLOR_OK : COLOR_ACCENT);
   if (app.bleDevices.empty()) {
-    drawTextFit("No NK BLE", 12, CONTENT_Y + 35, 130, COLOR_MUTED);
-    drawTextFit("S scan", 12, CONTENT_Y + 53, 80, COLOR_ACCENT);
+    drawTextFit(app.bleScanning ? "Scanning..." : "No NK BLE", 12, CONTENT_Y + 35, 130,
+                app.bleScanning ? COLOR_ACCENT : COLOR_MUTED);
+    drawTextFit(app.bleScanning ? "Please wait" : "S scan", 12, CONTENT_Y + 53, 80,
+                app.bleScanning ? COLOR_MUTED : COLOR_ACCENT);
   } else {
     int visible = 4;
     int start = 0;
@@ -5513,11 +5612,36 @@ void startBleScan()
   }
   app.bleStatus = "Scanning";
   app.bleState = BleClientState::Scanning;
+  app.bleScanning = true;
+  app.bleDevices.clear();
   app.dirty = true;
-  bleTransport.scan();
-  app.bleDevices = bleTransport.deviceList();
+  if (!bleTransport.scan()) {
+    app.bleScanning = false;
+  }
+  syncBleUiStatus();
+  app.dirty = true;
+}
+
+void pollBleScanCompletion()
+{
+  if (bleTransport.expireScan(millis())) {
+    BLEScan* scan = BLEDevice::getScan();
+    if (scan != nullptr) {
+      scan->stop();
+    }
+  }
+  std::vector<BleDeviceEntry> devices;
+  if (!bleTransport.takeScanFinished(devices)) {
+    return;
+  }
+  app.bleDevices = devices;
+  app.bleScanning = false;
   if (app.selectedBleIndex >= static_cast<int>(app.bleDevices.size())) {
     app.selectedBleIndex = max(0, static_cast<int>(app.bleDevices.size()) - 1);
+  }
+  BLEScan* scan = BLEDevice::getScan();
+  if (scan != nullptr) {
+    scan->clearResults();
   }
   syncBleUiStatus();
   app.dirty = true;
@@ -5572,7 +5696,6 @@ void connectSelectedBleDevice()
 
 void disconnectBleDevice()
 {
-  bleTransport.disconnect();
   resetControllerSession();
   app.usbConnected = usbTransport.connected();
   usbProbePending = app.usbConnected;
@@ -5588,7 +5711,6 @@ void failBleConnection(const String& reason)
   nk4Pending = false;
   pendingNk4 = CommandQueueEntry{};
   bleTransport.markError(reason);
-  bleTransport.disconnect();
   resetControllerSession();
   app.usbConnected = false;
   usbProbePending = false;
@@ -7201,6 +7323,7 @@ void loop()
   }
 
   updateCardputerBattery();
+  pollBleScanCompletion();
   handleKeyboard();
   updateFlashWorkflow();
   updateBeaconMaster();

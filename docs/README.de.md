@@ -409,10 +409,12 @@ Beispiel `cmd=set brightness=...`, `cmd=set play_mode=manual|autoplay|sync`,
 Der BLE-NK4-Service aus Firmware 4.0 kann experimentell über die BLE-Connect-Card
 verwendet werden. NightKite Link scannt nach `NK-...`-Geräten oder der
 NightKite-Service-UUID, verbindet genau einen Controller und nutzt denselben
-NK4-Parser wie USB. TX-Notify-Chunks werden bis zum Zeilenende `\n`
+NK4-Parser wie USB. Der Scan läuft im Hintergrund, sodass Tastatur, Audio und UI
+weiterlaufen; Verbindungsversuche sind zeitlich begrenzt und können nach einem
+Fehler wiederholt werden. TX-Notify-Chunks werden bis zum Zeilenende `\n`
 zusammengesetzt. USB bleibt der stabile empfohlene Pfad. Link ist Konfigurator
-und Diagnosegerät; es leitet keine Echtzeit-Sync-Beacons weiter und streamt
-keine LED-Frames.
+und Diagnosegerät; es leitet keine Echtzeit-Sync-Beacons weiter und streamt keine
+LED-Frames.
 
 Bulk-Invert wird aktuell über kommaseparierte `invert_pattern`- bzw.
 `normal_pattern`-Befehle umgesetzt. Im Code ist ein zukünftiger dedizierter
