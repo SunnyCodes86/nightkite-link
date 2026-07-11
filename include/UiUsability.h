@@ -27,13 +27,43 @@ inline const char* queueIndicator(std::size_t pending, bool error)
 struct PatternPersistenceState {
   bool unsaved = false;
   bool savePending = false;
+  bool saveValid = false;
+  bool commandFailure = false;
+  uint32_t revision = 0;
+  uint32_t savingRevision = 0;
 
-  void patternChanged() { unsaved = true; }
-  void saveStarted() { savePending = true; }
-  void saveSucceeded()
+  void patternChanged()
   {
-    unsaved = false;
-    savePending = false;
+    unsaved = true;
+    ++revision;
   }
-  void saveFailed() { savePending = false; }
+  void saveStarted()
+  {
+    savePending = true;
+    saveValid = !commandFailure;
+    savingRevision = revision;
+  }
+  bool saveSucceeded()
+  {
+    const bool savedCurrentRevision = saveValid && savingRevision == revision;
+    if (savedCurrentRevision) {
+      unsaved = false;
+      commandFailure = false;
+    }
+    savePending = false;
+    saveValid = false;
+    return savedCurrentRevision;
+  }
+  void commandFailed()
+  {
+    unsaved = true;
+    commandFailure = true;
+    saveValid = false;
+  }
+  void fullResyncStarted() { commandFailure = false; }
+  void saveFailed()
+  {
+    savePending = false;
+    saveValid = false;
+  }
 };

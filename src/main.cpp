@@ -7,6 +7,8 @@
 #include "M5Cardputer.h"
 #include "SoundManager.h"
 #include "CardputerAudioSync.h"
+#include "CommandQueuePolicy.h"
+#include "ControllerSessionPolicy.h"
 #include "ControllerBatteryParser.h"
 #include "ProfileCodec.h"
 #include "UiUsability.h"
@@ -307,13 +309,6 @@ struct BleDeviceEntry {
   bool serviceMatch = false;
 };
 
-enum class CommandClass : uint8_t {
-  User,
-  RequiredInit,
-  OptionalInit,
-  Poll,
-};
-
 struct CommandQueueEntry {
   String command;
   bool nk4Raw = false;
@@ -321,6 +316,7 @@ struct CommandQueueEntry {
   unsigned long sentAt = 0;
   uint32_t generation = 0;
   CommandClass commandClass = CommandClass::User;
+  LiveCommandKind liveKind = LiveCommandKind::None;
 };
 
 enum class Card : uint8_t {
@@ -390,6 +386,7 @@ struct FlashUiStatus {
 struct AppState {
   bool usbConnected = false;
   bool controllerConnected = false;
+  InitialRefreshState initialRefresh;
   bool controllerError = false;
   bool sdReady = false;
   int cardputerBatteryPercent = -1;
@@ -458,6 +455,8 @@ bool lastUsbConnected = false;
 bool usbProbePending = false;
 String rxLine;
 std::vector<CommandQueueEntry> commandQueue;
+constexpr size_t MAX_COMMAND_QUEUE_ENTRIES = 64;
+CommandOperationState commandOperation;
 bool nk4Pending = false;
 CommandQueueEntry pendingNk4;
 uint16_t nextNk4Seq = 1;
@@ -2230,18 +2229,59 @@ bool isPatternMutationCommand(const String& command)
          command == "cmd=defaults confirm=1";
 }
 
-void enqueueCommandEntry(const String& command, bool nk4Raw = false, CommandClass commandClass = CommandClass::User)
+void clearCommandQueue(bool failedOperation = false)
 {
-  if (isPatternMutationCommand(command)) {
-    patternPersistence.patternChanged();
-  } else if (isSaveCommand(command) && patternPersistence.unsaved) {
-    patternPersistence.saveStarted();
+  commandQueue.clear();
+  if (failedOperation) {
+    commandOperation.failRemaining();
+  } else {
+    commandOperation.abort();
+  }
+}
+
+bool enqueueCommandEntry(const String& command, bool nk4Raw = false, CommandClass commandClass = CommandClass::User,
+                         LiveCommandKind liveKind = LiveCommandKind::None)
+{
+  const bool patternMutation = isPatternMutationCommand(command);
+  if (replaceQueuedLiveCommand(commandQueue, command, liveKind, connectionGeneration)) {
+    if (patternMutation) {
+      patternPersistence.patternChanged();
+    }
+    app.lastCommand = command;
+    app.dirty = true;
+    return true;
+  }
+  if (hasQueuedBackgroundCommand(commandQueue, command, commandClass, connectionGeneration)) {
+    return true;
+  }
+  if (!makeCommandQueueSpace(commandQueue, MAX_COMMAND_QUEUE_ENTRIES, commandClass)) {
+    if (commandClass == CommandClass::OptionalInit || commandClass == CommandClass::Poll) {
+      Serial.print("queue: background command dropped ");
+      Serial.println(nk4CommandLabel(command));
+      return false;
+    }
+    if (patternMutation) {
+      patternPersistence.patternChanged();
+      patternPersistence.commandFailed();
+    }
+    if (nk4Raw) {
+      commandOperation.commandRejected(commandClass);
+    }
+    setStatus("Command queue full", COLOR_ERR);
+    app.dirty = true;
+    return false;
   }
   CommandQueueEntry entry;
   entry.command = command;
   entry.nk4Raw = nk4Raw;
   entry.commandClass = commandClass;
+  entry.liveKind = liveKind;
   entry.generation = connectionGeneration;
+  if (patternMutation) {
+    patternPersistence.patternChanged();
+  } else if (isSaveCommand(command) && patternPersistence.unsaved) {
+    patternPersistence.saveStarted();
+  }
   if (app.transportMode == TransportMode::Ble && app.protocolMode == ProtocolMode::Nk4 &&
       commandClass == CommandClass::User && bleInitialBasisDone && !commandQueue.empty()) {
     for (auto it = commandQueue.begin(); it != commandQueue.end(); ++it) {
@@ -2251,13 +2291,14 @@ void enqueueCommandEntry(const String& command, bool nk4Raw = false, CommandClas
         app.dirty = true;
         Serial.print("bleq: user priority label=");
         Serial.println(nk4CommandLabel(command));
-        return;
+        return true;
       }
     }
   }
   commandQueue.push_back(entry);
   app.lastCommand = command;
   app.dirty = true;
+  return true;
 }
 
 void queueBleInitialRefresh()
@@ -2275,66 +2316,68 @@ void queueBleInitialRefresh()
   enqueueCommandEntry("cmd=get section=sync", true, CommandClass::OptionalInit);
 }
 
-void sendCommand(const String& command, bool announce = true)
+bool sendCommand(const String& command, bool announce = true, LiveCommandKind liveKind = LiveCommandKind::None)
 {
   if (command.length() == 0) {
     setStatus("Command missing", COLOR_WARN);
-    return;
+    return false;
   }
   bool wasEmpty = commandQueue.empty();
+  bool queued = true;
   if (app.protocolMode == ProtocolMode::Nk4 && command == NightKiteCommands::refreshAll()) {
     if (app.transportMode == TransportMode::Ble) {
       queueBleInitialRefresh();
     } else {
-      enqueueCommandEntry("cmd=info", true);
-      enqueueCommandEntry("cmd=caps", true);
-      enqueueCommandEntry("cmd=status", true);
-      enqueueCommandEntry("cmd=get section=config", true);
-      enqueueCommandEntry("cmd=get section=play", true);
-      enqueueCommandEntry("cmd=get section=sync", true);
-      enqueueCommandEntry("cmd=sync_radio_status", true);
-      enqueueCommandEntry("cmd=get section=wireless", true);
-      enqueueCommandEntry("cmd=get section=patterns", true);
+      queued = enqueueCommandEntry("cmd=info", true, CommandClass::Poll) && queued;
+      queued = enqueueCommandEntry("cmd=caps", true, CommandClass::Poll) && queued;
+      queued = enqueueCommandEntry("cmd=status", true, CommandClass::Poll) && queued;
+      queued = enqueueCommandEntry("cmd=get section=config", true, CommandClass::Poll) && queued;
+      queued = enqueueCommandEntry("cmd=get section=play", true, CommandClass::Poll) && queued;
+      queued = enqueueCommandEntry("cmd=get section=sync", true, CommandClass::Poll) && queued;
+      queued = enqueueCommandEntry("cmd=sync_radio_status", true, CommandClass::Poll) && queued;
+      queued = enqueueCommandEntry("cmd=get section=wireless", true, CommandClass::Poll) && queued;
+      queued = enqueueCommandEntry("cmd=get section=patterns", true, CommandClass::Poll) && queued;
     }
   } else if (app.protocolMode == ProtocolMode::Nk4) {
-    enqueueCommandEntry(legacyCommandToNk4Payload(command), true);
+    queued = enqueueCommandEntry(legacyCommandToNk4Payload(command), true, CommandClass::User, liveKind);
   } else {
-    enqueueCommandEntry(command, false);
+    queued = enqueueCommandEntry(command, false, CommandClass::User, liveKind);
   }
-  if (announce && wasEmpty) {
+  if (announce && wasEmpty && queued) {
     setStatus("Queued command", COLOR_ACCENT);
   }
+  return queued;
 }
 
 void enqueueNk4RefreshForSet(const String& command)
 {
   if (command.indexOf("play_mode=") >= 0 || command.indexOf("boot_mode=") >= 0 ||
       command.indexOf("autoplay=") >= 0 || command.indexOf("autoplay_interval=") >= 0) {
-    enqueueCommandEntry("cmd=get section=play", true);
-    enqueueCommandEntry("cmd=status", true);
+    enqueueCommandEntry("cmd=get section=play", true, CommandClass::Poll);
+    enqueueCommandEntry("cmd=status", true, CommandClass::Poll);
   } else if (command.indexOf("sync_enabled=") >= 0 || command.indexOf("sync_group=") >= 0 ||
              command.indexOf("sync_role=") >= 0 || command.indexOf("sync_loss_behavior=") >= 0 ||
              command.indexOf("sync_master_uid=") >= 0) {
-    enqueueCommandEntry("cmd=get section=sync", true);
-    enqueueCommandEntry("cmd=sync_status", true);
+    enqueueCommandEntry("cmd=get section=sync", true, CommandClass::Poll);
+    enqueueCommandEntry("cmd=sync_status", true, CommandClass::Poll);
   } else if (command.indexOf("wireless_enabled=") >= 0 || command.indexOf("wireless_profile=") >= 0) {
-    enqueueCommandEntry("cmd=get section=wireless", true);
+    enqueueCommandEntry("cmd=get section=wireless", true, CommandClass::Poll);
   } else if (command.indexOf("name=") >= 0) {
-    enqueueCommandEntry("cmd=info", true);
-    enqueueCommandEntry("cmd=status", true);
+    enqueueCommandEntry("cmd=info", true, CommandClass::Poll);
+    enqueueCommandEntry("cmd=status", true, CommandClass::Poll);
   } else if (command.indexOf("enabled_mask=") >= 0 || command.indexOf("inverted_mask=") >= 0) {
-    enqueueCommandEntry("cmd=get section=patterns", true);
+    enqueueCommandEntry("cmd=get section=patterns", true, CommandClass::Poll);
     if (command.indexOf("enabled_mask=") >= 0) {
-      enqueueCommandEntry("cmd=status", true);
+      enqueueCommandEntry("cmd=status", true, CommandClass::Poll);
     }
   } else if (command.indexOf("pattern=") >= 0) {
-    enqueueCommandEntry("cmd=status", true);
-    enqueueCommandEntry("cmd=get section=patterns", true);
+    enqueueCommandEntry("cmd=status", true, CommandClass::Poll);
+    enqueueCommandEntry("cmd=get section=patterns", true, CommandClass::Poll);
   } else if (command.indexOf("brightness=") >= 0 || command.indexOf("strip_length=") >= 0 ||
              command.indexOf("smoothing=") >= 0 || command.indexOf("accel_range=") >= 0 ||
              command.indexOf("gyro_range=") >= 0 || command.indexOf("boot_calibration=") >= 0) {
-    enqueueCommandEntry("cmd=get section=config", true);
-    enqueueCommandEntry("cmd=status", true);
+    enqueueCommandEntry("cmd=get section=config", true, CommandClass::Poll);
+    enqueueCommandEntry("cmd=status", true, CommandClass::Poll);
   }
 }
 
@@ -2346,9 +2389,12 @@ void handleNk4CommandOk(const String& command)
     return;
   }
   if (command == "cmd=save") {
-    patternPersistence.saveSucceeded();
-    app.patternEditsPending = false;
-    setStatus("Saved", COLOR_OK);
+    const bool hadPatternSavePending = patternPersistence.savePending;
+    const bool fullySaved = !hadPatternSavePending || patternPersistence.saveSucceeded();
+    if (fullySaved) {
+      app.patternEditsPending = false;
+    }
+    setStatus(fullySaved ? "Saved" : "Save incomplete", fullySaved ? COLOR_OK : COLOR_WARN);
     return;
   }
   if (!command.startsWith("cmd=set ")) {
@@ -2537,15 +2583,16 @@ void updateBleInitialProgress(CommandClass completedClass)
       }
     }
     if (!hasRequiredPending) {
-      bleInitialBasisDone = true;
-      Serial.println("bleq: initial basis done");
-      setStatus("BLE ready", COLOR_OK);
+      bleInitialBasisDone = app.initialRefresh.ready();
+      Serial.println(bleInitialBasisDone ? "bleq: initial basis done" : "bleq: initial basis incomplete");
+      setStatus(bleInitialBasisDone ? "BLE ready" : "BLE refresh incomplete",
+                bleInitialBasisDone ? COLOR_OK : COLOR_WARN);
     }
   }
   if (commandQueue.empty() && !nk4Pending) {
     bleInitialRefreshActive = false;
-    bleInitialBasisDone = true;
-    Serial.println("bleq: initial done");
+    bleInitialBasisDone = app.initialRefresh.ready();
+    Serial.println(bleInitialBasisDone ? "bleq: initial done" : "bleq: initial incomplete");
   }
 }
 
@@ -2557,6 +2604,7 @@ void pollCommandQueue()
         patternPersistence.saveFailed();
       }
       nk4Pending = false;
+      commandOperation.abort();
       app.dirty = true;
     } else {
       unsigned long now = millis();
@@ -2572,6 +2620,10 @@ void pollCommandQueue()
       String timeoutLabel = nk4CommandLabel(timedOut);
       CommandClass timedOutClass = pendingNk4.commandClass;
       nk4Pending = false;
+      commandOperation.commandFinished(timedOutClass, false);
+      if (isPatternMutationCommand(timedOut)) {
+        patternPersistence.commandFailed();
+      }
       if (isSaveCommand(timedOut)) {
         patternPersistence.saveFailed();
       }
@@ -2590,7 +2642,7 @@ void pollCommandQueue()
         bool optionalTimeout = bleCommandTimeoutIsSoft(pendingNk4);
         activeTransport().clearBuffers();
         if (!optionalTimeout) {
-          commandQueue.clear();
+          clearCommandQueue(true);
           patternPersistence.saveFailed();
           patternSyncInProgress = false;
           transferCompleteSoundPending = false;
@@ -2641,14 +2693,30 @@ void pollCommandQueue()
       bleQueueWasActive = false;
       if (bleInitialRefreshActive) {
         bleInitialRefreshActive = false;
-        bleInitialBasisDone = true;
-        Serial.println("bleq: initial done");
+        bleInitialBasisDone = app.initialRefresh.ready();
+        Serial.println(bleInitialBasisDone ? "bleq: initial done" : "bleq: initial incomplete");
+        if (!bleInitialBasisDone) {
+          setStatus("BLE refresh incomplete", COLOR_WARN);
+        }
       }
       if (bleTransport.clientState() == BleClientState::Ready) {
         syncBleUiStatus();
       }
     }
-    if (patternSyncInProgress) {
+    bool operationSucceeded = true;
+    const bool operationFinished = commandOperation.takeResult(operationSucceeded);
+    if (operationFinished && !operationSucceeded) {
+      const bool transferFailed = transferCompleteSoundPending;
+      patternSyncInProgress = false;
+      transferCompleteSoundPending = false;
+      if (transferFailed) {
+        soundManager.playError();
+      }
+    } else if (transferCompleteSoundPending && app.protocolMode != ProtocolMode::Nk4) {
+      patternSyncInProgress = false;
+      transferCompleteSoundPending = false;
+      setStatus("Commands sent", COLOR_WARN);
+    } else if (patternSyncInProgress) {
       patternSyncInProgress = false;
       playTransferCompleteIfPending("Pattern states sent");
     } else {
@@ -2662,7 +2730,7 @@ void pollCommandQueue()
     return;
   }
   if (!app.usbConnected) {
-    commandQueue.clear();
+    clearCommandQueue();
     patternPersistence.saveFailed();
     patternSyncInProgress = false;
     transferCompleteSoundPending = false;
@@ -2670,6 +2738,7 @@ void pollCommandQueue()
     return;
   }
   while (!commandQueue.empty() && commandQueue.front().generation != connectionGeneration) {
+    commandOperation.abort();
     commandQueue.erase(commandQueue.begin());
     app.dirty = true;
   }
@@ -2679,8 +2748,14 @@ void pollCommandQueue()
   CommandQueueEntry entry = commandQueue.front();
   commandQueue.erase(commandQueue.begin());
   app.dirty = true;
+  if (entry.nk4Raw && isSaveCommand(entry.command) && commandOperation.hasFailed()) {
+    patternPersistence.saveFailed();
+    setStatus("Save skipped after error", COLOR_ERR);
+    return;
+  }
   String wireCommand = entry.command;
   if (entry.nk4Raw) {
+    commandOperation.commandQueued(entry.commandClass);
     entry.seq = nextNk4Seq++;
     wireCommand = "NK4 seq=" + String(entry.seq) + " " + entry.command;
     entry.sentAt = millis();
@@ -2986,7 +3061,8 @@ void drawStatusBar()
   String transport = connectionToken();
   String play = app.protocolMode == ProtocolMode::Nk4 ? playToken() + "/" + roleToken() : "CTRL";
   int queuedCount = static_cast<int>(commandQueue.size()) + (nk4Pending ? 1 : 0);
-  bool queueError = app.controllerError || app.bleState == BleClientState::Error || app.bleState == BleClientState::Lost;
+  bool queueError = commandOperation.hasFailed() || app.controllerError || app.bleState == BleClientState::Error ||
+                    app.bleState == BleClientState::Lost;
   String queueText = queueIndicator(queuedCount, queueError);
   uint16_t queueColor = queueError ? COLOR_ERR : queuedCount > 0 || patternSyncInProgress ? COLOR_WARN : COLOR_MUTED;
   String nkStatus = controllerBatteryStatusText();
@@ -3404,7 +3480,10 @@ String lockedText()
 
 String beaconAgeText()
 {
-  return app.sync.hasBeaconAge ? String(app.sync.beaconAgeMs) + "ms" : "--";
+  const int ageMs = app.sync.hasBeaconAge
+                        ? currentBeaconAgeMs(app.sync.beaconAgeMs, app.sync.beaconAgeUpdatedAtMs, millis())
+                        : -1;
+  return ageMs >= 0 ? String(ageMs) + "ms" : "--";
 }
 
 String msText(int value)
@@ -4657,6 +4736,11 @@ void applyLoadedProfile()
     setStatus("No profile loaded", COLOR_WARN);
     return;
   }
+  const bool protocolResolved = app.protocolMode == ProtocolMode::Nk4 || app.protocolMode == ProtocolMode::Legacy;
+  if (!controllerSessionReady(app.usbConnected, app.controllerConnected, app.initialRefresh.ready(), protocolResolved)) {
+    setStatus(app.usbConnected ? "Controller syncing" : "No controller", COLOR_WARN);
+    return;
+  }
   setStatus("Applying profile...", COLOR_ACCENT);
   markTransferCompleteSoundPending();
   const int supportedPatterns = controllerPatternCount();
@@ -4793,6 +4877,11 @@ void startApplyLoadedProfile()
 {
   if (!app.hasLoadedProfile) {
     setStatus("No profile loaded", COLOR_WARN);
+    return;
+  }
+  const bool protocolResolved = app.protocolMode == ProtocolMode::Nk4 || app.protocolMode == ProtocolMode::Legacy;
+  if (!controllerSessionReady(app.usbConnected, app.controllerConnected, app.initialRefresh.ready(), protocolResolved)) {
+    setStatus(app.usbConnected ? "Controller syncing" : "No controller", COLOR_WARN);
     return;
   }
   mode = Mode::ConfirmProfileApply;
@@ -5015,7 +5104,7 @@ void applyNk4Fields(const String& parsed)
       parseIntValue(parsed, "rx_age_ms", parsedBeaconAge) || parseIntValue(parsed, "beacon_age", parsedBeaconAge) ||
       parseIntValue(parsed, "age_ms", parsedBeaconAge)) {
     app.sync.beaconAgeMs = parsedBeaconAge;
-    app.sync.hasBeaconAge = true;
+    app.sync.hasBeaconAge = parsedBeaconAge >= 0;
     app.sync.beaconAgeUpdatedAtMs = millis();
   }
   parseStringField(parsed, "radio_mode", app.sync.radioMode);
@@ -5063,6 +5152,22 @@ void applyNk4Fields(const String& parsed)
     app.wireless.supported = true;
   }
   syncEditFromCard();
+}
+
+void markInitialRefreshCommandSucceeded(const String& command)
+{
+  if (command == "cmd=info") {
+    app.initialRefresh.commandSucceeded(InitialRefreshPart::Info);
+  } else if (command == "cmd=status") {
+    app.initialRefresh.commandSucceeded(InitialRefreshPart::Status);
+  } else if (command == "cmd=get section=config") {
+    app.initialRefresh.commandSucceeded(InitialRefreshPart::Config);
+  } else if (command == "cmd=get section=play") {
+    app.initialRefresh.commandSucceeded(InitialRefreshPart::Play);
+  }
+  if (app.transportMode == TransportMode::Ble && app.initialRefresh.ready()) {
+    bleInitialBasisDone = true;
+  }
 }
 
 bool parseNk4Line(const String& parsed)
@@ -5124,21 +5229,27 @@ bool parseNk4Line(const String& parsed)
       Serial.println(commandClassLabel(matchedClass));
     }
     if (matchedCommand.length() > 0) {
+      commandOperation.commandFinished(matchedClass, true);
       handleNk4CommandOk(matchedCommand);
     }
     applyNk4Fields(parsed);
+    if (matchedCommand.length() > 0) {
+      markInitialRefreshCommandSucceeded(matchedCommand);
+    }
     if (app.protocolMode == ProtocolMode::Probing) {
       app.protocolMode = ProtocolMode::Nk4;
       app.controllerError = false;
-      commandQueue.clear();
+      clearCommandQueue();
       if (app.transportMode == TransportMode::Ble) {
         bleTransport.markReady();
         syncBleUiStatus();
       }
       setStatus(String(transportToken()) + " NK4 detected", COLOR_OK);
       sendCommand(NightKiteCommands::refreshAll(), false);
+    } else if (commandOperation.hasFailed()) {
+      // Preserve the operation error while queued refresh responses drain.
     } else if (matchedCommand == "cmd=save") {
-      setStatus("Saved", COLOR_OK);
+      // handleNk4CommandOk() owns the persistence-aware save status.
     } else if (isEvent) {
       setStatus(shortText(parsed, 34), COLOR_MUTED);
     } else {
@@ -5160,11 +5271,17 @@ bool parseNk4Line(const String& parsed)
     }
     String code = valueForKey(parsed, "code");
     String msg = valueForKey(parsed, "msg");
+    if (matchedCommand.length() > 0) {
+      commandOperation.commandFinished(matchedClass, false);
+    }
+    if (isPatternMutationCommand(matchedCommand)) {
+      patternPersistence.commandFailed();
+    }
     if (isSaveCommand(matchedCommand)) {
       patternPersistence.saveFailed();
     }
     if (matchedCommand == "cmd=defaults confirm=1") {
-      commandQueue.clear();
+      clearCommandQueue(true);
       patternPersistence.saveFailed();
       setStatus("Factory reset failed", COLOR_ERR);
     } else {
@@ -5204,9 +5321,13 @@ void parseNightKiteLine(const String& line)
     lastRxMs = millis();
     String lower = parsed;
     lower.toLowerCase();
+    bool legacySaveIncomplete = false;
     if (patternPersistence.savePending && lower.indexOf("save") >= 0) {
-      patternPersistence.saveSucceeded();
-      app.patternEditsPending = false;
+      if (patternPersistence.saveSucceeded()) {
+        app.patternEditsPending = false;
+      } else {
+        legacySaveIncomplete = true;
+      }
     }
 
     parseIntFieldUnlessDirty(parsed, "pattern", app.settings.activePattern, patternDirty);
@@ -5244,15 +5365,24 @@ void parseNightKiteLine(const String& line)
     }
     parseControllerBattery(parsed);
     parsePatternStates(parsed);
-    setStatus(shortText(parsed, 34), COLOR_OK);
+    if (lower.startsWith("ok show") ||
+        (lower.indexOf("brightness=") >= 0 && lower.indexOf("strip_length=") >= 0 &&
+         (lower.indexOf("pattern=") >= 0 || lower.indexOf("active_pattern=") >= 0))) {
+      app.initialRefresh.legacyShowSucceeded();
+    }
+    setStatus(legacySaveIncomplete ? "Save incomplete" : shortText(parsed, 34),
+              legacySaveIncomplete ? COLOR_WARN : COLOR_OK);
   } else if (parsed.startsWith("ERR")) {
     if (app.protocolMode == ProtocolMode::Unknown) {
       app.protocolMode = ProtocolMode::Legacy;
     }
     String lower = parsed;
     lower.toLowerCase();
-    if (patternPersistence.savePending && lower.indexOf("save") >= 0) {
-      patternPersistence.saveFailed();
+    if (patternPersistence.savePending) {
+      patternPersistence.commandFailed();
+      if (lower.indexOf("save") >= 0) {
+        patternPersistence.saveFailed();
+      }
     }
     app.controllerConnected = true;
     app.controllerError = true;
@@ -5308,16 +5438,10 @@ void resetControllerSession(TransportMode nextTransportMode = TransportMode::Usb
   }
   rxLine = "";
   app.controllerConnected = false;
+  app.initialRefresh.reset();
   app.controllerError = false;
-  app.settings.hasControllerBattery = false;
-  app.settings.controllerBatteryPercent = -1;
-  app.settings.controllerBatteryVoltage = NAN;
-  app.settings.controllerBatteryState = "";
-  app.settings.patternCount = -1;
-  app.settings.syncReadyPatternMask = 0;
-  app.settings.partialSyncPatternMask = 0;
-  app.settings.localReactivePatternMask = 0;
-  app.settings.hasPatternClassification = false;
+  app.settings = ControllerSettings{};
+  ensurePatternModel();
   app.protocolMode = ProtocolMode::Unknown;
   app.transportMode = nextTransportMode;
   app.identity = ControllerIdentity{};
@@ -5326,15 +5450,14 @@ void resetControllerSession(TransportMode nextTransportMode = TransportMode::Usb
   app.sync = SyncState{};
   app.wireless = WirelessState{};
   app.diagnostics = DiagnosticsState{};
-  brightnessDirty = false;
-  patternDirty = false;
-  configDirtyMask = 0;
-  playDirtyMask = 0;
-  syncDirtyMask = 0;
-  wirelessDirtyMask = 0;
-  app.patternEditsPending = false;
+  discardAllDrafts();
+  if (nextTransportMode == TransportMode::Usb) {
+    app.bleStatus = "BLE idle";
+    app.bleState = BleClientState::Idle;
+    app.bleScanning = false;
+  }
   patternPersistence.saveFailed();
-  commandQueue.clear();
+  clearCommandQueue();
   nk4Pending = false;
   pendingNk4 = CommandQueueEntry{};
   nk4MachineSent = false;
@@ -5461,7 +5584,7 @@ void disconnectBleDevice()
 
 void failBleConnection(const String& reason)
 {
-  commandQueue.clear();
+  clearCommandQueue();
   nk4Pending = false;
   pendingNk4 = CommandQueueEntry{};
   bleTransport.markError(reason);
@@ -5503,7 +5626,7 @@ void queueControllerFactoryReset()
     setStatus("Detecting protocol...", COLOR_ACCENT);
     return;
   }
-  commandQueue.clear();
+  clearCommandQueue();
   if (app.protocolMode == ProtocolMode::Nk4) {
     enqueueCommandEntry("cmd=defaults confirm=1", true);
     enqueueCommandEntry("cmd=save", true);
@@ -5534,7 +5657,7 @@ void fallbackToLegacy()
   }
   app.protocolMode = ProtocolMode::Legacy;
   nk4Pending = false;
-  commandQueue.clear();
+  clearCommandQueue();
   setStatus("USB legacy mode", COLOR_WARN);
   sendCommand(NightKiteCommands::refreshAll(), false);
   requestControllerBattery(true);
@@ -5699,8 +5822,7 @@ void pollTransport()
     lastPollMs = millis();
     if (app.usbConnected && app.protocolMode != ProtocolMode::Probing && !autoRefreshPaused()) {
       if (app.protocolMode == ProtocolMode::Nk4) {
-        enqueueCommandEntry("cmd=status", true, app.transportMode == TransportMode::Ble ? CommandClass::Poll
-                                                                                        : CommandClass::User);
+        enqueueCommandEntry("cmd=status", true, CommandClass::Poll);
       } else {
         sendCommand(NightKiteCommands::refreshAll(), false);
       }
@@ -5933,8 +6055,12 @@ void sendLiveEditCommand(const String& command, const String& status)
   if (!app.usbConnected || app.protocolMode == ProtocolMode::Probing || usbProbePending) {
     return;
   }
-  sendCommand(command, false);
-  setStatus(status, COLOR_ACCENT);
+  const LiveCommandKind liveKind = command.startsWith("set brightness ") ? LiveCommandKind::Brightness
+                                  : command.startsWith("set pattern ")  ? LiveCommandKind::Pattern
+                                                                       : LiveCommandKind::None;
+  if (sendCommand(command, false, liveKind)) {
+    setStatus(status, COLOR_ACCENT);
+  }
 }
 
 void changeValue(int delta)
@@ -6428,6 +6554,7 @@ void applyCurrentCard()
 void saveAllPatternStates()
 {
   ensurePatternModel();
+  patternPersistence.fullResyncStarted();
   markTransferCompleteSoundPending();
   const int supportedPatterns = controllerPatternCount();
   for (int index = 0; index < supportedPatterns; ++index) {
@@ -6437,7 +6564,7 @@ void saveAllPatternStates()
   }
   sendCommand("save");
   patternSyncInProgress = true;
-  setStatus("Sending pattern states", COLOR_OK);
+  setStatus("Sending pattern states", COLOR_ACCENT);
 }
 
 void startFirmwareFlash()
@@ -6483,7 +6610,7 @@ void beginFirmwareFlashAfterBootsel()
     setFlashState(FlashUiState::Error);
     return;
   }
-  commandQueue.clear();
+  clearCommandQueue();
   patternSyncInProgress = false;
   transferCompleteSoundPending = false;
   app.flash.busy = true;
@@ -6567,7 +6694,7 @@ void applyPatternDetail()
   if (invertChanged) {
     sendCommand(NightKiteCommands::setPatternInvert(pattern.id, detailInvert));
   }
-  setStatus("Pattern update sent", COLOR_OK);
+  setStatus("Pattern update queued", COLOR_ACCENT);
   mode = Mode::Cards;
   app.dirty = true;
 }

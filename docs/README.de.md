@@ -224,6 +224,11 @@ eine temporäre Datei vollständig geschrieben und geprüft. Ein unterbrochener
 Overwrite behält eine wiederherstellbare `.bak`-Datei, die beim nächsten
 Profil-Scan zurückgespielt wird.
 
+Ein geladenes Profil kann erst angewendet werden, nachdem die aktuelle USB- oder
+BLE-Controller-Session ihren initialen Identity-, Status-, Config- und
+Play-State-Refresh abgeschlossen hat. Ein Disconnect im Bestätigungsdialog
+bricht das Anwenden ab.
+
 ```json
 {
   "profile_version": 2,
@@ -501,8 +506,18 @@ ist `S save` die klare Persistenz-Aktion.
 
 Pattern-Änderungen bleiben nach erfolgreichem Live-Befehl als `UNSAVED`
 markiert. Erst die bestätigte persistente `save`-Antwort des Controllers löscht
-die Markierung. Nach fehlgeschlagenem oder abgelaufenem Save bleibt `UNSAVED`
-aktiv.
+die Markierung. Nach einem fehlgeschlagenen/abgelaufenen Pattern-Befehl, einem
+teilweise fehlgeschlagenen Batch oder einer erst nach `save` eingereihten
+Änderung bleibt `UNSAVED` auch bei einer späteren `save ok`-Antwort aktiv.
+
+Schnelle Live-Änderungen an Brightness oder aktivem Pattern ersetzen jeweils
+einen älteren noch nicht gesendeten Befehl desselben Typs. Dabei wird keine
+andere Benutzerbefehls-Grenze überschritten. Die Queue hält höchstens 64
+wartende Befehle; Hintergrund-Refreshes werden zuerst zusammengefasst oder
+verworfen. Passt ein Benutzerbefehl trotzdem nicht, erscheint
+`Command queue full`. NK4 meldet den Erfolg einer Mehrfachoperation nur, wenn
+alle Benutzerbefehle erfolgreich waren. Legacy-Batches werden lediglich als
+gesendet gemeldet, weil Legacy keine sequenzbasierte Batch-Bestätigung besitzt.
 
 `C reset USB` setzt nur den Link-seitigen USB-/Protokollzustand zurück. Das ist
 kein Controller-Werkreset.
@@ -642,7 +657,8 @@ Warnungen:
 - Die UI soll nicht blockieren; `M5Cardputer.update()` muss regelmäßig laufen.
 - USB-CLI-Kommunikation und UF2-Mass-Storage-Flasher sollen klar getrennt
   bleiben.
-- Die aktuelle Command-Queue sendet CLI-Befehle mit kurzem Abstand.
+- Die begrenzte Command-Queue erhält die Reihenfolge der Benutzerbefehle und
+  sendet sie mit kurzem Abstand.
 - Der Firmware-Flasher pausiert normales CLI-Polling, solange er aktiv ist.
 - `scripts/patch_m5cardputer.py` patcht beim Build bei Bedarf die
   M5Cardputer-Abhängigkeit und fügt dort einen fehlenden GPIO-Include hinzu.

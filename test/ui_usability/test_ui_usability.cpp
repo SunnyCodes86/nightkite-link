@@ -34,8 +34,22 @@ int main()
   assert(timedOutSave.unsaved && !timedOutSave.savePending);
 
   pattern.saveStarted();
-  pattern.saveSucceeded();
+  assert(pattern.saveSucceeded());
   assert(!pattern.unsaved && !pattern.savePending);
+
+  PatternPersistenceState partialFailure;
+  partialFailure.patternChanged();
+  partialFailure.saveStarted();
+  partialFailure.commandFailed();
+  assert(!partialFailure.saveSucceeded());
+  assert(partialFailure.unsaved && !partialFailure.savePending);
+
+  PatternPersistenceState changedAfterSaveQueued;
+  changedAfterSaveQueued.patternChanged();
+  changedAfterSaveQueued.saveStarted();
+  changedAfterSaveQueued.patternChanged();
+  assert(!changedAfterSaveQueued.saveSucceeded());
+  assert(changedAfterSaveQueued.unsaved);
 
   PatternPersistenceState queueEmpty;
   queueEmpty.patternChanged();

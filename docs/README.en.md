@@ -214,6 +214,10 @@ written to a temporary file and verified before replacement; an interrupted
 overwrite keeps a recoverable `.bak` copy that is restored on the next profile
 scan.
 
+A loaded profile can be applied only after the current USB or BLE controller
+session has completed its initial identity, status, configuration and play-state
+refresh. Disconnecting during the confirmation step cancels the apply.
+
 ```json
 {
   "profile_version": 2,
@@ -485,7 +489,16 @@ immediately, but they are only persistent after `save`. On the Controller card,
 
 Pattern changes remain marked `UNSAVED` after their live command succeeds. The
 marker is cleared only after the controller confirms the persistent `save`.
-A failed or timed-out save leaves `UNSAVED` active.
+A failed/timed-out pattern command, partial batch failure, or change queued
+after `save` leaves `UNSAVED` active even if that save later returns `ok`.
+
+Rapid brightness and active-pattern live edits replace an older unsent edit of
+the same kind. They never cross another user-command barrier. The queue holds at
+most 64 waiting commands; background refreshes are deduplicated or dropped
+first, while a user command that still cannot fit reports `Command queue full`.
+NK4 multi-command success is shown only if every user command succeeds. Legacy
+CLI batches are reported as sent because Legacy has no sequence-matched batch
+confirmation.
 
 `C reset USB` only resets Link's USB/protocol session. It is not a controller
 factory reset.
@@ -621,7 +634,8 @@ Warnings:
 - The UI should remain non-blocking; `M5Cardputer.update()` must run regularly.
 - USB CLI communication and UF2 Mass Storage flashing should stay clearly
   separated.
-- The current command queue sends CLI commands with a short interval.
+- The bounded command queue preserves user-command order and sends commands
+  with a short interval.
 - The firmware flasher pauses normal CLI polling while active.
 - The M5Cardputer library is patched by `scripts/patch_m5cardputer.py` during
   build to add a missing GPIO include in the dependency if needed.
