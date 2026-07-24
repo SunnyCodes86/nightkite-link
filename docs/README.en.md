@@ -315,6 +315,11 @@ when available and Cardputer battery. The firmware flasher uses its own workflow
 screens for confirmation, BOOTSEL instructions, waiting, progress, reboot and
 error states.
 
+The Controller card shows `Cfg repaired` when Firmware 4.x reports successful
+persistent-config recovery. Controller battery warning states (`LOW`, `CRIT`,
+`CUT`, `EMPTY`) take priority over the smoothed voltage/percentage display, so a
+protection transition remains visible even while voltage display hysteresis is active.
+
 ## Controller Communication
 
 NightKite Link uses `USBHostSerial` in USB host mode when `NIGHTKITE_USB_HOST=1`
@@ -331,6 +336,11 @@ On USB connect, Link first attempts Firmware 4.0/NK4:
 
 The NK4 parser handles `ok`, `err` and `event` lines, matches `seq`, tolerates
 unknown keys and uses timeouts so the UI does not freeze.
+
+Firmware 4.x may return BLE NK4 lines up to 4094 characters. Link accepts the
+complete line and reassembles arbitrary TX Notify chunks through the terminating
+newline. Sequence-echoed overflow errors are handled like any other matching
+`err` response, so the pending command fails immediately instead of timing out.
 
 In USB NK4 mode, automatic polling is intentionally light: Link polls `status`
 periodically after the UI has been idle, while full section reads are reserved
@@ -385,6 +395,12 @@ Commands currently sent by the code include:
 - `set boot_calibration quick|off`
 - `save`
 
+On Firmware 4.x, `calibrate quick` and `calibrate precise` map to
+`NK4 cmd=calibrate mode=quick|precise` over USB. Link keeps that request pending
+for up to ten minutes because precise calibration is intentionally slow. The
+blocking maintenance operation is not offered over BLE; Link reports that USB
+is required.
+
 In NK4 mode, existing UI actions are translated to NK4 requests such as
 `cmd=set brightness=...`, `cmd=set play_mode=manual|autoplay|sync`,
 `cmd=set sync_enabled=0|1`, `cmd=set sync_group=...`,
@@ -400,6 +416,12 @@ active; connection attempts are bounded and can be retried after failure. TX
 Notify chunks are reassembled until newline `\n`. USB remains the stable
 recommended path. Link is a configurator and diagnostic tool; it does not relay
 real-time sync beacons or stream LED frames.
+
+Current controller firmware advertises the service UUID in the primary packet
+and the `NK-...` name in the scan response. Link uses active scanning and accepts
+either field, so this split remains discoverable. A sync master suppresses its
+connectable GATT advertisement while it owns the radio; disconnect or leave
+master beacon mode before scanning for BLE NK4.
 
 Bulk invert currently maps to comma-separated `invert_pattern` /
 `normal_pattern` commands. A code comment marks a future dedicated

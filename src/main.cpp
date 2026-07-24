@@ -73,6 +73,7 @@ constexpr unsigned long BLE_NK4_COMMAND_TIMEOUT_MS = 5000;
 constexpr unsigned long BLE_NK4_HELLO_TIMEOUT_MS = 5000;
 constexpr unsigned long BLE_NK4_LONG_TIMEOUT_MS = 10000;
 constexpr unsigned long BLE_NK4_MEDIUM_TIMEOUT_MS = 8000;
+constexpr unsigned long NK4_CALIBRATION_TIMEOUT_MS = 600000;
 constexpr unsigned long BLE_CONNECT_TIMEOUT_MS = 10000;
 constexpr unsigned long NK4_PROBE_TIMEOUT_MS = 1600;
 constexpr unsigned long NK4_MACHINE_DELAY_MS = 120;
@@ -2623,6 +2624,11 @@ String nk4CommandLabel(const String& command)
   return label.length() > 14 ? label.substring(0, 14) : label;
 }
 
+bool isNk4CalibrationCommand(const String& command)
+{
+  return command.startsWith("cmd=calibrate mode=");
+}
+
 unsigned long bleNk4TimeoutForCommand(const String& command)
 {
   String label = nk4CommandLabel(command);
@@ -2705,8 +2711,11 @@ void pollCommandQueue()
       app.dirty = true;
     } else {
       unsigned long now = millis();
-      unsigned long timeoutMs =
-          app.transportMode == TransportMode::Ble ? bleNk4TimeoutForCommand(pendingNk4.command) : NK4_COMMAND_TIMEOUT_MS;
+      unsigned long timeoutMs = isNk4CalibrationCommand(pendingNk4.command)
+                                    ? NK4_CALIBRATION_TIMEOUT_MS
+                                    : app.transportMode == TransportMode::Ble
+                                          ? bleNk4TimeoutForCommand(pendingNk4.command)
+                                          : NK4_COMMAND_TIMEOUT_MS;
       unsigned long lastBleActivity = app.transportMode == TransportMode::Ble ? bleTransport.lastNotifyAtMs() : 0;
       bool bleStillReceiving = app.transportMode == TransportMode::Ble && lastBleActivity > pendingNk4.sentAt &&
                                now - lastBleActivity < BLE_NOTIFY_IDLE_GRACE_MS;
@@ -3256,6 +3265,9 @@ void drawStatusCard()
 void drawDeviceCard()
 {
   String battery = app.settings.hasControllerBattery ? controllerBatteryText() : "--";
+  bool configValid = app.diagnostics.configValid == "1" || app.diagnostics.configValid == "true";
+  String config = app.diagnostics.configRepaired ? "repaired" : app.diagnostics.configValid;
+  uint16_t configColor = app.diagnostics.configRepaired ? COLOR_WARN : configValid ? COLOR_OK : COLOR_MUTED;
   drawTextFit("Controller", 8, CONTENT_Y + 5, 90, COLOR_MUTED);
   drawTextFit(String(transportToken()) + " " + protocolToken(), 160, CONTENT_Y + 5, 70,
               app.protocolMode == ProtocolMode::Nk4 ? COLOR_OK : COLOR_WARN);
@@ -3270,8 +3282,7 @@ void drawDeviceCard()
               COLOR_TEXT);
   drawTextFit("HW " + (app.identity.hardware.length() ? app.identity.hardware : "--"), 10, CONTENT_Y + 74, 108,
               COLOR_TEXT);
-  drawTextFit("Cfg " + app.diagnostics.configValid, 125, CONTENT_Y + 74, 105,
-              app.diagnostics.configValid == "1" || app.diagnostics.configValid == "true" ? COLOR_OK : COLOR_MUTED);
+  drawTextFit("Cfg " + config, 125, CONTENT_Y + 74, 105, configColor);
   if (app.transportMode == TransportMode::Ble) {
     drawFooterHints("R Read", "S Save", "B Disc");
   } else {
@@ -5893,7 +5904,8 @@ void pollTransport()
 
   pollNk4Probe();
 
-  if (app.controllerConnected && millis() - lastRxMs > LINK_STALE_MS) {
+  const bool calibrationPending = nk4Pending && isNk4CalibrationCommand(pendingNk4.command);
+  if (app.controllerConnected && !calibrationPending && millis() - lastRxMs > LINK_STALE_MS) {
     if (app.transportMode == TransportMode::Ble && millis() - lastRxMs <= BLE_LINK_STALE_MS) {
       // BLE can sit idle between conservative polls; keep the session ready unless the link is truly stale.
     } else {
@@ -5908,6 +5920,10 @@ void pollTransport()
     app.dirty = true;
     return;
     }
+  }
+
+  if (calibrationPending) {
+    return;
   }
 
   if (app.usbConnected && app.controllerConnected) {
@@ -6627,9 +6643,17 @@ void applyCurrentCard()
       if (app.selectedCalAction == 0) {
         sendCommand("timing");
       } else if (app.selectedCalAction == 1) {
-        sendCommand("calibrate quick");
+        if (app.transportMode == TransportMode::Ble) {
+          setStatus("Calibration needs USB", COLOR_WARN);
+        } else {
+          sendCommand("calibrate quick");
+        }
       } else if (app.selectedCalAction == 2) {
-        sendCommand("calibrate precise");
+        if (app.transportMode == TransportMode::Ble) {
+          setStatus("Calibration needs USB", COLOR_WARN);
+        } else {
+          sendCommand("calibrate precise");
+        }
       } else {
         bool nextQuick = app.settings.bootCalibration != "quick";
         app.settings.bootCalibration = nextQuick ? "quick" : "off";

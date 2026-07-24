@@ -1,6 +1,7 @@
 #include <assert.h>
 #include <stdint.h>
 
+#include <algorithm>
 #include <string>
 #include <thread>
 
@@ -11,8 +12,25 @@ static void append(BleLineBuffer& buffer, const char* text)
   assert(buffer.append(reinterpret_cast<const uint8_t*>(text), std::char_traits<char>::length(text)));
 }
 
+static void testLongNk4ResponseAndSequenceError()
+{
+  BleLineBuffer buffer(4096);
+  const std::string prefix = "NK4 seq=42 ok payload=";
+  const std::string response = prefix + std::string(4094 - prefix.size(), 'x') + "\n";
+  for (size_t offset = 0; offset < response.size(); offset += 20) {
+    const size_t chunk = std::min<size_t>(20, response.size() - offset);
+    assert(buffer.append(reinterpret_cast<const uint8_t*>(response.data() + offset), chunk));
+  }
+
+  std::string line;
+  assert(buffer.pop(line) && line == response.substr(0, response.size() - 1));
+  append(buffer, "NK4 seq=77 err code=range_error msg=line_too_long\n");
+  assert(buffer.pop(line) && line == "NK4 seq=77 err code=range_error msg=line_too_long");
+}
+
 int main()
 {
+  testLongNk4ResponseAndSequenceError();
   BleLineBuffer buffer(16);
   append(buffer, "NK4 seq=");
   append(buffer, "1\r\nnext\n");

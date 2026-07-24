@@ -327,6 +327,12 @@ falls verfügbar und Cardputer-Akku. Der Firmware-Flasher verwendet eigene
 Workflow-Screens für Bestätigung, BOOTSEL-Anweisung, Warten, Fortschritt, Reboot
 und Fehler.
 
+Die Controller-Card zeigt `Cfg repaired`, wenn Firmware 4.x eine erfolgreiche
+Reparatur der persistenten Konfiguration meldet. Akkuwarnzustände des Controllers
+(`LOW`, `CRIT`, `CUT`, `EMPTY`) haben Vorrang vor der geglätteten Spannungs-/
+Prozentanzeige. Ein Schutzübergang bleibt dadurch auch während der
+Anzeigehysterese sichtbar.
+
 ## Controller-Kommunikation
 
 NightKite Link nutzt `USBHostSerial` im USB-Host-Modus, wenn
@@ -345,6 +351,12 @@ Beim USB-Verbinden versucht Link zuerst Firmware 4.0/NK4:
 
 Der NK4-Parser verarbeitet `ok`-, `err`- und `event`-Zeilen, gleicht `seq` ab,
 toleriert unbekannte Keys und nutzt Timeouts, damit die UI nicht einfriert.
+
+Firmware 4.x kann BLE-NK4-Zeilen mit bis zu 4094 Zeichen liefern. Link übernimmt
+die vollständige Zeile und setzt beliebig aufgeteilte TX-Notify-Chunks bis zum
+abschließenden Newline wieder zusammen. Overflow-Fehler mit zurückgespiegelter
+Sequenz werden wie jede passende `err`-Antwort verarbeitet; der wartende Befehl
+schlägt dadurch sofort fehl statt erst in ein Timeout zu laufen.
 
 Im USB-NK4-Modus ist automatisches Polling bewusst leichtgewichtig: Link pollt
 regelmäßig `status`, nachdem die UI kurz idle war. Vollständige Section-Reads
@@ -399,6 +411,12 @@ Vom Code aktuell gesendete Befehle:
 - `set boot_calibration quick|off`
 - `save`
 
+Bei Firmware 4.x werden `calibrate quick` und `calibrate precise` über USB auf
+`NK4 cmd=calibrate mode=quick|precise` abgebildet. Link hält die Anfrage bis zu
+zehn Minuten offen, da die präzise Kalibrierung absichtlich langsam ist. Über
+BLE wird diese blockierende Wartungsfunktion nicht angeboten; Link weist auf
+die notwendige USB-Verbindung hin.
+
 Im NK4-Modus werden bestehende UI-Aktionen in NK4-Requests übersetzt, zum
 Beispiel `cmd=set brightness=...`, `cmd=set play_mode=manual|autoplay|sync`,
 `cmd=set sync_enabled=0|1`, `cmd=set sync_group=...`,
@@ -415,6 +433,13 @@ Fehler wiederholt werden. TX-Notify-Chunks werden bis zum Zeilenende `\n`
 zusammengesetzt. USB bleibt der stabile empfohlene Pfad. Link ist Konfigurator
 und Diagnosegerät; es leitet keine Echtzeit-Sync-Beacons weiter und streamt keine
 LED-Frames.
+
+Die aktuelle Controller-Firmware sendet die Service-UUID im primären
+Advertising-Paket und den `NK-...`-Namen in der Scan Response. Link scannt aktiv
+und akzeptiert beide Merkmale, daher bleibt diese Aufteilung auffindbar. Ein
+Sync-Master unterdrückt sein verbindbares GATT-Advertising, solange er den Funk
+besitzt; vor einem BLE-NK4-Scan daher die Verbindung trennen bzw. den
+Master-Beacon-Modus verlassen.
 
 Bulk-Invert wird aktuell über kommaseparierte `invert_pattern`- bzw.
 `normal_pattern`-Befehle umgesetzt. Im Code ist ein zukünftiger dedizierter
