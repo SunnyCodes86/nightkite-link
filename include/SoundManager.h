@@ -12,6 +12,8 @@ public:
 
   void setVolume(uint8_t volume);
   uint8_t volume() const;
+  void setKeySoundsEnabled(bool enabled);
+  void setStartupSoundEnabled(bool enabled);
   void setCaptureActive(bool active);
 
   void playStartup();
@@ -36,6 +38,8 @@ private:
   bool shouldPlayUiClick();
 
   bool enabled = true;
+  bool keySoundsEnabled = true;
+  bool startupSoundEnabled = true;
   bool captureActive = false;
   uint8_t currentVolume = 210;
   unsigned long lastClickMs = 0;

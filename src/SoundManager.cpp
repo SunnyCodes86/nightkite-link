@@ -97,6 +97,16 @@ uint8_t SoundManager::volume() const
   return currentVolume;
 }
 
+void SoundManager::setKeySoundsEnabled(bool value)
+{
+  keySoundsEnabled = value;
+}
+
+void SoundManager::setStartupSoundEnabled(bool value)
+{
+  startupSoundEnabled = value;
+}
+
 void SoundManager::setCaptureActive(bool active)
 {
   if (captureActive == active) {
@@ -114,7 +124,9 @@ void SoundManager::setCaptureActive(bool active)
 
 void SoundManager::playStartup()
 {
-  playClip(NightKiteSoundAssets::startupClip, true);
+  if (startupSoundEnabled) {
+    playClip(NightKiteSoundAssets::startupClip, true);
+  }
 }
 
 void SoundManager::playKey()
@@ -124,7 +136,7 @@ void SoundManager::playKey()
 
 void SoundManager::playTextKey()
 {
-  if (shouldPlayUiClick()) {
+  if (keySoundsEnabled && shouldPlayUiClick()) {
     uint8_t variant = chooseNextKeyVariant();
     const auto& clip = NightKiteSoundAssets::keyClips[variant];
     playClip(clip, true);
@@ -133,7 +145,7 @@ void SoundManager::playTextKey()
 
 void SoundManager::playPageChange()
 {
-  if (shouldPlayUiClick()) {
+  if (keySoundsEnabled && shouldPlayUiClick()) {
     playClip(NightKiteSoundAssets::pageChangeClip, true);
   }
 }
@@ -150,7 +162,7 @@ void SoundManager::playQueueTick()
 
 void SoundManager::playNavigate()
 {
-  if (shouldPlayUiClick()) {
+  if (keySoundsEnabled && shouldPlayUiClick()) {
     const auto& clip =
         NightKiteSoundAssets::navigateClips[navigateVariantIndex % NightKiteSoundAssets::NAVIGATE_VARIANT_COUNT];
     navigateVariantIndex = (navigateVariantIndex + 1) % NightKiteSoundAssets::NAVIGATE_VARIANT_COUNT;
@@ -160,12 +172,16 @@ void SoundManager::playNavigate()
 
 void SoundManager::playConfirm()
 {
-  playClip(NightKiteSoundAssets::confirmClip, true);
+  if (keySoundsEnabled) {
+    playClip(NightKiteSoundAssets::confirmClip, true);
+  }
 }
 
 void SoundManager::playCancel()
 {
-  playClip(NightKiteSoundAssets::cancelClip, true);
+  if (keySoundsEnabled) {
+    playClip(NightKiteSoundAssets::cancelClip, true);
+  }
 }
 
 void SoundManager::playSuccess()

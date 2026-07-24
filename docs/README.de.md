@@ -22,6 +22,7 @@ Im aktuellen Code vorhanden:
 
 - Cardputer-Akkuanzeige inklusive Ladestatus
 - PCM-basierte Startup-, Tasten-, Navigations-, Confirm-, Cancel-, Success- und Error-Sounds
+- lokale Link-Options-Card für Sound, Lautstärke, Tasten-/Startton und Displayhelligkeit
 - USB-Verbindungsstatus
 - Controller-/CLI-Verbindungsstatus mit Timeout-Erkennung
 - Helligkeit anzeigen und direkt beim Ändern senden
@@ -314,12 +315,26 @@ NightKite Link nutzt ein Card-based Interface statt eines großen klassischen
 Menüs, weil das Display nur 240 x 135 px groß ist. Die flache Reihenfolge stellt
 Live-Funktionen nach vorne und Diagnose-/Servicefunktionen nach hinten:
 `Status`, `Pattern Live`, `Brightness`, `Play`, `Audio Beacon`, `Patterns`,
-`Pattern Bulk`, `Profiles`, `Controller`, `BLE Connect`, `Controller Setup`,
+`Pattern Bulk`, `Profiles`, `Link Options`, `Controller`, `BLE Connect`, `Controller Setup`,
 `Controller Sync`, `Controller Radio`, `Motion Service`, `Sync Diagnostics`,
 `Sync Setup Test` und `Firmware Update`.
 
 Auf `Patterns` wechselt Pfeil hoch/runter das Controller-Pattern als Live-Vorschau.
 `Enter` öffnet die Detailansicht für Cycle und Invert.
+
+Die `Link Options`-Card ändert ausschließlich Cardputer/NightKite Link. Mit `C`
+wählt man Sound an/aus, Lautstärke, Tastentöne, Startton, Displayhelligkeit oder
+den lokalen Reset; Pfeil hoch/runter wendet den gewählten Wert sofort an. Reset
+stellt nur diese Link-Standardwerte wieder her. Es wird kein Controller-Befehl
+gesendet, Controller-Save/-Defaults werden nicht aufgerufen und SD-Profile
+bleiben unverändert.
+
+Die lokalen Einstellungen liegen als versionierter Datensatz mit Prüfsumme im
+ESP32-Preferences-/NVS-Namespace `nk-link`. Schnelle Änderungen werden
+zusammengefasst und nach einer Sekunde geschrieben; unveränderte Werte werden
+nicht erneut geschrieben. Beim Start werden die Werte validiert. Ein ungültiger
+Datensatz fällt auf die Standardwerte zurück und wird repariert. Standard sind
+Sound an, Lautstärke 210, Tasten- und Startton an sowie Displayhelligkeit 96.
 
 Die Statusleiste oben zeigt kompakt Transport/Protokoll (`USB LEG` oder
 `USB NK4`), kompakte Queue (`Q0`...`Q9+` oder `Q!`), Play-/Rollen-Token, Controller-Akku

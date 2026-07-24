@@ -2,6 +2,7 @@
 #include <ArduinoJson.h>
 #include <SD.h>
 #include <SPI.h>
+#include <Preferences.h>
 #include <math.h>
 #include <memory>
 #include <mutex>
@@ -14,6 +15,7 @@
 #include "CommandQueuePolicy.h"
 #include "ControllerSessionPolicy.h"
 #include "ControllerBatteryParser.h"
+#include "LinkSettings.h"
 #include "ProfileCodec.h"
 #include "UiUsability.h"
 #include "Uf2Validator.h"
@@ -80,6 +82,7 @@ constexpr unsigned long NK4_MACHINE_DELAY_MS = 120;
 constexpr unsigned long BEACON_MASTER_TX_INTERVAL_MS = 100;
 constexpr unsigned long SPLASH_DURATION_MS = 1500;
 constexpr unsigned long STARTUP_SOUND_DELAY_MS = 180;
+constexpr unsigned long LINK_SETTINGS_WRITE_DELAY_MS = 1000;
 constexpr int BLE_SCAN_SECONDS = 6;
 constexpr unsigned long BLE_SCAN_TIMEOUT_MS = BLE_SCAN_SECONDS * 1000UL + 2000UL;
 const char* const NK_BLE_SERVICE_UUID = "4e4b4000-6e69-6768-746b-000000000001";
@@ -336,6 +339,7 @@ enum class Card : uint8_t {
   PatternList,
   PatternBulk,
   Profiles,
+  LinkOptions,
   Device,
   Ble,
   Config,
@@ -347,7 +351,7 @@ enum class Card : uint8_t {
   Firmware,
 };
 
-constexpr int CARD_COUNT = 17;
+constexpr int CARD_COUNT = 18;
 
 enum class Mode : uint8_t {
   Cards,
@@ -422,6 +426,7 @@ struct AppState {
   int selectedBeaconMasterField = 0;
   int selectedProfileAction = 0;
   int selectedProfileIndex = 0;
+  int selectedLinkOption = 0;
   int selectedConfigField = 0;
   int selectedPlayField = 0;
   int selectedSyncField = 0;
@@ -481,6 +486,10 @@ bool bleInitialBasisDone = false;
 bool canvasReady = false;
 M5Canvas uiCanvas(&M5Cardputer.Display);
 SoundManager soundManager;
+NightKiteLinkSettings::Settings linkSettings;
+NightKiteLinkSettings::Settings savedLinkSettings;
+bool linkSettingsDirty = false;
+unsigned long linkSettingsChangedMs = 0;
 bool splashActive = true;
 bool startupSoundPlayed = false;
 unsigned long splashStartMs = 0;
@@ -1650,6 +1659,87 @@ void setStatus(const String& text, uint16_t color = COLOR_MUTED)
   app.statusMessage = text;
   app.statusColor = color;
   app.dirty = true;
+}
+
+void applyLinkSettings()
+{
+  soundManager.setEnabled(linkSettings.soundEnabled);
+  soundManager.setVolume(linkSettings.volume);
+  soundManager.setKeySoundsEnabled(linkSettings.keySoundsEnabled);
+  soundManager.setStartupSoundEnabled(linkSettings.startupSoundEnabled);
+  M5Cardputer.Display.setBrightness(linkSettings.displayBrightness);
+}
+
+void loadLinkSettings()
+{
+  Preferences preferences;
+  NightKiteLinkSettings::Record record{};
+  bool hadRecord = false;
+  bool valid = false;
+  if (preferences.begin("nk-link", false)) {
+    const size_t length = preferences.getBytesLength("local");
+    hadRecord = length > 0;
+    valid = length == sizeof(record) &&
+            preferences.getBytes("local", &record, sizeof(record)) == sizeof(record) &&
+            NightKiteLinkSettings::decode(record, linkSettings);
+    preferences.end();
+  }
+  if (!valid) {
+    linkSettings = NightKiteLinkSettings::Settings{};
+    if (hadRecord) {
+      linkSettingsDirty = true;
+      linkSettingsChangedMs = millis();
+      Serial.println("Link settings invalid; defaults restored");
+    }
+  }
+  savedLinkSettings = linkSettings;
+  applyLinkSettings();
+}
+
+void linkSettingsChanged()
+{
+  applyLinkSettings();
+  linkSettingsDirty = !NightKiteLinkSettings::equal(linkSettings, savedLinkSettings);
+  linkSettingsChangedMs = millis();
+  app.dirty = true;
+}
+
+void persistLinkSettings()
+{
+  if (!linkSettingsDirty || millis() - linkSettingsChangedMs < LINK_SETTINGS_WRITE_DELAY_MS) {
+    return;
+  }
+  const auto record = NightKiteLinkSettings::encode(linkSettings);
+  Preferences preferences;
+  bool saved = preferences.begin("nk-link", false) &&
+               preferences.putBytes("local", &record, sizeof(record)) == sizeof(record);
+  preferences.end();
+  if (saved) {
+    savedLinkSettings = linkSettings;
+    linkSettingsDirty = false;
+  } else {
+    linkSettingsChangedMs = millis();
+    Serial.println("Link settings save failed");
+  }
+}
+
+void resetLinkSettings()
+{
+  Preferences preferences;
+  bool opened = preferences.begin("nk-link", false);
+  bool cleared = opened && (!preferences.isKey("local") || preferences.remove("local"));
+  preferences.end();
+  linkSettings = NightKiteLinkSettings::Settings{};
+  applyLinkSettings();
+  if (cleared) {
+    savedLinkSettings = linkSettings;
+    linkSettingsDirty = false;
+    setStatus("Link defaults restored", COLOR_OK);
+  } else {
+    linkSettingsDirty = true;
+    linkSettingsChangedMs = millis();
+    setStatus("Defaults applied; save retry", COLOR_WARN);
+  }
 }
 
 String stripCliPrompt(String line)
@@ -2896,7 +2986,8 @@ void pollCommandQueue()
   }
 }
 
-int wrappedValue(const int* levels, size_t count, int currentValue, int delta)
+template <typename T>
+int wrappedValue(const T* levels, size_t count, int currentValue, int delta)
 {
   if (count == 0) {
     return currentValue;
@@ -3932,6 +4023,29 @@ void drawConfigCard()
                   configDirtyMask ? "" : "Ent Set");
 }
 
+void drawLinkOptionsCard()
+{
+  const char* labels[] = {"Sound", "Volume", "Keys", "Startup", "Display", "Reset"};
+  String values[] = {linkSettings.soundEnabled ? "ON" : "OFF",
+                     String(linkSettings.volume),
+                     linkSettings.keySoundsEnabled ? "ON" : "OFF",
+                     linkSettings.startupSoundEnabled ? "ON" : "OFF",
+                     String(linkSettings.displayBrightness),
+                     "Defaults"};
+  drawTextFit(String("Link Options") + (linkSettingsDirty ? "*" : ""), 8, CONTENT_Y + 6, 140,
+              linkSettingsDirty ? COLOR_WARN : COLOR_MUTED);
+  for (int i = 0; i < 6; ++i) {
+    int x = 8 + (i % 3) * 76;
+    int y = CONTENT_Y + 25 + (i / 3) * 34;
+    bool active = i == app.selectedLinkOption;
+    uint16_t bg = active ? COLOR_ACCENT_DARK : COLOR_PANEL_DARK;
+    uiCanvas.fillRoundRect(x, y, 70, 28, 3, bg);
+    drawTextFit(labels[i], x + 5, y + 6, 60, i == 5 ? COLOR_WARN : COLOR_MUTED, bg);
+    drawTextFit(values[i], x + 5, y + 18, 60, active ? COLOR_TEXT : COLOR_ACCENT, bg);
+  }
+  drawFooterHints("C Field", app.selectedLinkOption == 5 ? "Ent Reset" : "^/v Set");
+}
+
 const char* const CAL_ACTIONS[] = {"Refresh FPS", "Quick calib", "Precise calib", "Boot quick/off"};
 constexpr int CAL_ACTION_COUNT = sizeof(CAL_ACTIONS) / sizeof(CAL_ACTIONS[0]);
 
@@ -4423,6 +4537,9 @@ void render()
         break;
       case Card::Profiles:
         drawProfilesCard();
+        break;
+      case Card::LinkOptions:
+        drawLinkOptionsCard();
         break;
     }
   }
@@ -6429,6 +6546,27 @@ void changeValue(int delta)
       app.selectedProfileAction = constrain(app.selectedProfileAction + delta, 0,
                                             max(0, PROFILE_ACTION_COUNT + static_cast<int>(app.profileFiles.size()) - 1));
       break;
+    case Card::LinkOptions:
+      if (app.selectedLinkOption == 0) {
+        linkSettings.soundEnabled = !linkSettings.soundEnabled;
+      } else if (app.selectedLinkOption == 1) {
+        linkSettings.volume = static_cast<uint8_t>(wrappedValue(
+            NightKiteLinkSettings::VOLUME_LEVELS, sizeof(NightKiteLinkSettings::VOLUME_LEVELS),
+            linkSettings.volume, delta));
+      } else if (app.selectedLinkOption == 2) {
+        linkSettings.keySoundsEnabled = !linkSettings.keySoundsEnabled;
+      } else if (app.selectedLinkOption == 3) {
+        linkSettings.startupSoundEnabled = !linkSettings.startupSoundEnabled;
+      } else if (app.selectedLinkOption == 4) {
+        linkSettings.displayBrightness = static_cast<uint8_t>(wrappedValue(
+            NightKiteLinkSettings::DISPLAY_BRIGHTNESS_LEVELS,
+            sizeof(NightKiteLinkSettings::DISPLAY_BRIGHTNESS_LEVELS), linkSettings.displayBrightness, delta));
+      } else {
+        setStatus("Enter resets Link options", COLOR_WARN);
+        break;
+      }
+      linkSettingsChanged();
+      break;
     case Card::Status:
     case Card::Device:
     default:
@@ -6694,6 +6832,13 @@ void applyCurrentCard()
         }
       }
       break;
+    case Card::LinkOptions:
+      if (app.selectedLinkOption == 5) {
+        resetLinkSettings();
+      } else {
+        setStatus("Link setting already applied", COLOR_MUTED);
+      }
+      break;
   }
 }
 
@@ -6949,6 +7094,11 @@ void handleWordChar(char c)
 
   if ((c == 'c' || c == 'C') && static_cast<Card>(app.selectedCard) == Card::Config) {
     app.selectedConfigField = (app.selectedConfigField + 1) % 6;
+    app.dirty = true;
+    return;
+  }
+  if ((c == 'c' || c == 'C') && static_cast<Card>(app.selectedCard) == Card::LinkOptions) {
+    app.selectedLinkOption = (app.selectedLinkOption + 1) % 6;
     app.dirty = true;
     return;
   }
@@ -7304,7 +7454,7 @@ void setup()
   M5Cardputer.begin(cfg, true);
   soundManager.begin();
   M5Cardputer.Display.setRotation(1);
-  M5Cardputer.Display.setBrightness(96);
+  loadLinkSettings();
   uiCanvas.setColorDepth(16);
   canvasReady = uiCanvas.createSprite(SCREEN_W, SCREEN_H) != nullptr;
   uiCanvas.setTextSize(1);
@@ -7327,6 +7477,7 @@ void loop()
 {
   M5Cardputer.update();
   soundManager.update();
+  persistLinkSettings();
 
   if (splashActive) {
     unsigned long elapsed = millis() - splashStartMs;

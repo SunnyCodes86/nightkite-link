@@ -20,6 +20,7 @@ Implemented or present in the current code:
 
 - Cardputer battery display, including charge state
 - PCM-based startup, key, navigation, confirm, cancel, success and error sounds
+- Local Link Options card for sound, volume, key/startup sounds, and display brightness
 - USB connection status
 - Controller/CLI connection status and timeout handling
 - Brightness display and immediate change/send behavior
@@ -302,12 +303,24 @@ NightKite Link uses a card-based interface instead of a classic large menu
 because the display is only 240 x 135 px. The flat order keeps live controls at
 the front and diagnostics/service at the back: `Status`, `Pattern Live`,
 `Brightness`, `Play`, `Audio Beacon`, `Patterns`, `Pattern Bulk`, `Profiles`,
-`Controller`, `BLE Connect`, `Controller Setup`, `Controller Sync`,
+`Link Options`, `Controller`, `BLE Connect`, `Controller Setup`, `Controller Sync`,
 `Controller Radio`, `Motion Service`, `Sync Diagnostics`, `Sync Setup Test`,
 and `Firmware Update`.
 
 On `Patterns`, up/down changes the controller pattern as a live preview.
 `Enter` opens the cycle/invert detail view.
+
+The `Link Options` card changes only the Cardputer/Link itself. `C` selects
+sound enable, volume, key sounds, startup sound, display brightness, or local
+reset; up/down applies the selected value immediately. Reset restores only
+these Link defaults. It does not send a controller command, invoke controller
+save/defaults, or alter SD profiles.
+
+Local settings use a versioned, checksummed record in the ESP32 Preferences/NVS
+namespace `nk-link`. Rapid edits are combined and written after one second, and
+unchanged values are not rewritten. Values are validated during boot; an
+invalid record falls back to defaults and is repaired. Sound defaults to on,
+volume 210, key and startup sounds on, and display brightness 96.
 
 The top status bar shows compact transport/protocol state (`USB LEG` or
 `USB NK4`), compact queue state (`Q0`...`Q9+` or `Q!`), play/role tokens, controller battery
