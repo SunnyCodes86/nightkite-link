@@ -1,6 +1,7 @@
 #pragma once
 
 #include <Arduino.h>
+#include <FS.h>
 #include <SD.h>
 #include "Uf2ValidationCore.h"
 
@@ -14,5 +15,6 @@ struct Uf2ValidationInfo {
 class Uf2Validator {
 public:
   static Uf2ValidationInfo validate(const String& path, Uf2Target target);
+  static Uf2ValidationInfo validate(fs::FS& storage, const String& path, Uf2Target target);
   static const char* message(Uf2ValidationResult result);
 };

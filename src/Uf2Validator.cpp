@@ -9,14 +9,19 @@ constexpr size_t MAX_UF2_FILE_SIZE = 32 * 1024 * 1024;
 
 Uf2ValidationInfo Uf2Validator::validate(const String& path, Uf2Target target)
 {
+  return validate(SD, path, target);
+}
+
+Uf2ValidationInfo Uf2Validator::validate(fs::FS& storage, const String& path, Uf2Target target)
+{
   Uf2ValidationInfo info;
 
-  if (!SD.exists(path)) {
+  if (!storage.exists(path)) {
     info.result = Uf2ValidationResult::FileMissing;
     return info;
   }
 
-  File file = SD.open(path, FILE_READ);
+  File file = storage.open(path, FILE_READ);
   if (!file) {
     info.result = Uf2ValidationResult::OpenFailed;
     return info;

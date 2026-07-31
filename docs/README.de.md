@@ -2,9 +2,12 @@
 
 ## Projektübersicht
 
-NightKite Link ist ein kompaktes Handheld zum Konfigurieren und Warten von
-NightKite-Multi-Controllern. Das Projekt ist für den M5Stack Cardputer-Adv /
-StampS3 ausgelegt und kommuniziert per USB-Host-Modus mit dem Controller.
+NightKite Link ist ein kompaktes Gerät zum Konfigurieren und Warten von
+NightKite-Multi-Controllern. Das etablierte M5Stack-Cardputer-Adv-/StampS3-Target
+bleibt das vollständig funktionsfähige Handheld. Der M5Stack Tab5 ist ein zweites
+Target mit eigener 1280-x-720-Touch-Oberfläche. Sie unterstützt USB- und
+BLE-NK4-Controllerauswahl, Konfiguration, Profile, Pattern, Wiedergabe, Sync,
+Audio Beacon, Diagnose, SD und UF2-Service.
 
 Ziel ist, einen NightKite-Controller ohne Laptop konfigurieren und warten zu
 können. NightKite Link nutzt dafür soweit möglich die vorhandene
@@ -12,9 +15,34 @@ NightKite-USB-CLI. Für den normalen Konfigurationsablauf sind keine Änderungen
 an der NightKite-Multi-Firmware erforderlich, solange die erwarteten CLI-Befehle
 vorhanden sind.
 
-Die Oberfläche ist kartenbasiert, weil das Display des Cardputer-Adv sehr klein
-ist. Eine Card zeigt jeweils eine Hauptfunktion oder eine kleine Gruppe
-zusammenhängender Einstellungen.
+Die Cardputer-Oberfläche bleibt wegen des kleinen Displays kartenbasiert. Die
+Tab5-Oberfläche ist getrennt, damit Touch und die größere Fläche ohne
+Fallunterscheidungen in den Cardputer-Views genutzt werden können.
+
+## Multi-Target-Architektur
+
+- `src/main.cpp` enthält Cardputer-UI und Hardwareintegration.
+- `src/targets/tab5/main.cpp` enthält Tab5-Touch-UI und Hardwareintegration.
+- `include/` und die portablen Quellen in `src/` werden geteilt: Aufbau von
+  NK4-/Legacy-Kommandos und UUIDs, Profile-Codec, Queue-/Session-Regeln,
+  Controller-Zustandsparser, Audio-Sync-DSP, Beacon-Codec und UF2-Validierung.
+- Beim Tab5 läuft Arduino als ESP-IDF-Komponente. Die lokale
+  `sdkconfig.defaults` aktiviert P4-PSRAM und ESP-Hosted/NimBLE über den C6,
+  ohne die Cardputer-SDK-Konfiguration zu verändern. `dependencies.lock` fixiert
+  die aufgelösten IDF-Komponenten.
+
+Der P4 hat keinen eigenen Bluetooth-Controller. BLE-GATT-Central, Scanning und
+Legacy-Advertising laufen deshalb über den C6 per ESP-Hosted SDIO/VHCI. Der
+gewählte Arduino-/ESP-IDF-Toolchain unterstützt diesen Pfad und baut ihn in das
+Tab5-Target ein. NightKite Link verwendet kein WLAN. Meldet der C6 die Version
+`0.0.0`, bricht Link vor der NimBLE-Initialisierung kontrolliert ab. Das
+M5Stack-Werksimage stellt WLAN/SDIO wieder her, aktiviert aber nicht den
+Hosted-BLE-Pfad. Es dient als Recovery-Basis; anschließend muss über denselben
+internen C6-Downloadanschluss und USB-TTL-Adapter ein zur im Tab5-Build fixierten
+ESP-Hosted-Version passendes Coprozessor-Image installiert werden. Link lehnt
+Versionen älter als 2.6 ab. Zugang und Verdrahtung des internen Anschlusses
+beschreibt die
+[M5Stack-Anleitung](https://docs.m5stack.com/en/guide/restore_factory/m5tab5_c6_wifi).
 
 ## Funktionen
 
@@ -64,7 +92,7 @@ generierte PCM-Daten. Es werden keine Sounddateien auf der SD-Karte benötigt.
 
 ## Hardware-Anforderungen
 
-- M5Stack Cardputer-Adv / StampS3
+- M5Stack Cardputer-Adv / StampS3 oder M5Stack Tab5
 - microSD-Karte
 - USB-C-Kabel und passendes USB-OTG-Setup
 - NightKite-Multi-Controller, zum Beispiel auf Basis eines Pimoroni Pico LiPo 2 /
@@ -157,7 +185,8 @@ cd nightkite-link
 Danach den Ordner in VS Code / PlatformIO öffnen oder direkt die PlatformIO CLI
 verwenden.
 
-Das konfigurierte PlatformIO-Environment heißt `cardputer`.
+Die PlatformIO-Environments heißen `cardputer` und `tab5`; der Default-Build
+baut beide.
 
 Build:
 
@@ -168,21 +197,124 @@ pio run
 Upload:
 
 ```sh
-pio run -t upload
+pio run -e cardputer -t upload
+pio run -e tab5 -t upload
 ```
 
 Serial Monitor:
 
 ```sh
-pio device monitor
+pio device monitor -e cardputer
+pio device monitor -e tab5
 ```
 
-Aktuelles Target aus `platformio.ini`:
+Aktuelle Targets aus `platformio.ini`:
 
-- platform: `pioarduino/platform-espressif32` 51.03.03 Paket-URL
-- board: `m5stack-stamps3`
-- framework: `arduino`
+- Plattform: pioarduino `55.03.37` für beide Targets
+- Cardputer: `m5stack-stamps3`, Arduino
+- Tab5: `m5stack-tab5-p4`, Arduino als ESP-IDF-Komponente
 - monitor speed: `115200`
+
+## Tab5-Arbeitsablauf und Hardwarediagnose
+
+Eine feste Navigationsleiste gliedert den Touch-Ablauf in `Connect`, `Control`,
+`Patterns`, `Playback`, `Sync`, `Audio`, `Profiles`, `Controller`, `Service` und
+`Firmware`. `Connect` wählt USB oder startet einen BLE-Scan; gefundene
+BLE-Controller werden direkt angetippt. Nach NK4-Handshake und vollständigem
+Initial-Refresh stehen diese Arbeitsabläufe bereit:
+
+- Pattern/Helligkeit, Wiedergabe, Pattern-Maske und Bulk-Bearbeitung mit
+  getrennten Entwürfen und explizitem `Apply & Save`
+- Sync-Rolle, Gruppe, Master-UID, Verlustverhalten sowie Funkstatus und
+  Funkprofil
+- Audio Beacon V1/V2 manuell oder mikrofongeführt mit Energy-, Band-, Beat-,
+  BPM- und Advertising-Status
+- Profile erstellen, überschreiben, laden, live anwenden, umbenennen und nach
+  Bestätigung löschen; ein Profil-Apply speichert bewusst nicht automatisch
+- Controllername, Striplänge, Smoothing, Sensorbereiche, Boot-Kalibrierung,
+  bestätigte Werkseinstellungen und separates persistentes Speichern
+- Service-Tabs für Schnell-/Präzisionskalibrierung, abgesichertes NK4-Terminal,
+  Sync-/Funkdiagnosen, SD-Prüfung und lokale Displayhelligkeit
+- vollständige UF2-Prüfung, RP2040-/RP2350-Zielwahl, Bestätigung,
+  Fortschrittsanzeige und Abbruch im Firmware-Workflow
+
+`Reload` verwirft lokale Entwürfe und lädt neu; `Disconnect` leert Session,
+Queue und abgeleiteten Zustand. Busy-, Timeout-, Protokoll-, Queue- und
+Disconnect-Fehler bleiben sichtbar und führen nicht zu einem fälschlich
+gemeldeten Speichern. Das Terminal akzeptiert eine NK4-`cmd=`-Zeile; `save` und
+`defaults` sind dort gesperrt und bleiben den bestätigten UI-Abläufen vorbehalten.
+
+Über den seriellen Monitor stehen `status`, `reload`, `sd`, `audio`, `usb`, `gatt`,
+`beacon` und `all` bereit. Display und gemeinsamer Kern werden beim Start
+geprüft. `reload` nutzt denselben sicheren Queue-Refresh wie die Touch-Taste,
+`sd` mountet die Karte per 4-Bit-SDMMC, `audio` spielt einen gut
+hörbaren 4-kHz-Testton und prüft anschließend einen Mikrofonpegel, `usb` wartet auf einen NK4-
+Controller, `gatt` scannt, verbindet den ersten Treffer und prüft Read/Write/
+Notify bis zum vollständigen Initial-Refresh. `beacon` sendet drei Sekunden
+lang ein gültiges NightKite-V1-Sync-Beacon für Gruppe 1 und darf deshalb nur
+mit dem vorgesehenen Follower in Reichweite ausgeführt werden. Eine aktive
+GATT-Sitzung blockiert Advertising; ein GATT-Scan stoppt einen laufenden
+Diagnose-Advertiser. USB kann während des Advertisings verbunden bleiben.
+`all` startet nur die lokalen SD-/Audio-Prüfungen und den USB-Pfad; die
+Funkprüfungen bleiben wegen ihrer Transportumschaltung bewusst einzeln.
+
+Praktisch bestätigt sind ST7121-Display mit 1280 x 720, Touch bis zu allen
+Rändern, 4-Bit-SDMMC, Lautsprecher und Mikrofon, USB-NK4 einschließlich
+Schreiben/Speichern/Neuladen und Wiederverbinden sowie ESP-Hosted 2.12.11 mit
+BLE-Scan, GATT-Verbindung, NK4 Read/Write/Notify und Beacon-Empfang durch einen
+Controller. Ein 10:21-minütiger GATT-Lauf mit parallelem Controller-USB
+absolvierte elf vollständige Refresh-Zyklen ohne Timeout oder Reconnect. In
+einem weiteren Lauf blieben 16 Beacon-Fenster und 16 parallele USB-Refreshes
+fehlerfrei; der Controller dekodierte 170 Beacons ohne Decode-, CRC- oder
+Gruppenfehler. Der Controller-Hostpfad des Tab5 ist physisch der USB-A-Anschluss.
+USB-C ist mit festen Device-Role-CC-Widerständen an das getrennte USB-Device-
+Datenpaar geführt und kann einen NightKite-Controller nicht direkt hosten.
+Die dauerhaft sichtbare Kopfzeile zeigt den Tab5-Akkustand samt aktivem
+Ladezustand und den vom verbundenen Controller gemeldeten Akkustand.
+Noch offen sind die zweite unterstützte Display-Controller-Revision ST7123 und
+das reale UF2-Schreiben einschließlich BOOTSEL-Zielprüfung, Disconnect und
+Reboot auf jeweils einem RP2040- und RP2350-Gerät. Parser, Family-Validierung und
+Zielkonflikte sind automatisiert geprüft, bestätigen aber kein reales Flashen.
+Beim physischen USB-Abziehen meldet der ESP-IDF-Endpoint-
+Cleanup nach dem bereits erkannten `DEV_GONE` zweimal `ESP_ERR_INVALID_STATE`.
+Die Anwendung wechselt dabei korrekt und ohne Phantom-Verbindung in den
+wartenden Zustand; die rein kosmetische Meldung wird nicht durch einen
+riskanten Framework-Patch unterdrückt.
+
+Gegenüber dem Cardputer bleiben bewusst wenige Unterschiede: Die Tab5-
+Controlleroberfläche setzt Firmware 4.x/NK4 voraus; der Firmware-3.x-Legacy-
+USB-Pfad bleibt unverändert im Cardputer. Die Cardputer-spezifischen Link-
+Soundoptionen und dessen kompakte Sync-Test-Shortcuts werden nicht 1:1 kopiert;
+Tab5 bietet stattdessen Displayhelligkeit, Audio-Hardwarediagnose sowie die
+vollständigen Sync-, Audio- und Diagnose-Seiten. Die erweiterten Tab5-Abläufe
+benötigen noch den folgenden gebündelten Hardwarelauf.
+
+### Gebündelter Hardware-Abschlusstest
+
+Die neue Gesamtoberfläche wird nicht kleinteilig nach jeder Funktion geflasht.
+Der abschließende Hardwarelauf bündelt stattdessen:
+
+1. Finalen Tab5-Build flashen; Boot, beide Display-Controller-Revisionen soweit
+   vorhanden, vollständige Touch-Ausrichtung, Navigation und persistente
+   Displayhelligkeit prüfen.
+2. Über USB NK4 verbinden; Initial-Refresh, Control, Playback, Pattern-Maske,
+   Bulk, Controller- und Sync-Einstellungen jeweils anwenden, speichern,
+   neu laden und nach physischem Disconnect wieder verbinden. Queue-/Busy- und
+   kontrollierte Fehleranzeigen dabei beobachten.
+3. Profil auf SD erstellen, überschreiben, laden, live anwenden, anschließend
+   explizit speichern, umbenennen und löschen. Zusätzlich defektes, zu großes
+   und schreibunterbrochenes Profil sowie `.bak`-Wiederherstellung prüfen.
+4. Dieselben repräsentativen Read-/Write-/Save-Abläufe über BLE inklusive Scan,
+   Connect, Read, Write, Notify, langer Sync-Antwort und sauberem Disconnect
+   ausführen.
+5. GATT trennen, Controller als Follower konfigurieren und Audio Beacon V1/V2,
+   Manual, Mic Energy und Mic Full prüfen. Parallel USB-Refreshes ausführen und
+   Lock-, Decode-, CRC-, Audio- und Advertising-Zähler kontrollieren; danach
+   Lautsprecher-/Mikrofondiagnose und Mic-Pause prüfen.
+6. Kalibrierung und abgesichertes Terminal prüfen. Anschließend passende und
+   falsche RP2040-/RP2350-UF2-Dateien validieren, falsches BOOTSEL-Ziel ablehnen
+   und je ein echtes Flashen einschließlich Fortschritt, Disconnect/Reboot und
+   kontrolliertem Abbruch durchführen.
 
 ## SD-Kartenstruktur
 

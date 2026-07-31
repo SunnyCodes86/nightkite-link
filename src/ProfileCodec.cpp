@@ -2,6 +2,7 @@
 
 #include <ArduinoJson.h>
 #include <cstring>
+#include "NightKitePatterns.h"
 
 namespace {
 
@@ -162,6 +163,50 @@ bool masksFromPatterns(JsonObjectConst settings, bool needEnabled, bool needInve
 }
 
 }  // namespace
+
+bool encodeProfileJson(const ProfileData& profile, std::string& json, std::string& error)
+{
+  JsonDocument document;
+  document["profile_version"] = 2;
+  document["project"] = "NightKite Link";
+  document["target"] = "NightKite Multi";
+  JsonObject settings = document["settings"].to<JsonObject>();
+  if (!profile.deviceName.empty()) settings["device_name"] = profile.deviceName;
+  settings["brightness"] = profile.brightness;
+  settings["strip_length"] = profile.stripLength;
+  settings["active_pattern"] = profile.activePattern;
+  settings["smoothing"] = profile.smoothing;
+  settings["accel_range"] = profile.accelRange;
+  settings["gyro_range"] = profile.gyroRange;
+  if (profile.playMode != "unknown") settings["play_mode"] = profile.playMode;
+  if (profile.bootMode != "unknown") settings["boot_mode"] = profile.bootMode;
+  settings["sync_enabled"] = profile.syncEnabled;
+  if (profile.syncGroup >= 1) settings["sync_group"] = profile.syncGroup;
+  if (profile.syncRole != "unknown") settings["sync_role"] = profile.syncRole;
+  if (!profile.syncMasterUid.empty()) settings["sync_master_uid"] = profile.syncMasterUid;
+  if (profile.syncLossBehavior != "unknown") settings["sync_loss_behavior"] = profile.syncLossBehavior;
+  settings["wireless_enabled"] = profile.wirelessEnabled;
+  if (profile.wirelessProfile != "unknown") settings["wireless_profile"] = profile.wirelessProfile;
+  settings["enabled_pattern_mask"] = profile.enabledPatternMask;
+  settings["inverted_pattern_mask"] = profile.invertedPatternMask;
+  JsonObject autoplay = settings["autoplay"].to<JsonObject>();
+  autoplay["enabled"] = profile.autoplayEnabled;
+  autoplay["interval_seconds"] = profile.autoplayIntervalSeconds;
+  JsonArray patterns = settings["patterns"].to<JsonArray>();
+  for (int id = 1; id <= NightKitePatterns::COUNT; ++id) {
+    JsonObject item = patterns.add<JsonObject>();
+    const uint32_t bit = 1UL << (id - 1);
+    item["id"] = id;
+    item["name"] = NightKitePatterns::name(id);
+    item["cycle_enabled"] = (profile.enabledPatternMask & bit) != 0;
+    item["inverted"] = (profile.invertedPatternMask & bit) != 0;
+  }
+  json.clear();
+  serializeJsonPretty(document, json);
+  ProfileData decoded;
+  ProfileData fallback;
+  return !json.empty() && decodeProfileJson(json, fallback, decoded, error);
+}
 
 bool decodeProfileJson(const std::string& json, const ProfileData& fallback, ProfileData& output,
                        std::string& error)

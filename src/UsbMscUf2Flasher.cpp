@@ -80,6 +80,11 @@ bool UsbMscUf2Flasher::isMassStorageConnected() const
 
 bool UsbMscUf2Flasher::startFlash(const String& sdUf2Path, const String& name, Uf2Target target)
 {
+  return startFlash(SD, sdUf2Path, name, target);
+}
+
+bool UsbMscUf2Flasher::startFlash(fs::FS& storage, const String& sdUf2Path, const String& name, Uf2Target target)
+{
   if (isRunning()) {
     return false;
   }
@@ -87,6 +92,7 @@ bool UsbMscUf2Flasher::startFlash(const String& sdUf2Path, const String& name, U
   cleanup();
   current = FlashProgress{};
   sourcePath = sdUf2Path;
+  sourceStorage = &storage;
   displayName = name;
   expectedTarget = target;
   directSectorWrite = target == Uf2Target::Rp2350;
@@ -98,18 +104,18 @@ bool UsbMscUf2Flasher::startFlash(const String& sdUf2Path, const String& name, U
   Serial.print("[UF2] write mode: ");
   Serial.println(directSectorWrite ? "direct-sector" : "vfs-file");
 
-  if (!SD.exists(sourcePath)) {
+  if (!sourceStorage->exists(sourcePath)) {
     setError(FlashResult::FileMissing, "No UF2 selected");
     return false;
   }
 
-  const Uf2ValidationInfo validation = Uf2Validator::validate(sourcePath, expectedTarget);
+  const Uf2ValidationInfo validation = Uf2Validator::validate(*sourceStorage, sourcePath, expectedTarget);
   if (validation.result != Uf2ValidationResult::Ok) {
     setError(FlashResult::InvalidUf2, Uf2Validator::message(validation.result));
     return false;
   }
 
-  sourceFile = SD.open(sourcePath, FILE_READ);
+  sourceFile = sourceStorage->open(sourcePath, FILE_READ);
   if (!sourceFile) {
     setError(FlashResult::OpenSourceFailed, "Open source failed");
     return false;
@@ -338,7 +344,7 @@ bool UsbMscUf2Flasher::prepareDirectDevice(msc_host_device_handle_t device, cons
     return false;
   }
 
-  sourceFile = SD.open(sourcePath, FILE_READ);
+  sourceFile = sourceStorage->open(sourcePath, FILE_READ);
   if (!sourceFile) {
     setError(FlashResult::OpenSourceFailed, "Open source failed");
     return false;
@@ -365,7 +371,7 @@ bool UsbMscUf2Flasher::mountVfsDevice(msc_host_device_handle_t device)
   Serial.print("[UF2] mounted at ");
   Serial.println(USB_MOUNT_POINT);
 
-  sourceFile = SD.open(sourcePath, FILE_READ);
+  sourceFile = sourceStorage->open(sourcePath, FILE_READ);
   if (!sourceFile) {
     setError(FlashResult::OpenSourceFailed, "Open source failed");
     return false;

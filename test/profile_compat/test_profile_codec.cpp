@@ -48,6 +48,14 @@ int main(int argc, char** argv)
   assert(fixture.enabledPatternMask == 1);
   assert(fixture.invertedPatternMask == 0);
 
+  std::string encoded;
+  ProfileData roundTrip;
+  assert(encodeProfileJson(fixture, encoded, error));
+  assert(decode(encoded, roundTrip, error));
+  assert(roundTrip.deviceName == fixture.deviceName);
+  assert(roundTrip.enabledPatternMask == fixture.enabledPatternMask);
+  assert(roundTrip.syncRole == fixture.syncRole);
+
   ProfileData compact;
   assert(decode(R"({"profile_version":2,"settings":{"enabled_pattern_mask":5,"inverted_pattern_mask":4,
                 "patterns":[{"id":1,"cycle_enabled":false,"inverted":false}]}})", compact, error));

@@ -2,7 +2,7 @@
 
 ## Scope
 
-NightKite Link is the Cardputer-Adv handheld configurator and service tool for NightKite Multi controllers.
+NightKite Link is a multi-target configurator and service tool for NightKite Multi controllers. Cardputer-Adv is the established handheld target; Tab5 has its own 1280 x 720 touch UI for NK4 configuration, profiles, sync/audio, diagnostics, SD and UF2 service workflows.
 
 - Work only in this repository unless the user explicitly asks otherwise. Do not modify `nightkite-multi` or `nightkite-configurator` from a Link task.
 - Preserve unrelated user changes. Do not commit, push, upload firmware or operate hardware unless explicitly requested.
@@ -10,7 +10,8 @@ NightKite Link is the Cardputer-Adv handheld configurator and service tool for N
 
 ## Durable Product Invariants
 
-- Preserve the current card-carousel UI and its small-screen usability. Do not restore the reverted task-based UI or introduce another large redesign.
+- Preserve the current Cardputer card-carousel UI and its small-screen usability. Do not restore the reverted task-based UI or introduce another large Cardputer redesign.
+- Keep Tab5 UI and hardware access under `src/targets/tab5/`; share protocol, profile, controller, queue/session, audio DSP, beacon and validation logic through `include/` and portable `src/` files. Do not spread target selection across large `#ifdef` blocks.
 - USB remains the stable primary transport: probe NK4 for Firmware 4.x and retain the Firmware 3.x Legacy CLI fallback.
 - BLE NK4 remains an experimental, explicitly selected, single-controller configuration transport.
 - Link is not required for autonomous controller sync. Do not use GATT/NK4 for real-time sync, relay sync beacons, stream LED frames or add Wi-Fi.
@@ -21,7 +22,9 @@ NightKite Link is the Cardputer-Adv handheld configurator and service tool for N
 ## Repository Boundaries
 
 - Reuse existing helpers in `include/` and `src/`; keep non-trivial logic host-testable where practical.
-- Treat `lib/usb_host_msc/` as vendored code and `scripts/patch_m5cardputer.py` as required build support. Do not replace, upgrade or remove either casually.
+- Treat `platformio.ini`, `src/CMakeLists.txt`, `sdkconfig.defaults` and `dependencies.lock` together as the Tab5 build contract. The P4 BLE path must remain ESP-Hosted/NimBLE over the onboard C6; do not assume native P4 radio support.
+- Keep the Tab5 Arduino variant, PSRAM, single-app partition and official SDMMC/Hosted-SDIO pin assignments intact. The factory C6 Wi-Fi image is not sufficient for Hosted BLE; use a co-processor image compatible with the pinned ESP-Hosted host. The current Hosted reset output drives C6 EN and must finish high; active-low reset strands the C6 in reset. Do not bypass the version preflight or let failed Hosted initialization abort the P4 UI.
+- Treat `lib/usb_host_msc/` as vendored code and `scripts/patch_m5cardputer.py` plus `scripts/patch_usbhostserial.py` as required build support. Tab5 NK4 responses require the configured 8192-byte USB receive buffer, and the disconnect semaphore patch must remain until its upstream equivalent is hardware-tested. Do not replace, upgrade or remove these casually.
 - Do not upgrade platforms, libraries or add dependencies unless requested.
 - Avoid broad rewrites, speculative abstractions, formatting-only changes and unrelated cleanup.
 
@@ -72,7 +75,7 @@ Treat firmware flashing as safety-critical.
 ## Validation And Handoff
 
 - For non-trivial logic changes, add or update the smallest meaningful host test and run all relevant existing tests under `test/`.
-- For source changes, run the default PlatformIO build. Run any additional environment explicitly required by the task.
+- For shared source changes, build both `cardputer` and `tab5`. For target-only work, build the affected target and any relevant shared counterpart.
 - Always run `git diff --check` and inspect the final diff for unrelated or generated changes.
 - Update both EN and DE docs for user-visible behavior changes.
 - Hardware-test changes affecting USB/Legacy, BLE lifecycle, physical UI, SD failures, audio arbitration/beacons or UF2. State clearly what was not tested on hardware.

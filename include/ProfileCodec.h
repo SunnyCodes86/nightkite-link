@@ -28,3 +28,4 @@ struct ProfileData {
 
 bool decodeProfileJson(const std::string& json, const ProfileData& fallback, ProfileData& output,
                        std::string& error);
+bool encodeProfileJson(const ProfileData& profile, std::string& json, std::string& error);

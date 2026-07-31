@@ -2,17 +2,45 @@
 
 ## Project Overview
 
-NightKite Link is a compact handheld configurator and service device for
-NightKite Multi controllers. It is built for the M5Stack Cardputer-Adv /
-StampS3 target and communicates with the controller over USB host mode.
+NightKite Link is a compact configurator and service device for NightKite Multi
+controllers. The established M5Stack Cardputer-Adv / StampS3 target remains the
+fully functional handheld. The M5Stack Tab5 is a second target with a separate
+1280 x 720 touch UI. It supports USB and BLE NK4 controller selection,
+configuration, profiles, patterns, playback, sync, Audio Beacon, diagnostics,
+SD and UF2 service.
 
 The goal is to configure and service a NightKite controller without opening a
 laptop. NightKite Link uses the existing NightKite USB CLI where possible and
 does not require changes to the NightKite Multi firmware for the normal
 configuration workflow.
 
-The UI is card-based because the Cardputer-Adv display is very small. One card
-contains one primary function or a small group of related settings.
+The Cardputer UI remains card-based for its small display. The Tab5 UI is kept
+separate so it can use touch and the larger screen without conditionals in the
+Cardputer views.
+
+## Multi-target architecture
+
+- `src/main.cpp` is the Cardputer UI and hardware integration.
+- `src/targets/tab5/main.cpp` is the Tab5 touch UI and hardware integration.
+- `include/` and the portable sources in `src/` are shared: NK4/legacy command
+  construction and UUIDs, profile codec, queue/session policies, controller
+  state parsing, audio-sync DSP, beacon codec and UF2 validation.
+- Tab5 uses Arduino as an ESP-IDF component. Its local `sdkconfig.defaults`
+  enables P4 PSRAM and ESP-Hosted/NimBLE over the onboard C6 without changing
+  the Cardputer SDK configuration. `dependencies.lock` pins the resolved IDF
+  components.
+
+The P4 has no native Bluetooth controller. BLE GATT central operation, scanning
+and legacy advertising therefore run through the C6 over ESP-Hosted SDIO/VHCI.
+This path is supported by the selected Arduino/ESP-IDF toolchain and is compiled
+into the Tab5 target. Wi-Fi is not used by NightKite Link. If the C6 reports
+version `0.0.0`, Link stops cleanly before NimBLE initialization. The M5Stack
+factory image restores Wi-Fi/SDIO operation but does not enable the Hosted BLE
+path. Use it as the recovery baseline, then install a co-processor image matching
+the ESP-Hosted version pinned by the Tab5 build through the same internal C6
+download header and USB-to-TTL adapter. Link rejects versions older than 2.6.
+See the [M5Stack procedure](https://docs.m5stack.com/en/guide/restore_factory/m5tab5_c6_wifi)
+for access and wiring of the internal header.
 
 ## Features
 
@@ -61,7 +89,7 @@ no SD sound files are required.
 
 ## Hardware Requirements
 
-- M5Stack Cardputer-Adv / StampS3 target
+- M5Stack Cardputer-Adv / StampS3 or M5Stack Tab5
 - microSD card
 - USB-C cable and suitable USB-OTG setup
 - NightKite Multi controller, for example based on a Pimoroni Pico LiPo 2 /
@@ -148,7 +176,8 @@ cd nightkite-link
 
 Open the folder in VS Code / PlatformIO, or use the PlatformIO CLI directly.
 
-The configured PlatformIO environment is `cardputer`.
+The configured PlatformIO environments are `cardputer` and `tab5`; the default
+build compiles both.
 
 Build:
 
@@ -159,21 +188,116 @@ pio run
 Upload:
 
 ```sh
-pio run -t upload
+pio run -e cardputer -t upload
+pio run -e tab5 -t upload
 ```
 
 Serial monitor:
 
 ```sh
-pio device monitor
+pio device monitor -e cardputer
+pio device monitor -e tab5
 ```
 
-Current target from `platformio.ini`:
+Current targets from `platformio.ini`:
 
-- platform: `pioarduino/platform-espressif32` 51.03.03 package URL
-- board: `m5stack-stamps3`
-- framework: `arduino`
+- platform: pioarduino `55.03.37` for both targets
+- Cardputer: `m5stack-stamps3`, Arduino
+- Tab5: `m5stack-tab5-p4`, Arduino as an ESP-IDF component
 - monitor speed: `115200`
+
+## Tab5 workflow and hardware diagnostics
+
+A persistent navigation rail divides the touch workflow into `Connect`,
+`Control`, `Patterns`, `Playback`, `Sync`, `Audio`, `Profiles`, `Controller`,
+`Service`, and `Firmware`. `Connect` selects USB or starts a BLE scan;
+discovered BLE controllers can be tapped directly. After the NK4 handshake and
+complete initial refresh, the UI provides:
+
+- separate drafts and explicit `Apply & Save` for pattern/brightness, playback,
+  pattern masks, and bulk edits
+- sync role, group, master UID, loss behavior, radio state, and radio profile
+- manual or microphone-driven V1/V2 Audio Beacon with energy, bands, beat, BPM,
+  and advertising status
+- profile create/overwrite/load/live-apply/rename/confirmed-delete; profile apply
+  deliberately does not persist controller state
+- controller name, strip length, smoothing, sensor ranges, boot calibration,
+  confirmed factory defaults, and explicit persistent save
+- service tabs for quick/precise calibration, a guarded NK4 terminal,
+  sync/radio diagnostics, SD checks, and local display brightness
+- full UF2 validation, RP2040/RP2350 target selection, confirmation, progress,
+  and cancellation in the firmware workflow
+
+`Reload` discards local drafts and refreshes them; `Disconnect` clears the
+session, queue, and derived state. Busy, timeout, protocol, queue, and
+disconnect errors remain visible and cannot be reported as a successful save.
+The terminal accepts one NK4 `cmd=` line; `save` and `defaults` are blocked there
+and remain available only through their confirmed UI workflows.
+
+The serial monitor accepts `status`, `reload`, `sd`, `audio`, `usb`, `gatt`, `beacon` and
+`all`. Display and shared core are checked at boot. `reload` uses the same safe
+queue refresh as the touch action; `sd` mounts the card through
+4-bit SDMMC; `audio` plays an audible 4 kHz test tone and then validates microphone input;
+`usb` waits for an NK4 controller; `gatt` scans, connects the first match and
+checks read/write/notify through the complete initial refresh. `beacon` sends a
+valid NightKite V1 group-1 sync beacon for three seconds, so run it only with
+the intended follower in range. An active GATT session blocks advertising; a
+GATT scan stops an active diagnostic advertiser. USB may remain connected while
+advertising. `all` starts only the local SD/audio checks and USB path; radio checks
+remain separate because they switch transports.
+
+Hardware validation confirms the ST7121 display at 1280 x 720, edge-to-edge
+touch alignment, 4-bit SDMMC, speaker and microphone, USB NK4 including
+write/save/reload and reconnect, and ESP-Hosted 2.12.11 with BLE scan, GATT
+connection, NK4 read/write/notify and controller reception of the sync beacon.
+A 10:21-minute GATT run with controller USB active completed eleven full
+refreshes without timeout or reconnect. A separate run completed 16 beacon
+windows and 16 parallel USB refreshes without errors; the controller decoded
+170 beacons with no decode, CRC, or group failures. The Tab5 controller host
+path is physically the USB-A connector. USB-C uses the separate USB-device data
+pair with fixed device-role CC resistors and cannot directly host a NightKite
+controller. The persistent header shows Tab5 battery level and active charging
+state plus the battery level reported by the connected controller. The ST7123
+display-controller revision and a real UF2 write including BOOTSEL target
+matching, disconnect and reboot on one RP2040 and one RP2350 device remain open.
+Parser, family validation and target-mismatch handling are covered by automated
+tests but do not confirm real flashing. On physical USB removal ESP-IDF's
+endpoint cleanup prints two `ESP_ERR_INVALID_STATE` messages after `DEV_GONE`
+was already handled. The application still returns cleanly to its waiting state
+without a phantom connection; suppressing this cosmetic output would require a
+risky framework patch and is intentionally avoided.
+
+A few differences from Cardputer remain deliberate. The Tab5 controller UI
+requires Firmware 4.x/NK4; the Firmware 3.x legacy USB path remains unchanged
+on Cardputer. Cardputer-specific Link sound options and compact sync-test
+shortcuts are not copied one-for-one; Tab5 instead provides display brightness,
+audio hardware diagnostics, and full Sync, Audio, and Diagnostics pages. The
+expanded Tab5 workflows still need the bundled hardware pass below.
+
+### Bundled final hardware test
+
+The expanded UI is not reflashed and tested piecemeal after every feature. The
+final hardware pass instead bundles:
+
+1. Flash the final Tab5 build; verify boot, both display-controller revisions
+   where available, full touch alignment, navigation, and persisted display
+   brightness.
+2. Connect over USB NK4; exercise initial refresh, Control, Playback, pattern
+   masks/bulk, Controller, and Sync through apply, save, reload, physical
+   disconnect, and reconnect while observing queue/busy/controlled-error states.
+3. On SD, create, overwrite, load, live-apply, explicitly save, rename, and
+   delete a profile. Also test malformed/oversized/interrupted writes and `.bak`
+   recovery.
+4. Repeat representative read/write/save workflows over BLE, including scan,
+   connect, read, write, notify, a long sync response, and clean disconnect.
+5. Disconnect GATT, configure a follower, and test Audio Beacon V1/V2, Manual,
+   Mic Energy, and Mic Full. Run parallel USB refreshes and inspect lock, decode,
+   CRC, audio, and advertising counters; then verify speaker/microphone
+   diagnostics and microphone pause.
+6. Exercise calibration and the guarded terminal. Validate correct and wrong
+   RP2040/RP2350 UF2 files, reject a mismatched BOOTSEL target, and perform one
+   real flash per family including progress, disconnect/reboot, and controlled
+   cancellation.
 
 ## SD Card Layout
 

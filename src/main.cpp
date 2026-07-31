@@ -16,7 +16,12 @@
 #include "ControllerSessionPolicy.h"
 #include "ControllerBatteryParser.h"
 #include "LinkSettings.h"
+#include "NightKiteCommands.h"
+#include "NightKitePlayback.h"
+#include "NightKitePatterns.h"
+#include "NightKiteProtocol.h"
 #include "ProfileCodec.h"
+#include "SyncBeaconCodec.h"
 #include "UiUsability.h"
 #include "Uf2Validator.h"
 #include "UsbMscUf2Flasher.h"
@@ -85,74 +90,34 @@ constexpr unsigned long STARTUP_SOUND_DELAY_MS = 180;
 constexpr unsigned long LINK_SETTINGS_WRITE_DELAY_MS = 1000;
 constexpr int BLE_SCAN_SECONDS = 6;
 constexpr unsigned long BLE_SCAN_TIMEOUT_MS = BLE_SCAN_SECONDS * 1000UL + 2000UL;
-const char* const NK_BLE_SERVICE_UUID = "4e4b4000-6e69-6768-746b-000000000001";
-const char* const NK_BLE_RX_UUID = "4e4b4000-6e69-6768-746b-000000000002";
-const char* const NK_BLE_TX_UUID = "4e4b4000-6e69-6768-746b-000000000003";
+const char* const NK_BLE_SERVICE_UUID = NightKiteProtocol::BLE_SERVICE_UUID;
+const char* const NK_BLE_RX_UUID = NightKiteProtocol::BLE_RX_UUID;
+const char* const NK_BLE_TX_UUID = NightKiteProtocol::BLE_TX_UUID;
 
 constexpr int SD_SPI_SCK_PIN = 40;
 constexpr int SD_SPI_MISO_PIN = 39;
 constexpr int SD_SPI_MOSI_PIN = 14;
 constexpr int SD_SPI_CS_PIN = 12;
 constexpr int LEGACY_PATTERN_COUNT = 22;
-constexpr uint8_t NK_SYNC_BEACON_VERSION_V1 = 1;
-constexpr uint8_t NK_SYNC_BEACON_VERSION_V2 = 2;
-constexpr uint8_t NK_SYNC_BEACON_VERSION = NK_SYNC_BEACON_VERSION_V1;
-constexpr uint8_t NK_SYNC_BEACON_FLAG_AUDIO_BEAT = 0x01;
-constexpr uint8_t NK_SYNC_BEACON_MAGIC0 = 'N';
-constexpr uint8_t NK_SYNC_BEACON_MAGIC1 = 'K';
-constexpr uint16_t NK_SYNC_BEACON_COMPANY_ID = 0xFFFF;
+constexpr uint8_t NK_SYNC_BEACON_VERSION_V1 = NightKiteSync::VERSION_V1;
+constexpr uint8_t NK_SYNC_BEACON_VERSION_V2 = NightKiteSync::VERSION_V2;
 constexpr uint16_t NK_SYNC_BEACON_ADV_INTERVAL_UNITS = 160;
-constexpr size_t NK_SYNC_BEACON_PACKET_SIZE = 17;
-constexpr size_t NK_SYNC_BEACON_MFG_LEN = 2 + NK_SYNC_BEACON_PACKET_SIZE;
-constexpr size_t NK_SYNC_BEACON_ADV_LEN = 3 + 2 + NK_SYNC_BEACON_MFG_LEN;
-constexpr size_t NK_SYNC_BEACON_V2_PACKET_SIZE = 22;
-constexpr size_t NK_SYNC_BEACON_V2_MFG_LEN = 2 + NK_SYNC_BEACON_V2_PACKET_SIZE;
-constexpr size_t NK_SYNC_BEACON_V2_ADV_LEN = 3 + 2 + NK_SYNC_BEACON_V2_MFG_LEN;
+constexpr size_t NK_SYNC_BEACON_ADV_LEN = NightKiteSync::V1_ADVERTISING_SIZE;
+constexpr size_t NK_SYNC_BEACON_V2_ADV_LEN = NightKiteSync::V2_ADVERTISING_SIZE;
 
 static_assert(NK_SYNC_BEACON_ADV_LEN == 24, "Unexpected sync beacon V1 advertising size");
 static_assert(NK_SYNC_BEACON_V2_ADV_LEN == 29, "Unexpected sync beacon V2 advertising size");
 static_assert(NK_SYNC_BEACON_V2_ADV_LEN <= 31, "Sync beacon V2 exceeds legacy BLE advertising");
 
-const char* const PATTERN_NAMES[] = {
-    "",
-    "Rainbow",
-    "Full color",
-    "Motion bright",
-    "Runner fixed",
-    "Runner reactive",
-    "Runner dual",
-    "Heartbeat",
-    "Ping pong",
-    "Comet swarm",
-    "Breath storm",
-    "Jerk wave",
-    "Yaw spinner",
-    "Yaw circle",
-    "Runner dual inv",
-    "Palette beat",
-    "Pacifica kite",
-    "Twinkle motion",
-    "Fire jet",
-    "Noise ring",
-    "Pride yaw",
-    "Confetti jerk",
-    "Center ripple",
-    "Audio Pulse Angle Color",
-    "Audio Spectrum Ribbon",
-    "Audio Beat Ripples",
-    "Audio Band Comets",
-    "Audio Beat Mosaic",
-};
-constexpr int PATTERN_COUNT = (sizeof(PATTERN_NAMES) / sizeof(PATTERN_NAMES[0])) - 1;
-constexpr uint32_t ALL_PATTERN_MASK = (1UL << PATTERN_COUNT) - 1UL;
-static_assert(PATTERN_COUNT == 27, "Pattern catalog must match current NightKite Multi firmware");
+constexpr int PATTERN_COUNT = NightKitePatterns::COUNT;
+constexpr uint32_t ALL_PATTERN_MASK = NightKitePatterns::ALL_MASK;
 
 int brightnessLevels[] = {95, 127, 159, 191, 223, 255};
 constexpr size_t BRIGHTNESS_LEVEL_COUNT = sizeof(brightnessLevels) / sizeof(brightnessLevels[0]);
 int smoothingLevels[] = {1, 10, 20, 40, 60, 80, 100, 150, 256, 512};
 constexpr size_t SMOOTHING_LEVEL_COUNT = sizeof(smoothingLevels) / sizeof(smoothingLevels[0]);
-int autoplayIntervalLevels[] = {1, 5, 10, 20, 30, 60, 120, 300};
-constexpr size_t AUTOPLAY_INTERVAL_LEVEL_COUNT = sizeof(autoplayIntervalLevels) / sizeof(autoplayIntervalLevels[0]);
+constexpr const int* autoplayIntervalLevels = NightKitePlayback::AUTOPLAY_INTERVALS;
+constexpr size_t AUTOPLAY_INTERVAL_LEVEL_COUNT = NightKitePlayback::AUTOPLAY_INTERVAL_COUNT;
 int gyroRangeLevels[] = {250, 500, 1000, 2000};
 constexpr size_t GYRO_RANGE_LEVEL_COUNT = sizeof(gyroRangeLevels) / sizeof(gyroRangeLevels[0]);
 int accelRangeLevels[] = {2, 4, 8, 16};
@@ -317,7 +282,7 @@ struct BleDeviceEntry {
   String address;
   int rssi = 0;
   bool serviceMatch = false;
-  esp_ble_addr_type_t addressType = BLE_ADDR_TYPE_PUBLIC;
+  uint8_t addressType = 0;
 };
 
 struct CommandQueueEntry {
@@ -1153,50 +1118,7 @@ void ensureBleStackStarted()
   bleStackStarted = true;
 }
 
-struct NkSyncBeaconV1 {
-  uint8_t magic0;
-  uint8_t magic1;
-  uint8_t version;
-  uint8_t groupId;
-  uint8_t flags;
-  uint16_t seq;
-  uint8_t pattern;
-  uint8_t brightness;
-  uint32_t phaseMs;
-  uint16_t beatMs;
-  uint16_t crc;
-} __attribute__((packed));
-
-static_assert(sizeof(NkSyncBeaconV1) == NK_SYNC_BEACON_PACKET_SIZE, "Unexpected sync beacon V1 size");
-
-// V2 matches nightkite-multi 4cfa6a0: V1 basis at bytes 0..14,
-// manual audio test values at bytes 15..19, and CRC16 at bytes 20..21.
-// Multi-byte fields are little endian. CRC16-CCITT uses init 0xFFFF and
-// polynomial 0x1021 over all 22 bytes with crc zeroed. Manufacturer data is
-// FF FF + this struct; the raw advertisement starts 02 01 06 19 FF FF FF.
-// Flags bit 0 is the firmware's audio-beat flag and remains clear here because
-// this test mode performs no beat detection.
-struct NkSyncBeaconV2 {
-  uint8_t magic0;
-  uint8_t magic1;
-  uint8_t version;
-  uint8_t groupId;
-  uint8_t flags;
-  uint16_t seq;
-  uint8_t pattern;
-  uint8_t brightness;
-  uint32_t phaseMs;
-  uint16_t beatMs;
-  uint8_t audioEnergy;
-  uint8_t audioBass;
-  uint8_t audioMid;
-  uint8_t audioTreble;
-  uint8_t audioConfidence;
-  uint16_t crc;
-} __attribute__((packed));
-
-static_assert(sizeof(NkSyncBeaconV2) == NK_SYNC_BEACON_V2_PACKET_SIZE, "Unexpected sync beacon V2 size");
-
+// Wire layout and CRC live in the shared codec used by every target.
 enum class BeaconMasterMode : uint8_t {
   V1Manual = 0,
   V2Manual,
@@ -1450,70 +1372,6 @@ private:
     Serial.print(values.confidence);
   }
 
-  static uint16_t crc16Ccitt(const uint8_t* data, size_t len)
-  {
-    uint16_t crc = 0xFFFF;
-    for (size_t i = 0; i < len; ++i) {
-      crc ^= static_cast<uint16_t>(data[i]) << 8;
-      for (uint8_t bit = 0; bit < 8; ++bit) {
-        crc = (crc & 0x8000) ? static_cast<uint16_t>((crc << 1) ^ 0x1021) : static_cast<uint16_t>(crc << 1);
-      }
-    }
-    return crc;
-  }
-
-  static uint16_t computeCrc(const NkSyncBeaconV1& beacon)
-  {
-    NkSyncBeaconV1 copy = beacon;
-    copy.crc = 0;
-    return crc16Ccitt(reinterpret_cast<const uint8_t*>(&copy), sizeof(copy));
-  }
-
-  static uint16_t computeCrc(const NkSyncBeaconV2& beacon)
-  {
-    NkSyncBeaconV2 copy = beacon;
-    copy.crc = 0;
-    return crc16Ccitt(reinterpret_cast<const uint8_t*>(&copy), sizeof(copy));
-  }
-
-  bool buildAdvertisingData(const NkSyncBeaconV1& beacon, uint8_t* output, size_t outputSize, uint8_t& outputLen)
-  {
-    if (output == nullptr || outputSize < NK_SYNC_BEACON_ADV_LEN || NK_SYNC_BEACON_ADV_LEN > 31) {
-      return false;
-    }
-    uint8_t pos = 0;
-    output[pos++] = 2;
-    output[pos++] = ESP_BLE_AD_TYPE_FLAG;
-    output[pos++] = 0x06;
-    output[pos++] = static_cast<uint8_t>(NK_SYNC_BEACON_MFG_LEN + 1);
-    output[pos++] = ESP_BLE_AD_MANUFACTURER_SPECIFIC_TYPE;
-    output[pos++] = static_cast<uint8_t>(NK_SYNC_BEACON_COMPANY_ID & 0xFF);
-    output[pos++] = static_cast<uint8_t>(NK_SYNC_BEACON_COMPANY_ID >> 8);
-    memcpy(&output[pos], &beacon, sizeof(beacon));
-    pos += sizeof(beacon);
-    outputLen = pos;
-    return true;
-  }
-
-  bool buildAdvertisingData(const NkSyncBeaconV2& beacon, uint8_t* output, size_t outputSize, uint8_t& outputLen)
-  {
-    if (output == nullptr || outputSize < NK_SYNC_BEACON_V2_ADV_LEN || NK_SYNC_BEACON_V2_ADV_LEN > 31) {
-      return false;
-    }
-    uint8_t pos = 0;
-    output[pos++] = 2;
-    output[pos++] = ESP_BLE_AD_TYPE_FLAG;
-    output[pos++] = 0x06;
-    output[pos++] = static_cast<uint8_t>(NK_SYNC_BEACON_V2_MFG_LEN + 1);
-    output[pos++] = ESP_BLE_AD_MANUFACTURER_SPECIFIC_TYPE;
-    output[pos++] = static_cast<uint8_t>(NK_SYNC_BEACON_COMPANY_ID & 0xFF);
-    output[pos++] = static_cast<uint8_t>(NK_SYNC_BEACON_COMPANY_ID >> 8);
-    memcpy(&output[pos], &beacon, sizeof(beacon));
-    pos += sizeof(beacon);
-    outputLen = pos;
-    return true;
-  }
-
   bool publish(const BeaconMasterSettings& settings)
   {
     if (advertising == nullptr) {
@@ -1522,8 +1380,7 @@ private:
       return false;
     }
 
-    uint8_t advData[31];
-    uint8_t advLen = 0;
+    uint8_t advData[31] = {};
     const bool v2 = beaconModeUsesV2(settings);
     const uint8_t group = constrain(settings.group, static_cast<uint8_t>(1), static_cast<uint8_t>(4));
     const uint8_t pattern = constrain(settings.pattern, static_cast<uint8_t>(1), static_cast<uint8_t>(PATTERN_COUNT));
@@ -1531,48 +1388,27 @@ private:
     const uint16_t currentSeq = ++seq;
     const uint32_t phase = phaseMs(settings);
     const uint16_t beat = beatMs(settings);
-    uint16_t crc = 0;
-
-    bool built = false;
+    NightKiteSync::BeaconInput beacon;
+    beacon.version = v2 ? NightKiteSync::VERSION_V2 : NightKiteSync::VERSION_V1;
+    beacon.group = group;
+    beacon.sequence = currentSeq;
+    beacon.pattern = pattern;
+    beacon.brightness = brightness;
+    beacon.phaseMs = phase;
+    beacon.beatMs = beat;
     if (v2) {
       const BeaconAudioValues audio = effectiveBeaconAudioValues(settings);
-      NkSyncBeaconV2 beacon{};
-      beacon.magic0 = NK_SYNC_BEACON_MAGIC0;
-      beacon.magic1 = NK_SYNC_BEACON_MAGIC1;
-      beacon.version = NK_SYNC_BEACON_VERSION_V2;
-      beacon.groupId = group;
-      beacon.flags = audio.beat ? NK_SYNC_BEACON_FLAG_AUDIO_BEAT : 0;
-      beacon.seq = currentSeq;
-      beacon.pattern = pattern;
-      beacon.brightness = brightness;
-      beacon.phaseMs = phase;
-      beacon.beatMs = beat;
-      beacon.audioEnergy = audio.energy;
-      beacon.audioBass = audio.bass;
-      beacon.audioMid = audio.mid;
-      beacon.audioTreble = audio.treble;
-      beacon.audioConfidence = audio.confidence;
-      beacon.crc = computeCrc(beacon);
-      crc = beacon.crc;
-      built = buildAdvertisingData(beacon, advData, sizeof(advData), advLen);
-    } else {
-      NkSyncBeaconV1 beacon{};
-      beacon.magic0 = NK_SYNC_BEACON_MAGIC0;
-      beacon.magic1 = NK_SYNC_BEACON_MAGIC1;
-      beacon.version = NK_SYNC_BEACON_VERSION;
-      beacon.groupId = group;
-      beacon.flags = 0;
-      beacon.seq = currentSeq;
-      beacon.pattern = pattern;
-      beacon.brightness = brightness;
-      beacon.phaseMs = phase;
-      beacon.beatMs = beat;
-      beacon.crc = computeCrc(beacon);
-      crc = beacon.crc;
-      built = buildAdvertisingData(beacon, advData, sizeof(advData), advLen);
+      beacon.flags = audio.beat ? NightKiteSync::FLAG_AUDIO_BEAT : 0;
+      beacon.energy = audio.energy;
+      beacon.bass = audio.bass;
+      beacon.mid = audio.mid;
+      beacon.treble = audio.treble;
+      beacon.confidence = audio.confidence;
     }
 
-    if (!built) {
+    const NightKiteSync::EncodeResult encoded =
+        NightKiteSync::encodeAdvertising(beacon, advData, sizeof(advData));
+    if (encoded.size == 0) {
       lastError = "payload too long";
       broadcasting = false;
       Serial.println("beacon: err payload too long");
@@ -1580,17 +1416,17 @@ private:
     }
 
     BLEAdvertisementData advertisementData;
-    advertisementData.addData(String(reinterpret_cast<const char*>(advData), advLen));
+    advertisementData.addData(String(reinterpret_cast<const char*>(advData), encoded.size));
     advertising->stop();
     advertising->setScanResponse(false);
-    advertising->setAdvertisementType(ADV_TYPE_NONCONN_IND);
+    advertising->setAdvertisementType(BLE_GAP_CONN_MODE_NON);
     advertising->setMinInterval(NK_SYNC_BEACON_ADV_INTERVAL_UNITS);
     advertising->setMaxInterval(NK_SYNC_BEACON_ADV_INTERVAL_UNITS + 16);
     advertising->setAdvertisementData(advertisementData);
     advertising->start();
 
-    lastPayloadHex = hexBytes(advData, advLen);
-    lastPayloadLen = advLen;
+    lastPayloadHex = hexBytes(advData, encoded.size);
+    lastPayloadLen = encoded.size;
     lastVersion = v2 ? NK_SYNC_BEACON_VERSION_V2 : NK_SYNC_BEACON_VERSION_V1;
     lastError = "broadcasting";
     nextTxMs = millis() + BEACON_MASTER_TX_INTERVAL_MS;
@@ -1615,7 +1451,7 @@ private:
         printAudioValues(effectiveBeaconAudioValues(settings));
       }
       Serial.print(" crc=0x");
-      Serial.print(crc, HEX);
+      Serial.print(encoded.crc, HEX);
       Serial.print(" adv=");
       Serial.println(lastPayloadHex);
     }
@@ -2077,7 +1913,7 @@ uint32_t controllerPatternMask()
 const char* patternName(int patternId)
 {
   if (patternId >= 1 && patternId <= PATTERN_COUNT) {
-    return PATTERN_NAMES[patternId];
+    return NightKitePatterns::name(patternId);
   }
   return "--";
 }
@@ -2256,72 +2092,6 @@ uint32_t currentInvertedMask()
 }
 
 String shortText(String text, int chars);
-
-class NightKiteCommands {
-public:
-  static String refreshAll()
-  {
-    return "show";
-  }
-  static String refreshPatterns()
-  {
-    return "patterns";
-  }
-  static String refreshBattery()
-  {
-    return "battery";
-  }
-  static String setBrightness(int value)
-  {
-    return "set brightness " + String(value);
-  }
-  static String setStripLength(int value)
-  {
-    return "set strip_length " + String(value);
-  }
-  static String setPattern(int value)
-  {
-    return "set pattern " + String(value);
-  }
-  static String setSmoothing(int value)
-  {
-    return "set smoothing " + String(value);
-  }
-  static String setAccelRange(int value)
-  {
-    return "set accel_range " + String(value);
-  }
-  static String setGyroRange(int value)
-  {
-    return "set gyro_range " + String(value);
-  }
-  static String setAutoplay(bool enabled)
-  {
-    return String("set autoplay ") + (enabled ? "on" : "off");
-  }
-  static String setAutoplayInterval(int seconds)
-  {
-    return "set autoplay_interval " + String(seconds);
-  }
-  static String setPatternCycle(int id, bool enabled)
-  {
-    return String(enabled ? "enable_pattern " : "disable_pattern ") + String(id);
-  }
-  static String setPatternInvert(int id, bool inverted)
-  {
-    return String(inverted ? "invert_pattern " : "normal_pattern ") + String(id);
-  }
-  static String setAllCycle(bool enabled)
-  {
-    // Existing NightKite Multi CLI supports comma-separated pattern IDs.
-    return String(enabled ? "enable_pattern " : "disable_pattern ") + patternListFromMask(controllerPatternMask());
-  }
-  static String setAllInvert(bool inverted)
-  {
-    // TODO: If firmware later adds set all_patterns_invert, map it here.
-    return String(inverted ? "invert_pattern " : "normal_pattern ") + patternListFromMask(controllerPatternMask());
-  }
-};
 
 String legacyCommandToNk4Payload(String command)
 {
@@ -3549,10 +3319,10 @@ void drawBeaconMasterCard()
   drawFooterHints(beaconBroadcaster.active() ? "Ent Stop" : "Ent Start", "C Field", "^/v Val");
 }
 
-const char* const PLAY_MODES[] = {"manual", "autoplay", "sync"};
-constexpr int PLAY_MODE_COUNT = sizeof(PLAY_MODES) / sizeof(PLAY_MODES[0]);
-const char* const BOOT_MODES[] = {"last", "manual", "autoplay", "sync"};
-constexpr int BOOT_MODE_COUNT = sizeof(BOOT_MODES) / sizeof(BOOT_MODES[0]);
+constexpr const char* const* PLAY_MODES = NightKitePlayback::PLAY_MODES;
+constexpr int PLAY_MODE_COUNT = NightKitePlayback::PLAY_MODE_COUNT;
+constexpr const char* const* BOOT_MODES = NightKitePlayback::BOOT_MODES;
+constexpr int BOOT_MODE_COUNT = NightKitePlayback::BOOT_MODE_COUNT;
 
 int indexOfOption(const char* const* options, int count, const String& value)
 {
@@ -4671,6 +4441,8 @@ String profilePathForName(const String& name)
   return "/profiles/" + base;
 }
 
+ProfileData currentProfileData();
+
 bool saveCurrentProfileToPath(const String& path, const String& displayName, bool overwrite)
 {
   if (path.length() == 0) {
@@ -4699,54 +4471,10 @@ bool saveCurrentProfileToPath(const String& path, const String& displayName, boo
   }
   setStatus("Saving profile...", COLOR_ACCENT);
 
-  ensurePatternModel();
-  JsonDocument document;
-  document["profile_version"] = 2;
-  document["project"] = "NightKite Link";
-  document["target"] = "NightKite Multi";
-  JsonObject settings = document["settings"].to<JsonObject>();
-  if (app.identity.name.length() > 0) {
-    settings["device_name"] = app.identity.name;
-  }
-  settings["brightness"] = app.settings.brightness;
-  settings["strip_length"] = app.settings.stripLength;
-  settings["active_pattern"] = app.settings.activePattern;
-  settings["smoothing"] = app.settings.smoothing;
-  settings["accel_range"] = app.settings.accelRange;
-  settings["gyro_range"] = app.settings.gyroRange;
-  if (app.play.playMode != "unknown") settings["play_mode"] = app.play.playMode;
-  if (app.play.bootMode != "unknown") settings["boot_mode"] = app.play.bootMode;
-  if (app.sync.supported) {
-    settings["sync_enabled"] = app.sync.enabled;
-    if (app.sync.group >= 1) settings["sync_group"] = app.sync.group;
-    if (app.sync.role != "unknown") settings["sync_role"] = app.sync.role;
-    if (app.sync.masterUid.length() > 0) settings["sync_master_uid"] = app.sync.masterUid;
-    if (app.sync.lossBehavior != "unknown") settings["sync_loss_behavior"] = app.sync.lossBehavior;
-  }
-  if (app.wireless.supported) {
-    settings["wireless_enabled"] = app.wireless.enabled;
-    if (app.wireless.profile != "unknown") settings["wireless_profile"] = app.wireless.profile;
-  }
-  settings["enabled_pattern_mask"] = currentEnabledMask();
-  settings["inverted_pattern_mask"] = currentInvertedMask();
-  JsonObject autoplay = settings["autoplay"].to<JsonObject>();
-  autoplay["enabled"] = app.settings.autoplayEnabled;
-  autoplay["interval_seconds"] = app.settings.autoplayIntervalSeconds;
-  JsonArray patterns = settings["patterns"].to<JsonArray>();
-  for (const auto& pattern : app.settings.patterns) {
-    JsonObject item = patterns.add<JsonObject>();
-    item["id"] = pattern.id;
-    item["name"] = pattern.name;
-    item["cycle_enabled"] = pattern.cycleEnabled;
-    item["inverted"] = pattern.inverted;
-  }
-  String encoded;
-  serializeJsonPretty(document, encoded);
-  ProfileData validation;
-  ProfileData emptyFallback;
+  ProfileData profile = currentProfileData();
+  std::string encoded;
   std::string validationError;
-  if (encoded.length() == 0 || encoded.length() > MAX_PROFILE_BYTES ||
-      !decodeProfileJson(std::string(encoded.c_str(), encoded.length()), emptyFallback, validation, validationError)) {
+  if (!encodeProfileJson(profile, encoded, validationError) || encoded.length() > MAX_PROFILE_BYTES) {
     Serial.print("profile: current state invalid ");
     Serial.println(validationError.c_str());
     setStatus("Controller data incomplete", COLOR_ERR);
@@ -7025,22 +6753,22 @@ void runBulkAction()
     case 1:
       markTransferCompleteSoundPending();
       applyPatternMasks(currentEnabledMask() | supportedMask, 0, true, false);
-      sendCommand(NightKiteCommands::setAllCycle(true));
+      sendCommand(NightKiteCommands::setAllCycle(true, patternListFromMask(controllerPatternMask())));
       break;
     case 2:
       markTransferCompleteSoundPending();
       applyPatternMasks(currentEnabledMask() & ~supportedMask, 0, true, false);
-      sendCommand(NightKiteCommands::setAllCycle(false));
+      sendCommand(NightKiteCommands::setAllCycle(false, patternListFromMask(controllerPatternMask())));
       break;
     case 3:
       markTransferCompleteSoundPending();
       applyPatternMasks(0, currentInvertedMask() | supportedMask, false, true);
-      sendCommand(NightKiteCommands::setAllInvert(true));
+      sendCommand(NightKiteCommands::setAllInvert(true, patternListFromMask(controllerPatternMask())));
       break;
     case 4:
       markTransferCompleteSoundPending();
       applyPatternMasks(0, currentInvertedMask() & ~supportedMask, false, true);
-      sendCommand(NightKiteCommands::setAllInvert(false));
+      sendCommand(NightKiteCommands::setAllInvert(false, patternListFromMask(controllerPatternMask())));
       break;
   }
   mode = Mode::Cards;

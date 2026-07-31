@@ -45,6 +45,7 @@ public:
   bool isMassStorageConnected() const;
 
   bool startFlash(const String& sdUf2Path, const String& displayName, Uf2Target target);
+  bool startFlash(fs::FS& storage, const String& sdUf2Path, const String& displayName, Uf2Target target);
   void poll();
   void cancel();
 
@@ -79,6 +80,7 @@ private:
   State state = State::Idle;
   FlashProgress current;
   String sourcePath;
+  fs::FS* sourceStorage = nullptr;
   String displayName;
   unsigned long stateStartedMs = 0;
   unsigned long lastProgressLogMs = 0;
