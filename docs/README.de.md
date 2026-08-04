@@ -227,18 +227,21 @@ Initial-Refresh stehen diese Arbeitsabläufe bereit:
   getrennten Entwürfen und explizitem `Apply & Save`
 - Sync-Rolle, Gruppe, Master-UID, Verlustverhalten sowie Funkstatus und
   Funkprofil
-- Audio Beacon V1/V2 manuell oder mikrofongeführt mit Energy-, Band-, Beat-,
-  BPM- und Advertising-Status
+- Audio Beacon V1/V2 manuell oder mikrofongeführt mit Tap-Tempo, manuellen
+  V2-Werten für Energy/Bänder/Confidence, Beat-, BPM-, Sequenz- und Advertising-Status
 - Profile erstellen, überschreiben, laden, live anwenden, umbenennen und nach
   Bestätigung löschen; ein Profil-Apply speichert bewusst nicht automatisch
 - Controllername, Striplänge, Smoothing, Sensorbereiche, Boot-Kalibrierung,
   bestätigte Werkseinstellungen und separates persistentes Speichern
-- Service-Tabs für Schnell-/Präzisionskalibrierung, abgesichertes NK4-Terminal,
-  Sync-/Funkdiagnosen, SD-Prüfung und lokale Displayhelligkeit
+- Service-Tabs für USB-only Schnell-/Präzisionskalibrierung, Timing-/Sensor-
+  Refresh, abgesichertes NK4-Terminal, Live-Sync-/Funk-/BLE-Diagnosen,
+  SD-Prüfung und alle persistenten lokalen Sound-, Lautstärke-, Touch-/Startton-
+  und Displayoptionen
 - vollständige UF2-Prüfung, RP2040-/RP2350-Zielwahl, Bestätigung,
-  Fortschrittsanzeige und Abbruch im Firmware-Workflow
+  Byte-/Prozent-Fortschrittsanzeige und Abbruch im Firmware-Workflow
 
-`Reload` verwirft lokale Entwürfe und lädt neu; `Disconnect` leert Session,
+`Reload` fragt vor dem Verwerfen lokaler Entwürfe nach; auch das bewusst nicht
+persistente Live-Anwenden eines Profils verlangt eine Bestätigung. `Disconnect` leert Session,
 Queue und abgeleiteten Zustand. Busy-, Timeout-, Protokoll-, Queue- und
 Disconnect-Fehler bleiben sichtbar und führen nicht zu einem fälschlich
 gemeldeten Speichern. Das Terminal akzeptiert eine NK4-`cmd=`-Zeile; `save` und
@@ -283,11 +286,13 @@ riskanten Framework-Patch unterdrückt.
 
 Gegenüber dem Cardputer bleiben bewusst wenige Unterschiede: Die Tab5-
 Controlleroberfläche setzt Firmware 4.x/NK4 voraus; der Firmware-3.x-Legacy-
-USB-Pfad bleibt unverändert im Cardputer. Die Cardputer-spezifischen Link-
-Soundoptionen und dessen kompakte Sync-Test-Shortcuts werden nicht 1:1 kopiert;
-Tab5 bietet stattdessen Displayhelligkeit, Audio-Hardwarediagnose sowie die
-vollständigen Sync-, Audio- und Diagnose-Seiten. Die erweiterten Tab5-Abläufe
-benötigen noch den folgenden gebündelten Hardwarelauf.
+USB-Pfad bleibt unverändert im Cardputer. Kompakte Sync-Test-Shortcuts werden
+nicht 1:1 kopiert, weil dieselben Aktionen in den größeren Sync-, Control-,
+Playback- und Diagnoseabläufen liegen. Cardputer-Tastatur-/PCM-Feedback wird
+auf Tab5 durch Touch-Töne mit denselben persistenten Soundregeln abgebildet.
+Die vollständige Zuordnung steht in der
+[Cardputer-/Tab5-Funktionsmatrix](TAB5_FUNCTION_MATRIX.md). Die erweiterten
+Tab5-Abläufe benötigen noch den folgenden gebündelten Hardwarelauf.
 
 ### Gebündelter Hardware-Abschlusstest
 
@@ -295,20 +300,22 @@ Die neue Gesamtoberfläche wird nicht kleinteilig nach jeder Funktion geflasht.
 Der abschließende Hardwarelauf bündelt stattdessen:
 
 1. Finalen Tab5-Build flashen; Boot, beide Display-Controller-Revisionen soweit
-   vorhanden, vollständige Touch-Ausrichtung, Navigation und persistente
-   Displayhelligkeit prüfen.
+   vorhanden, vollständige Touch-Ausrichtung, Navigation, persistente Sound-/
+   Displayoptionen, Start-/Touch-/Statustöne und beide Akkuanzeigen prüfen.
 2. Über USB NK4 verbinden; Initial-Refresh, Control, Playback, Pattern-Maske,
-   Bulk, Controller- und Sync-Einstellungen jeweils anwenden, speichern,
-   neu laden und nach physischem Disconnect wieder verbinden. Queue-/Busy- und
-   kontrollierte Fehleranzeigen dabei beobachten.
+   Bulk, Controller-, Kalibrierungs-, Terminal- und Sync-Abläufe jeweils
+   anwenden, speichern, bestätigt mit offenen Entwürfen neu laden und nach
+   physischem Disconnect wieder verbinden. Queue-/Busy- und kontrollierte
+   Fehleranzeigen dabei beobachten.
 3. Profil auf SD erstellen, überschreiben, laden, live anwenden, anschließend
    explizit speichern, umbenennen und löschen. Zusätzlich defektes, zu großes
    und schreibunterbrochenes Profil sowie `.bak`-Wiederherstellung prüfen.
 4. Dieselben repräsentativen Read-/Write-/Save-Abläufe über BLE inklusive Scan,
-   Connect, Read, Write, Notify, langer Sync-Antwort und sauberem Disconnect
-   ausführen.
+   Connect, Read, Write, Notify, automatischem Diagnose-Polling, langer Sync-
+   Antwort und sauberem Disconnect ausführen.
 5. GATT trennen, Controller als Follower konfigurieren und Audio Beacon V1/V2,
-   Manual, Mic Energy und Mic Full prüfen. Parallel USB-Refreshes ausführen und
+   Manual einschließlich Tap-Tempo und V2-Bändern/Confidence, Mic Energy und
+   Mic Full prüfen. Parallel USB-Refreshes ausführen und
    Lock-, Decode-, CRC-, Audio- und Advertising-Zähler kontrollieren; danach
    Lautsprecher-/Mikrofondiagnose und Mic-Pause prüfen.
 6. Kalibrierung und abgesichertes Terminal prüfen. Anschließend passende und
@@ -825,6 +832,18 @@ Warnungen:
 - Danach wieder normal verbinden, damit die NightKite-USB-CLI verfügbar ist.
 
 ## Entwicklungsnotizen
+
+### Tab5-UI-Performance
+
+Die Tab5-Oberfläche behält den 1280-x-720-Canvas jetzt bei und zeichnet bei
+normalen Änderungen ausschließlich zusammengefasste Dirty-Regions neu.
+Vollbilder sind auf Seiten- und Modalwechsel sowie große kombinierte Änderungen
+begrenzt. Das physische Display bleibt in nativer 720-x-1280-Rotation, während
+der PSRAM-Canvas logische 1280-x-720-Koordinaten behält; dadurch entfällt der
+teure gedrehte M5GFX-Vollbildtransfer. Touch-down-Feedback wird vor Ton,
+Diagnose und ausgelagerter SD-/Profil-/Firmwarearbeit übertragen. Messwerte,
+Toolchain-/Kconfig-Vergleich sowie Cachevergleich und LVGL-Empfehlung stehen in
+[TAB5_UI_PERFORMANCE.md](TAB5_UI_PERFORMANCE.md).
 
 - Das Projekt ist bewusst kompakt und auf ein kleines Handheld-Display
   zugeschnitten.

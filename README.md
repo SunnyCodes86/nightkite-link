@@ -152,7 +152,11 @@ and bulk edits, controller/sync/radio settings, manual and microphone Audio
 Beacon modes, calibration, a guarded NK4 terminal, diagnostics, SD management
 and target-checked RP2040/RP2350 UF2 flashing. Each settings area keeps its own
 draft and reports persistence only after the complete apply-and-save sequence
-succeeds; applying a profile remains deliberately live-only. NK4 sequence
+succeeds; applying a profile remains deliberately live-only and requires confirmation.
+Local sound, volume, touch-tone, startup-tone and display options use the same
+persistent settings contract as Cardputer. Detailed target parity and deliberate
+hardware differences are tracked in [the Cardputer/Tab5 function matrix](docs/TAB5_FUNCTION_MATRIX.md).
+NK4 sequence
 matching, initial refresh, queue ordering, timeouts and disconnect cleanup are
 shared policy; target hardware and drawing remain isolated. The persistent
 header shows Tab5 battery/charging state and the connected controller battery.

@@ -217,18 +217,21 @@ complete initial refresh, the UI provides:
 - separate drafts and explicit `Apply & Save` for pattern/brightness, playback,
   pattern masks, and bulk edits
 - sync role, group, master UID, loss behavior, radio state, and radio profile
-- manual or microphone-driven V1/V2 Audio Beacon with energy, bands, beat, BPM,
-  and advertising status
+- manual or microphone-driven V1/V2 Audio Beacon with tap tempo, manual V2
+  energy/bands/confidence, beat, BPM, sequence, and advertising status
 - profile create/overwrite/load/live-apply/rename/confirmed-delete; profile apply
   deliberately does not persist controller state
 - controller name, strip length, smoothing, sensor ranges, boot calibration,
   confirmed factory defaults, and explicit persistent save
-- service tabs for quick/precise calibration, a guarded NK4 terminal,
-  sync/radio diagnostics, SD checks, and local display brightness
-- full UF2 validation, RP2040/RP2350 target selection, confirmation, progress,
-  and cancellation in the firmware workflow
+- service tabs for USB-only quick/precise calibration, timing/sensor refresh, a
+  guarded NK4 terminal, live sync/radio/BLE diagnostics, SD checks, and all
+  persistent local sound, volume, touch/startup tone, and display options
+- full UF2 validation, RP2040/RP2350 target selection, confirmation, byte/percent
+  progress, and cancellation in the firmware workflow
 
-`Reload` discards local drafts and refreshes them; `Disconnect` clears the
+`Reload` asks before discarding local drafts and refreshing them; live profile
+apply also requires confirmation and remains deliberately non-persistent.
+`Disconnect` clears the
 session, queue, and derived state. Busy, timeout, protocol, queue, and
 disconnect errors remain visible and cannot be reported as a successful save.
 The terminal accepts one NK4 `cmd=` line; `save` and `defaults` are blocked there
@@ -269,10 +272,12 @@ risky framework patch and is intentionally avoided.
 
 A few differences from Cardputer remain deliberate. The Tab5 controller UI
 requires Firmware 4.x/NK4; the Firmware 3.x legacy USB path remains unchanged
-on Cardputer. Cardputer-specific Link sound options and compact sync-test
-shortcuts are not copied one-for-one; Tab5 instead provides display brightness,
-audio hardware diagnostics, and full Sync, Audio, and Diagnostics pages. The
-expanded Tab5 workflows still need the bundled hardware pass below.
+on Cardputer. Compact sync-test shortcuts are not copied one-for-one because
+the same actions are available through the larger Sync, Control, Playback and
+Diagnostics workflows. Cardputer keyboard/PCM feedback is represented by Tab5
+touch tones using the same persistent sound settings. The complete mapping is
+maintained in [the Cardputer/Tab5 function matrix](TAB5_FUNCTION_MATRIX.md).
+The expanded Tab5 workflows still need the bundled hardware pass below.
 
 ### Bundled final hardware test
 
@@ -280,18 +285,21 @@ The expanded UI is not reflashed and tested piecemeal after every feature. The
 final hardware pass instead bundles:
 
 1. Flash the final Tab5 build; verify boot, both display-controller revisions
-   where available, full touch alignment, navigation, and persisted display
-   brightness.
+   where available, full touch alignment, navigation, persisted sound/display
+   options, startup/touch/status tones, and both battery indicators.
 2. Connect over USB NK4; exercise initial refresh, Control, Playback, pattern
-   masks/bulk, Controller, and Sync through apply, save, reload, physical
-   disconnect, and reconnect while observing queue/busy/controlled-error states.
+   masks/bulk, Controller, Calibration, Terminal, and Sync through apply, save,
+   confirmed dirty reload, physical disconnect, and reconnect while observing
+   queue/busy/controlled-error states.
 3. On SD, create, overwrite, load, live-apply, explicitly save, rename, and
    delete a profile. Also test malformed/oversized/interrupted writes and `.bak`
    recovery.
 4. Repeat representative read/write/save workflows over BLE, including scan,
-   connect, read, write, notify, a long sync response, and clean disconnect.
-5. Disconnect GATT, configure a follower, and test Audio Beacon V1/V2, Manual,
-   Mic Energy, and Mic Full. Run parallel USB refreshes and inspect lock, decode,
+   connect, read, write, notify, automatic diagnostic polling, a long sync
+   response, and clean disconnect.
+5. Disconnect GATT, configure a follower, and test Audio Beacon V1/V2, Manual
+   including tap tempo and V2 bands/confidence, Mic Energy, and Mic Full. Run
+   parallel USB refreshes and inspect lock, decode,
    CRC, audio, and advertising counters; then verify speaker/microphone
    diagnostics and microphone pause.
 6. Exercise calibration and the guarded terminal. Validate correct and wrong
@@ -790,6 +798,17 @@ Warnings:
 - Reconnect it normally so the NightKite USB CLI is available again.
 
 ## Development Notes
+
+### Tab5 UI performance
+
+The Tab5 UI now retains its 1280 x 720 canvas and redraws only coalesced dirty
+regions for ordinary changes. Full frames are limited to page/modal transitions
+and large combined changes. The physical display stays in native 720 x 1280
+rotation while the PSRAM canvas preserves logical 1280 x 720 coordinates,
+avoiding M5GFX's costly rotated full-frame transfer. Touch-down feedback is
+transferred before tones, diagnostics, and deferred SD/profile/firmware work.
+Measurements, toolchain and Kconfig/cache comparisons, and the LVGL
+recommendation are in [TAB5_UI_PERFORMANCE.md](TAB5_UI_PERFORMANCE.md).
 
 - The project is intentionally compact and targeted at a small handheld display.
 - The UI should remain non-blocking; `M5Cardputer.update()` must run regularly.

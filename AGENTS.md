@@ -7,6 +7,7 @@ NightKite Link is a multi-target configurator and service tool for NightKite Mul
 - Work only in this repository unless the user explicitly asks otherwise. Do not modify `nightkite-multi` or `nightkite-configurator` from a Link task.
 - Preserve unrelated user changes. Do not commit, push, upload firmware or operate hardware unless explicitly requested.
 - Treat current source and `platformio.ini` as authoritative for implementation details. Keep EN/DE documentation synchronized with user-visible behavior.
+- Keep `docs/TAB5_FUNCTION_MATRIX.md` synchronized when user-visible Cardputer/Tab5 parity changes.
 
 ## Durable Product Invariants
 
@@ -45,6 +46,10 @@ NightKite Link is a multi-target configurator and service tool for NightKite Mul
 - Profile apply changes live settings and must not silently save them.
 - Keep controller and Link battery/status information distinct and clear stale controller values after session loss.
 - Keep keyboard handling, footer hints, queue status and navigation usable on the physical 240 x 135 px device. Critical flash states may lock navigation; ordinary work must not block the main loop.
+- Keep the Tab5 canvas retained: ordinary updates must redraw and transfer only coalesced widget regions. Reserve full refreshes for page/modal transitions or a measured large-area threshold, and keep optional UI timing diagnostics compiled out of normal builds.
+- Keep the Tab5 panel in native rotation 0 and the PSRAM canvas in native 720 x 1280 storage with logical canvas rotation 3. Keep touch and dirty-rectangle transforms centralized and host-tested; do not restore the measured-slow rotated display transfer.
+- Do not add persistent page or widget sprites merely because PSRAM is available. The measured RGB565, 8-bit and 4-bit cache copies were slower than direct retained drawing; require a focused A/B win and a reliable no-cache fallback before adding one.
+- Paint Tab5 touch-down feedback before release-triggered actions, tones, serial diagnostics or storage work. Keep profile/firmware directory scans cached and incremental, and UF2 validation outside the touch handler.
 
 ## BLE And Audio Safety
 
