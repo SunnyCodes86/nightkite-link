@@ -19,11 +19,17 @@ NightKite Link is a multi-target configurator and service tool for NightKite Mul
 - Preserve profile v2 and NightKite Configurator compatibility.
 - Preserve RP2040 and RP2350 UF2 flashing paths and all target-safety checks.
 - Preserve hardware-proven UI, transport, audio and timing behavior unless a concrete defect justifies change.
+- Show Control makes Link a runtime player/live controller/gateway, not a small-screen timeline editor. Cardputer triggers, SD playback and the USB bridge must share the ShowEvent/Engine/codec path.
+- Preserve the Multi Show V1 contract and existing Sync V1/V2 layouts. Use compact timed legacy advertisements, never LED-frame streaming. Long timelines stay on Link/host; receiver queues are only short lookahead buffers.
+- Keep show files versioned, strictly prevalidated and incrementally processed with bounded memory. Show state never resumes after reboot. STOP must drain already transmitted deadlines before RELEASE: the wire protocol has no queue cancel.
+- Audio V2 freshness and CLOCK must not be starved by event retransmissions. Keep advertising arbitration centralized and expose failed admission/publication in diagnostics.
+- Cardputer's native USB device bridge and existing USB host role are mutually exclusive and explicitly selected from saved Link options before driver initialization; role changes require disarm and a manual reboot. Never initialize host/VBUS against a PC or guess the cable role. Preserve Tab5's separate USB-A host/USB-C device paths.
 
 ## Repository Boundaries
 
 - Reuse existing helpers in `include/` and `src/`; keep non-trivial logic host-testable where practical.
 - Treat `platformio.ini`, `src/CMakeLists.txt`, `sdkconfig.defaults` and `dependencies.lock` together as the Tab5 build contract. The P4 BLE path must remain ESP-Hosted/NimBLE over the onboard C6; do not assume native P4 radio support.
+- Build Cardputer and Tab5 through `scripts/pio_target.py`: Cardputer-Adv stays on the hardware-tested IDF 5.4.2 toolchain because IDF 5.5.x breaks ES8311 legacy-I2S capture, while Tab5 keeps its current IDF 5.5.2 stack. Their PlatformIO package directories must remain isolated.
 - Keep the Tab5 Arduino variant, PSRAM, single-app partition and official SDMMC/Hosted-SDIO pin assignments intact. The factory C6 Wi-Fi image is not sufficient for Hosted BLE; use a co-processor image compatible with the pinned ESP-Hosted host. The current Hosted reset output drives C6 EN and must finish high; active-low reset strands the C6 in reset. Do not bypass the version preflight or let failed Hosted initialization abort the P4 UI.
 - Treat `lib/usb_host_msc/` as vendored code and `scripts/patch_m5cardputer.py` plus `scripts/patch_usbhostserial.py` as required build support. Tab5 NK4 responses require the configured 8192-byte USB receive buffer, and the disconnect semaphore patch must remain until its upstream equivalent is hardware-tested. Do not replace, upgrade or remove these casually.
 - Do not upgrade platforms, libraries or add dependencies unless requested.
@@ -45,6 +51,7 @@ NightKite Link is a multi-target configurator and service tool for NightKite Mul
 - Do not report persistence before a confirmed save. Failed commands, partial batches, failed saves or edits made after save began must remain visibly unsaved.
 - Profile apply changes live settings and must not silently save them.
 - Keep controller and Link battery/status information distinct and clear stale controller values after session loss.
+- Bind global Cardputer canvases to the actual `M5.Display` object, not the dynamically initialized `M5Cardputer.Display` reference; cross-file constructor order must not determine the render target.
 - Keep keyboard handling, footer hints, queue status and navigation usable on the physical 240 x 135 px device. Critical flash states may lock navigation; ordinary work must not block the main loop.
 - Keep the Tab5 canvas retained: ordinary updates must redraw and transfer only coalesced widget regions. Reserve full refreshes for page/modal transitions or a measured large-area threshold, and keep optional UI timing diagnostics compiled out of normal builds.
 - Keep the Tab5 panel in native rotation 0 and the PSRAM canvas in native 720 x 1280 storage with logical canvas rotation 3. Keep touch and dirty-rectangle transforms centralized and host-tested; do not restore the measured-slow rotated display transfer.

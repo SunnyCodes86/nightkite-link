@@ -1,5 +1,27 @@
 # NightKite Link Documentation
 
+## Show Control runtime
+
+The new **Show** carousel card provides ARM/READY status, ALL/GROUP/SINGLE targets,
+patterns 1–27, runtime brightness, static colors, blackout/release and SD playback.
+`C` selects a field, `+/-` changes it, Enter applies. Quick keys: `A` arm/disarm,
+`W` white, `B` blackout, `R` release, `X` stop, `F` scan files while OFF. Load
+`/shows/*.nks` before ARM; wait for LOADED and READY, then PLAY. SINGLE selection
+reuses controller short IDs from the existing BLE scan or USB identity.
+
+Shows are authored externally. Files are versioned text, fully validated before
+streamed playback. STOP drains already sent events before ALL RELEASE; use
+Stop/Restart, with no pause/resume. Patterns 23–27 require fresh Audio V2.
+Receivers need current Show V1 firmware and saved `wireless_enabled=1` plus
+`show_control enabled=1`. Keep matching audio groups and no GATT connection.
+
+PC software uses the `NKSHOW 1` USB API, not the BLE contract. Select PC Bridge in Show's USB role field while disarmed, then restart with USB
+already connected to the PC. Late USB attachment is currently unsupported. The mode
+is saved; Controller Host is the default. Unplug the PC before rebooting into Host. Tab5 shares the API/player
+on its USB-C console, without an added touch editor. See the
+[complete sender, file and USB API reference](SHOW_CONTROL.md),
+[example file](../examples/demo.nks) and [Python demo](../tools/show_bridge_example.py).
+
 ## Project Overview
 
 NightKite Link is a compact configurator and service device for NightKite Multi
@@ -176,35 +198,42 @@ cd nightkite-link
 
 Open the folder in VS Code / PlatformIO, or use the PlatformIO CLI directly.
 
-The configured PlatformIO environments are `cardputer` and `tab5`; the default
-build compiles both.
+The configured PlatformIO environments are `cardputer` and `tab5`. Build them
+through the target wrapper so their different pinned framework packages remain
+isolated.
 
 Build:
 
 ```sh
-pio run
+python3 scripts/pio_target.py all
 ```
 
 Upload:
 
 ```sh
-pio run -e cardputer -t upload
-pio run -e tab5 -t upload
+python3 scripts/pio_target.py cardputer -t upload
+python3 scripts/pio_target.py tab5 -t upload
 ```
 
 Serial monitor:
 
 ```sh
-pio device monitor -e cardputer
-pio device monitor -e tab5
+python3 scripts/pio_target.py cardputer -t monitor
+python3 scripts/pio_target.py tab5 -t monitor
 ```
 
 Current targets from `platformio.ini`:
 
-- platform: pioarduino `55.03.37` for both targets
-- Cardputer: `m5stack-stamps3`, Arduino
-- Tab5: `m5stack-tab5-p4`, Arduino as an ESP-IDF component
+- Cardputer: pioarduino `54.03.21-2`, Arduino 3.2.1 / ESP-IDF 5.4.2;
+  `m5stack-stamps3`
+- Tab5: pioarduino `55.03.37`, Arduino as an ESP-IDF 5.5.2 component;
+  `m5stack-tab5-p4`
 - monitor speed: `115200`
+
+ESP-IDF 5.5.x currently regresses the Cardputer-Adv ES8311 legacy-I2S MCLK
+path (Espressif issue #18621) and yields constant microphone samples. The
+wrapper gives each target its own `.pio/core-*` package directory so building
+one cannot replace the other's Arduino/IDF packages.
 
 ## Tab5 workflow and hardware diagnostics
 
@@ -740,7 +769,7 @@ Warnings:
 ### Cardputer does not upload
 
 - Check that the correct USB port is selected in PlatformIO.
-- Use `pio run -t upload`.
+- Use `python3 scripts/pio_target.py cardputer -t upload`.
 - If upload fails, try reconnecting the Cardputer-Adv.
 
 ### Controller is not detected

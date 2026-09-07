@@ -56,16 +56,37 @@ The flat Cardputer navigation is ordered by task frequency:
   their target implementation. The Tab5 ESP-IDF component source list keeps
   target selection out of scattered preprocessor branches.
 
+## Show Control
+
+Show Control V1 adds a **Show** runtime card, an SD player (`/shows/*.nks`) and
+a versioned USB gateway API for PC software. Live keys, files and USB share one
+timed broadcast engine, alongside Audio V2. Configure and save receiver wireless
+and show reception first. On Cardputer, select the saved PC Bridge mode in Show while disarmed; connect USB to the PC
+before starting Cardputer. Late USB attachment is currently unsupported.
+Controller Host remains the default; unplug the PC before rebooting into Host.
+See the [sender/file/API reference](docs/SHOW_CONTROL.md),
+[example show](examples/demo.nks) and [Python bridge demo](tools/show_bridge_example.py).
+Tab5 uses the same engine/API via USB-C, without a new touch show editor.
+
+Show Control V1 ergänzt eine **Show**-Karte, SD-Wiedergabe (`/shows/*.nks`) und
+eine USB-Gateway-API. Empfangsfreigaben am Controller vorher speichern; PC Bridge
+in der Show-Karte nach Disarm wählen und speichern. USB vor dem Cardputer-Start
+mit dem PC verbinden; späteres Anstecken wird derzeit nicht zuverlässig erkannt. Controller Host
+bleibt Standard; vor dem Neustart in Host den PC abziehen. STOP lässt bereits gesendete
+Termine auslaufen und sendet anschließend RELEASE; es gibt kein Pause/Resume.
+
 ## Build
 
-PlatformIO environments: `cardputer`, `tab5`. The default build compiles both.
+PlatformIO environments: `cardputer`, `tab5`. Their pinned framework packages
+are isolated because Cardputer-Adv requires ESP-IDF 5.4.2 for working ES8311
+microphone capture while Tab5 remains on ESP-IDF 5.5.2.
 
 ```sh
-pio run
-pio run -e cardputer -t upload
-pio run -e tab5 -t upload
-pio device monitor -e cardputer
-pio device monitor -e tab5
+python3 scripts/pio_target.py all
+python3 scripts/pio_target.py cardputer -t upload
+python3 scripts/pio_target.py tab5 -t upload
+python3 scripts/pio_target.py cardputer -t monitor
+python3 scripts/pio_target.py tab5 -t monitor
 ```
 
 ## Current Status

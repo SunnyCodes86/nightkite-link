@@ -22,6 +22,10 @@
 #include "NightKiteProtocol.h"
 #include "ProfileCodec.h"
 #include "SyncBeaconCodec.h"
+#include "ShowRuntime.h"
+#include <HWCDC.h>
+#include <hal/usb_serial_jtag_ll.h>
+#include <esp_private/periph_ctrl.h>
 #include "UiUsability.h"
 #include "Uf2Validator.h"
 #include "UsbMscUf2Flasher.h"
@@ -301,6 +305,7 @@ enum class Card : uint8_t {
   Brightness,
   Play,
   BeaconMaster,
+  Show,
   PatternList,
   PatternBulk,
   Profiles,
@@ -316,7 +321,7 @@ enum class Card : uint8_t {
   Firmware,
 };
 
-constexpr int CARD_COUNT = 18;
+constexpr int CARD_COUNT = 19;
 
 enum class Mode : uint8_t {
   Cards,
@@ -418,6 +423,11 @@ struct AppState {
 };
 
 AppState app;
+ShowRuntime showRuntime;
+HWCDC bridgeSerial;
+bool bridgeMode = false;
+void setupShow(); void tickShow(); void drawShowCard(); void changeShowValue(int);
+void applyShowAction(); bool showKey(char);
 Mode mode = Mode::Cards;
 unsigned long lastCardBatteryPollMs = 0;
 unsigned long lastPollMs = 0;
@@ -449,7 +459,9 @@ bool bleQueueWasActive = false;
 bool bleInitialRefreshActive = false;
 bool bleInitialBasisDone = false;
 bool canvasReady = false;
-M5Canvas uiCanvas(&M5Cardputer.Display);
+// The Cardputer reference is initialized in another global constructor.
+// Use the actual display object; its address is already valid here.
+M5Canvas uiCanvas(&M5.Display);
 SoundManager soundManager;
 NightKiteLinkSettings::Settings linkSettings;
 NightKiteLinkSettings::Settings savedLinkSettings;
@@ -606,7 +618,7 @@ public:
 
   void begin()
   {
-    if (started) {
+    if (started || bridgeMode) {
       return;
     }
     started = hostSerial.begin(SERIAL_BAUD, 0, 0, 8);
@@ -615,7 +627,9 @@ public:
   bool connected() override
   {
     begin();
-    return static_cast<bool>(hostSerial);
+    // USBHostSerial::operator bool() requires the semaphore created by begin().
+    // Bridge mode deliberately never initializes that USB host driver.
+    return started && static_cast<bool>(hostSerial);
   }
 
   void sendLine(const String& line) override
@@ -631,6 +645,7 @@ public:
   bool readLine(String& line) override
   {
     begin();
+    if (!started) return false;
     while (hostSerial.available() > 0) {
       char c = static_cast<char>(hostSerial.read());
       if (c == '\r') {
@@ -653,6 +668,7 @@ public:
   {
     begin();
     buffer = "";
+    if (!started) return;
     while (hostSerial.available() > 0) {
       hostSerial.read();
     }
@@ -810,7 +826,8 @@ public:
       std::lock_guard<std::mutex> lock(stateMutex);
       intentionalDisconnect = false;
     }
-    if (!client->connect(BLEAddress(device.address.c_str()), device.addressType, BLE_CONNECT_TIMEOUT_MS)) {
+    if (!client->connect(BLEAddress(device.address.c_str()),
+                         static_cast<esp_ble_addr_type_t>(device.addressType), BLE_CONNECT_TIMEOUT_MS)) {
       setPhase(BleClientState::Error, "BLE err conn");
       Serial.println("ble: err connect");
       disconnect();
@@ -1419,7 +1436,11 @@ private:
     advertisementData.addData(String(reinterpret_cast<const char*>(advData), encoded.size));
     advertising->stop();
     advertising->setScanResponse(false);
+#if ESP_ARDUINO_VERSION >= ESP_ARDUINO_VERSION_VAL(3, 3, 0)
     advertising->setAdvertisementType(BLE_GAP_CONN_MODE_NON);
+#else
+    advertising->setAdvertisementType(ADV_TYPE_NONCONN_IND);
+#endif
     advertising->setMinInterval(NK_SYNC_BEACON_ADV_INTERVAL_UNITS);
     advertising->setMaxInterval(NK_SYNC_BEACON_ADV_INTERVAL_UNITS + 16);
     advertising->setAdvertisementData(advertisementData);
@@ -1540,9 +1561,9 @@ void linkSettingsChanged()
   app.dirty = true;
 }
 
-void persistLinkSettings()
+void persistLinkSettings(bool force = false)
 {
-  if (!linkSettingsDirty || millis() - linkSettingsChangedMs < LINK_SETTINGS_WRITE_DELAY_MS) {
+  if (!linkSettingsDirty || (!force && millis() - linkSettingsChangedMs < LINK_SETTINGS_WRITE_DELAY_MS)) {
     return;
   }
   const auto record = NightKiteLinkSettings::encode(linkSettings);
@@ -4266,6 +4287,7 @@ void render()
       case Card::Ble:
         drawBleCard();
         break;
+      case Card::Show: drawShowCard(); break;
       case Card::BeaconMaster:
         drawBeaconMasterCard();
         break;
@@ -5461,6 +5483,7 @@ void manualUsbReconnect()
 
 void startBleScan()
 {
+  if (showRuntime.engine.active()) { setStatus("Disarm Show first", COLOR_WARN); return; }
   if (beaconBroadcaster.active()) {
     beaconBroadcaster.stop();
     cardputerAudioSync.end();
@@ -5505,6 +5528,7 @@ void pollBleScanCompletion()
 
 void connectSelectedBleDevice()
 {
+  if (showRuntime.engine.active()) { setStatus("Disarm Show first", COLOR_WARN); return; }
   if (beaconBroadcaster.active()) {
     beaconBroadcaster.stop();
     cardputerAudioSync.end();
@@ -6048,6 +6072,7 @@ void sendLiveEditCommand(const String& command, const String& status)
 
 void changeValue(int delta)
 {
+  if (static_cast<Card>(app.selectedCard) == Card::Show) { changeShowValue(delta); return; }
   switch (static_cast<Card>(app.selectedCard)) {
     case Card::Play:
       if (app.protocolMode != ProtocolMode::Nk4) {
@@ -6325,6 +6350,7 @@ bool startBeaconMicIfNeeded()
 
 void applyCurrentCard()
 {
+  if (static_cast<Card>(app.selectedCard) == Card::Show) { applyShowAction(); return; }
   switch (static_cast<Card>(app.selectedCard)) {
     case Card::Status:
     case Card::Device:
@@ -6334,6 +6360,7 @@ void applyCurrentCard()
       connectSelectedBleDevice();
       break;
     case Card::BeaconMaster:
+      if (showRuntime.engine.active()) { setStatus("Disarm Show first", COLOR_WARN); break; }
       if (beaconBroadcaster.active()) {
         beaconBroadcaster.stop();
         cardputerAudioSync.end();
@@ -6588,6 +6615,8 @@ void saveAllPatternStates()
 
 void startFirmwareFlash()
 {
+  if (bridgeMode) { setStatus("USB Host mode required", COLOR_WARN); return; }
+  if (showRuntime.engine.active()) { setStatus("Disarm Show first", COLOR_WARN); return; }
   if (!ensureSdReady()) {
     app.flash.errorMessage = "No SD card";
     setFlashState(FlashUiState::Error);
@@ -6624,6 +6653,8 @@ void startFirmwareFlash()
 
 void beginFirmwareFlashAfterBootsel()
 {
+  if (bridgeMode) { setStatus("USB Host mode required", COLOR_WARN); return; }
+  if (showRuntime.engine.active()) { setStatus("Disarm Show first", COLOR_WARN); return; }
   if (app.flash.fullPath.length() == 0) {
     app.flash.errorMessage = "No UF2 selected";
     setFlashState(FlashUiState::Error);
@@ -6780,6 +6811,7 @@ void handleWordChar(char c)
   if (flashWorkflowActive()) {
     return;
   }
+  if (mode == Mode::Cards && static_cast<Card>(app.selectedCard) == Card::Show && showKey(c)) return;
 
   if (mode == Mode::ProfileNameInput) {
     if (app.profileNameInput.length() < 40 && c >= 32 && c <= 126) {
@@ -7144,7 +7176,7 @@ void handleKeyboard()
 
 void updateBeaconMaster()
 {
-  if (beaconBroadcaster.active()) {
+  if (beaconBroadcaster.active() || showRuntime.engine.active()) {
     bool shouldCapture = beaconModeUsesMic(beaconMasterSettings) && !beaconMasterSettings.micPaused;
     if (shouldCapture && !cardputerAudioSync.active()) {
       startBeaconMicIfNeeded();
@@ -7163,7 +7195,7 @@ void updateBeaconMaster()
   }
 
   uint16_t previousSeq = beaconBroadcaster.currentSeq();
-  beaconBroadcaster.tick(beaconMasterSettings);
+  if (!showRuntime.engine.active()) beaconBroadcaster.tick(beaconMasterSettings);
   if (beaconBroadcaster.active()) {
     app.beaconStatus = beaconBroadcaster.status();
     if (beaconBroadcaster.currentSeq() != previousSeq) {
@@ -7171,6 +7203,27 @@ void updateBeaconMaster()
     }
   }
 }
+
+void beginUsbRole()
+{
+  // Boot-only ownership: no PHY teardown, automatic detection, or host wait.
+  bridgeMode = linkSettings.usbBridge;
+  if (bridgeMode) {
+    // Match the IDF Serial/JTAG driver: do not depend on ROM USB clock state.
+    PERIPH_RCC_ATOMIC() {
+      usb_serial_jtag_ll_enable_bus_clock(true);
+    }
+    // HWCDC::begin sets conf0.phy_sel but does not select the shared RTC mux.
+    // Explicitly route the internal PHY to Serial/JTAG before starting CDC.
+    usb_serial_jtag_ll_phy_enable_external(false);
+    bridgeSerial.setRxBufferSize(2048);
+    bridgeSerial.setTxBufferSize(4096);
+    bridgeSerial.setTxTimeoutMs(0);
+    bridgeSerial.begin(SERIAL_BAUD);
+  }
+}
+
+#include "targets/cardputer/ShowUi.inc"
 
 }  // namespace
 
@@ -7183,12 +7236,14 @@ void setup()
   soundManager.begin();
   M5Cardputer.Display.setRotation(1);
   loadLinkSettings();
+  beginUsbRole();
   uiCanvas.setColorDepth(16);
   canvasReady = uiCanvas.createSprite(SCREEN_W, SCREEN_H) != nullptr;
   uiCanvas.setTextSize(1);
   uiCanvas.setFont(&fonts::Font0);
   uiCanvas.setTextDatum(top_left);
   randomSeed(static_cast<uint32_t>(esp_random()));
+  setupShow();
 
   ensurePatternModel();
   updateCardputerBattery(true);
@@ -7230,6 +7285,7 @@ void loop()
   handleKeyboard();
   updateFlashWorkflow();
   updateBeaconMaster();
+  tickShow();
   if (!flashWorkflowBusy()) {
     pollTransport();
     pollCommandQueue();

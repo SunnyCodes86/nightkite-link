@@ -33,6 +33,7 @@
 #include "Nk4LineParser.h"
 #include "ProfileCodec.h"
 #include "SyncBeaconCodec.h"
+#include "ShowRuntime.h"
 #include "Uf2Validator.h"
 #include "UsbMscUf2Flasher.h"
 #include "Tab5WorkflowPolicy.h"
@@ -262,6 +263,8 @@ Phase phase = Phase::Idle;
 String statusText = "Choose USB or BLE";
 String controllerName = "No controller";
 String diagnosticLine;
+bool diagnosticOverflow = false;
+ShowRuntime showRuntime;
 bool dirty = true;
 DirtyRegion dirtyRegions[MAX_DIRTY_REGIONS] = {{0, 0, 1280, 720}};
 size_t dirtyRegionCount = 1;
@@ -421,7 +424,7 @@ void setSmoke(SmokeId id, const char* state, const String& detail)
 void playUiTone(int frequency, int durationMs, bool keySound = false)
 {
   if (!linkSettings.soundEnabled || (keySound && !linkSettings.keySoundsEnabled)) return;
-  if (audioState != AudioState::Idle || audioBeaconRunning) return;
+  if (audioState != AudioState::Idle || audioBeaconRunning || showRuntime.engine.active()) return;
   if (!uiToneActive && !M5.Speaker.begin()) return;
   M5.Speaker.setVolume(linkSettings.volume);
   M5.Speaker.setAllChannelVolume(linkSettings.volume);
@@ -1234,6 +1237,7 @@ void selectUsb()
 
 void startBleScan()
 {
+  if (showRuntime.engine.active()) { setStatus(Phase::Error, "Disarm Show Control first"); return; }
   if (audioBeaconRunning) stopAudioBeacon();
   if (beaconStartedAt && bleAdvertising != nullptr) {
     bleAdvertising->stop();
@@ -1254,6 +1258,7 @@ void startBleScan()
 
 void connectBle(size_t index)
 {
+  if (showRuntime.engine.active()) { setStatus(Phase::Error, "Disarm Show Control first"); return; }
   setStatus(Phase::Connecting, "Connecting and discovering NK4 GATT");
   if (!ble.connectIndex(index)) {
     setSmoke(SmokeId::Gatt, "FAIL", ble.statusMessage());
@@ -2425,6 +2430,7 @@ void updateStorageAction()
 
 void startSelectedFirmwareFlash()
 {
+  if (showRuntime.engine.active()) { setStatus(Phase::Error, "Disarm Show Control first"); return; }
   if (!firmwareValidated || firmwareValidation.result != Uf2ValidationResult::Ok || selectedFirmware < 0) return;
   disconnectController();
   M5.Power.setExtOutput(true, m5::ext_USB);
@@ -3361,6 +3367,7 @@ void handleTouch()
     else if (y < 555) updateSyncDraftDirty(275, 365, 955, 178);
     else updateSyncDraftDirty(460, 565, 580, 100);
   } else if (page == Page::Audio) {
+    if (showRuntime.engine.active()) { setStatus(Phase::Error, "Show audio: USB AUDIO command; disarm to edit"); return; }
     const bool manualV2 = audioBeaconSettings.mode == AudioBeaconMode::ManualV2;
     const bool micMode = audioBeaconSettings.mode == AudioBeaconMode::MicEnergyV2 ||
                          audioBeaconSettings.mode == AudioBeaconMode::MicFullV2;
@@ -3559,6 +3566,7 @@ void testSd()
 
 void startAudioTest()
 {
+  if (showRuntime.engine.active()) { setStatus(Phase::Error, "Disarm Show Control first"); return; }
   if (audioState != AudioState::Idle) return;
   if (audioBeaconRunning) stopAudioBeacon();
   if (uiToneActive) {
@@ -3619,6 +3627,7 @@ void updateAudio()
 
 void startBeaconTest()
 {
+  if (showRuntime.engine.active()) { setStatus(Phase::Error, "Disarm Show Control first"); return; }
   if (ble.connected() || (selectedTransport == Transport::Ble && sessionStarted)) {
     setSmoke(SmokeId::Beacon, "FAIL", "disconnect GATT before advertising");
     return;
@@ -3681,13 +3690,13 @@ void stopAudioBeacon()
   invalidateRect(410, 525, 690, 116);
 }
 
-bool publishAudioBeacon()
+NightKiteSync::BeaconInput currentAudioBeacon()
 {
   NightKiteSync::BeaconInput input;
   input.version = audioBeaconSettings.mode == AudioBeaconMode::ManualV1 ? NightKiteSync::VERSION_V1
                                                                         : NightKiteSync::VERSION_V2;
   input.group = static_cast<uint8_t>(audioBeaconSettings.group);
-  input.sequence = ++audioBeaconSequence;
+
   input.pattern = static_cast<uint8_t>(audioBeaconSettings.pattern);
   input.brightness = static_cast<uint8_t>(audioBeaconSettings.brightness);
   const uint16_t manualBeatMs = static_cast<uint16_t>(60000 / constrain(audioBeaconSettings.bpm, 40, 240));
@@ -3715,6 +3724,12 @@ bool publishAudioBeacon()
     }
     input.confidence = audioBeaconOutput.confidence;
   }
+  return input;
+}
+
+bool publishAudioBeacon()
+{
+  auto input = currentAudioBeacon(); input.sequence = ++audioBeaconSequence;
   uint8_t payload[NightKiteSync::V2_ADVERTISING_SIZE] = {};
   const auto encoded = NightKiteSync::encodeAdvertising(input, payload, sizeof(payload));
   if (!encoded.size) return false;
@@ -3731,6 +3746,7 @@ bool publishAudioBeacon()
 
 void startAudioBeacon()
 {
+  if (showRuntime.engine.active()) { setStatus(Phase::Error, "Disarm Show Control first"); return; }
   if (audioState != AudioState::Idle) {
     setStatus(Phase::Error, "Wait for the audio diagnostic to finish");
     return;
@@ -3767,7 +3783,7 @@ void startAudioBeacon()
 
 void updateAudioBeacon()
 {
-  if (!audioBeaconRunning) return;
+  if (!audioBeaconRunning && !showRuntime.engine.active()) return;
   const bool useMic = (audioBeaconSettings.mode == AudioBeaconMode::MicEnergyV2 ||
                        audioBeaconSettings.mode == AudioBeaconMode::MicFullV2) && !audioBeaconSettings.micPaused;
   if (useMic) {
@@ -3785,7 +3801,7 @@ void updateAudioBeacon()
       }
     }
   }
-  if (millis() - audioBeaconLastAdvAt >= 100) {
+  if (!showRuntime.engine.active() && millis() - audioBeaconLastAdvAt >= 100) {
     audioBeaconLastAdvAt = millis();
     if (!publishAudioBeacon()) {
       stopAudioBeacon();
@@ -4092,6 +4108,7 @@ void printDiagnostics()
 void runDiagnostic(String command)
 {
   command.trim();
+  if (command.startsWith("NKSHOW ")) { Serial.println(showRuntime.hostRequest(command.c_str())); return; }
   command.toLowerCase();
   if (command == "status") printDiagnostics();
   else if (command == "reload") reloadController();
@@ -4123,17 +4140,20 @@ void runDiagnostic(String command)
 
 void handleDiagnostics()
 {
-  while (Serial.available()) {
+  for (unsigned budget = 0; budget < 128 && Serial.available(); ++budget) {
     const char c = static_cast<char>(Serial.read());
     if (c == '\r') continue;
     if (c == '\n') {
-      runDiagnostic(diagnosticLine);
-      diagnosticLine = "";
-    } else if (diagnosticLine.length() < 80) {
-      diagnosticLine += c;
-    }
+      if (diagnosticOverflow) Serial.println("NKSHOW 1 0 ERROR code=line_length");
+      else runDiagnostic(diagnosticLine);
+      diagnosticLine = ""; diagnosticOverflow = false;
+    } else if (c < 32 || c > 126 || diagnosticLine.length() + 1 >= NightKiteShow::LINE_SIZE) {
+      diagnosticOverflow = true;
+    } else if (!diagnosticOverflow) diagnosticLine += c;
   }
 }
+
+#include "ShowHardware.inc"
 
 }  // namespace
 
@@ -4177,6 +4197,7 @@ void setup()
                 static_cast<unsigned>(uiCanvas.bufferLength()), esp_ptr_external_ram(uiCanvas.getBuffer()) ? 1 : 0,
                 static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)),
                 static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM)));
+  setupShow();
   loadLinkSettings();
   if (linkSettings.startupSoundEnabled) playUiTone(1600, 100);
   const bool displayOk = M5.Display.width() == 720 && M5.Display.height() == 1280;
@@ -4203,6 +4224,7 @@ void loop()
   updateFirmwareValidation();
   updateAudio();
   updateAudioBeacon();
+  showRuntime.tick(nullptr);
   updateBeacon();
   updateFirmwareFlash();
 #if NIGHTKITE_TAB5_UI_PERF

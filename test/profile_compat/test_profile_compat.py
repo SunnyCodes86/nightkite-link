@@ -5,7 +5,7 @@ from pathlib import Path
 
 root = Path(__file__).resolve().parents[2]
 arduino_json = root / ".pio/libdeps/cardputer/ArduinoJson/src"
-assert arduino_json.is_dir(), "run `platformio run -e cardputer` first"
+assert arduino_json.is_dir(), "run `python3 scripts/pio_target.py cardputer` first"
 
 with tempfile.TemporaryDirectory() as directory:
     executable = Path(directory) / "profile_codec_test"

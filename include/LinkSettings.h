@@ -10,11 +10,13 @@
 namespace NightKiteLinkSettings {
 
 constexpr uint32_t MAGIC = 0x4E4B4C53UL;
-constexpr uint8_t VERSION = 1;
+constexpr uint8_t VERSION = 2;
 constexpr uint8_t FLAG_SOUND = 1 << 0;
 constexpr uint8_t FLAG_KEY_SOUNDS = 1 << 1;
 constexpr uint8_t FLAG_STARTUP_SOUND = 1 << 2;
-constexpr uint8_t VALID_FLAGS = FLAG_SOUND | FLAG_KEY_SOUNDS | FLAG_STARTUP_SOUND;
+constexpr uint8_t FLAG_USB_BRIDGE = 1 << 3;
+constexpr uint8_t V1_FLAGS = FLAG_SOUND | FLAG_KEY_SOUNDS | FLAG_STARTUP_SOUND;
+constexpr uint8_t VALID_FLAGS = V1_FLAGS | FLAG_USB_BRIDGE;
 
 constexpr uint8_t VOLUME_LEVELS[] = {60, 90, 120, 150, 180, 210, 240, 255};
 constexpr uint8_t DISPLAY_BRIGHTNESS_LEVELS[] = {32, 64, 96, 128, 160, 192, 224, 255};
@@ -25,6 +27,7 @@ struct Settings {
   bool keySoundsEnabled = true;
   bool startupSoundEnabled = true;
   uint8_t displayBrightness = 96;
+  bool usbBridge = false; // Cardputer only; old records keep Controller Host.
 };
 
 struct __attribute__((packed)) Record {
@@ -59,13 +62,15 @@ inline Record encode(const Settings& settings)
   if (settings.soundEnabled) record.flags |= FLAG_SOUND;
   if (settings.keySoundsEnabled) record.flags |= FLAG_KEY_SOUNDS;
   if (settings.startupSoundEnabled) record.flags |= FLAG_STARTUP_SOUND;
+  if (settings.usbBridge) record.flags |= FLAG_USB_BRIDGE;
   record.checksum = checksum(record);
   return record;
 }
 
 inline bool decode(const Record& record, Settings& settings)
 {
-  if (record.magic != MAGIC || record.version != VERSION || (record.flags & ~VALID_FLAGS) != 0 ||
+  if (record.magic != MAGIC || (record.version != 1 && record.version != VERSION) ||
+      (record.flags & ~(record.version == 1 ? V1_FLAGS : VALID_FLAGS)) != 0 ||
       record.checksum != checksum(record) ||
       !contains(VOLUME_LEVELS, sizeof(VOLUME_LEVELS), record.volume) ||
       !contains(DISPLAY_BRIGHTNESS_LEVELS, sizeof(DISPLAY_BRIGHTNESS_LEVELS), record.displayBrightness)) {
@@ -76,6 +81,7 @@ inline bool decode(const Record& record, Settings& settings)
   settings.keySoundsEnabled = (record.flags & FLAG_KEY_SOUNDS) != 0;
   settings.startupSoundEnabled = (record.flags & FLAG_STARTUP_SOUND) != 0;
   settings.displayBrightness = record.displayBrightness;
+  settings.usbBridge = record.version >= 2 && (record.flags & FLAG_USB_BRIDGE) != 0;
   return true;
 }
 
@@ -84,7 +90,7 @@ inline bool equal(const Settings& left, const Settings& right)
   return left.soundEnabled == right.soundEnabled && left.volume == right.volume &&
          left.keySoundsEnabled == right.keySoundsEnabled &&
          left.startupSoundEnabled == right.startupSoundEnabled &&
-         left.displayBrightness == right.displayBrightness;
+         left.displayBrightness == right.displayBrightness && left.usbBridge == right.usbBridge;
 }
 
 }  // namespace NightKiteLinkSettings
