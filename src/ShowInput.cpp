@@ -85,9 +85,6 @@ const char* FileParser::line(char* text, FileLine& result) {
   if (!number(first, MAX_TIMELINE_MS, e.executeAt)) return "time";
   if (events && e.executeAt < duration) return "time_order";
   const char* error = parseEvent(text, e); if (error) return error;
-  if (recentCount == 3 && e.executeAt - recent[0] < LOOKAHEAD_MS) return "density";
-  if (recentCount == 3) { recent[0] = recent[1]; recent[1] = recent[2]; --recentCount; }
-  recent[recentCount++] = e.executeAt;
   if (e.command == Command::Clear) {
     if (imageActive) return "incomplete_image";
     imageActive = true; imageTarget = e.target; imageId = e.params[0]; imageCount = e.params[1]; imageMask = 0;
@@ -102,24 +99,28 @@ const char* FileParser::line(char* text, FileLine& result) {
       imageActive = false;
     }
   } else if (imageActive && e.command == Command::Release) return "incomplete_image";
+  if ((error = capacity.admit(e.executeAt))) return error;
   duration = e.executeAt; ++events; result.event = true; result.value = e; return nullptr;
 }
 const char* FileParser::finish() const { return !header ? "header" : !events ? "empty" : imageActive ? "incomplete_image" : nullptr; }
-void Player::load(Reader source) {
+void Player::load(Reader source, bool audio) {
   reader = source; parser = FileParser{}; length = 0; pending = eof = false;
+  parser.setCapacity(audio); capacityAudio = audio; playAfterValidation = false;
   totalEvents = duration = 0; showName[0] = 0; failure = "none";
   mode = reader.read && reader.rewind ? PlayerState::Validating : PlayerState::Error;
 }
-const char* Player::play(Engine& engine, uint32_t now) {
+const char* Player::play(Engine& engine, uint32_t) {
   if (mode != PlayerState::Loaded && mode != PlayerState::End) return "not_loaded";
   if (!engine.ready()) return "not_ready";
   if (engine.depth()) return "queue_busy";
   if (!reader.rewind(reader.context)) return "io";
-  parser = FileParser{}; length = 0; pending = eof = false; start = now + LIVE_LEAD_MS;
-  mode = PlayerState::Playing; engine.setPlaying(true); return nullptr;
+  parser = FileParser{}; capacityAudio = engine.audioActive(); parser.setCapacity(capacityAudio);
+  length = 0; pending = eof = false; playAfterValidation = true; failure = "none";
+  mode = PlayerState::Validating; return nullptr;
 }
 void Player::stop(Engine& engine, uint32_t now) {
-  if (mode == PlayerState::Playing) mode = PlayerState::Loaded;
+  if (mode == PlayerState::Playing || (mode == PlayerState::Validating && playAfterValidation)) mode = PlayerState::Loaded;
+  playAfterValidation = false;
   pending = false; engine.stop(now, false);
 }
 void Player::fail(const char* error, Engine& engine, uint32_t now) {
@@ -128,6 +129,7 @@ void Player::fail(const char* error, Engine& engine, uint32_t now) {
 }
 void Player::tick(Engine& engine, uint32_t now) {
   if (mode != PlayerState::Validating && mode != PlayerState::Playing) return;
+  if (mode == PlayerState::Validating && playAfterValidation && !engine.ready()) { fail("sender_stopped", engine, now); return; }
   if (mode == PlayerState::Playing && !engine.ready()) { fail("sender_stopped", engine, now); return; }
   if (pending) {
     Event event = nextEvent; event.executeAt += start;
@@ -153,7 +155,12 @@ void Player::tick(Engine& engine, uint32_t now) {
         eof = true;
         if (mode == PlayerState::Validating) {
           totalEvents = parser.events; duration = parser.duration;
-          memcpy(showName, parser.name, sizeof(showName)); mode = PlayerState::Loaded; return;
+          memcpy(showName, parser.name, sizeof(showName));
+          if (!playAfterValidation) { mode = PlayerState::Loaded; return; }
+          if (!reader.rewind(reader.context)) { fail("io", engine, now); return; }
+          parser = FileParser{}; parser.setCapacity(capacityAudio); length = 0; pending = eof = false;
+          playAfterValidation = false; start = now + SHOW_START_LEAD_MS;
+          mode = PlayerState::Playing; engine.setPlaying(true); return;
         }
       }
       if (line.event && mode == PlayerState::Playing) { nextEvent = line.value; pending = true; return; }

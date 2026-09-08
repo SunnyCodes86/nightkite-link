@@ -39,6 +39,7 @@ private:
   size_t length = 0, replyLength = 0, replyOffset = 0;
   bool overflow = false, radioOwned = false;
   uint16_t audioSeq = 0;
+  bool audioActive(NightKiteSync::BeaconInput* input = nullptr) const;
   static bool validFilename(const char* name);
   static int readFile(void* context);
   static bool rewindFile(void* context);

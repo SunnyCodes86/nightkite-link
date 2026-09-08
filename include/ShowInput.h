@@ -9,6 +9,7 @@ const char* parseEvent(char* text, Event& event);
 struct FileLine { bool event = false; Event value; };
 class FileParser {
 public:
+  void setCapacity(bool audio) { capacity.reset(audio, SHOW_START_LEAD_MS); }
   const char* line(char* text, FileLine& result);
   const char* finish() const;
   uint32_t events = 0, duration = 0, lines = 0;
@@ -17,8 +18,8 @@ private:
   bool header = false, imageActive = false;
   Target imageTarget;
   uint8_t imageId = 0, imageCount = 0;
-  uint32_t imageMask = 0, recent[3] = {};
-  uint8_t recentCount = 0;
+  uint32_t imageMask = 0;
+  TimelineCapacity capacity;
 };
 struct Reader {
   void* context = nullptr;
@@ -28,7 +29,7 @@ struct Reader {
 enum class PlayerState : uint8_t { Empty, Validating, Loaded, Playing, End, Error };
 class Player {
 public:
-  void load(Reader source);
+  void load(Reader source, bool audio = false);
   const char* play(Engine& engine, uint32_t now);
   void stop(Engine& engine, uint32_t now);
   void tick(Engine& engine, uint32_t now);
@@ -45,7 +46,7 @@ private:
   PlayerState mode = PlayerState::Empty;
   char buffer[LINE_SIZE] = {}, showName[41] = {};
   size_t length = 0;
-  bool pending = false, eof = false;
+  bool pending = false, eof = false, playAfterValidation = false, capacityAudio = false;
   Event nextEvent;
   uint32_t start = 0, totalEvents = 0, duration = 0;
   const char* failure = "none";

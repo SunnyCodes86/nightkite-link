@@ -5,9 +5,15 @@
 namespace NightKiteShow {
 constexpr size_t PACKET_SIZE = 24, ADV_SIZE = 31;
 constexpr uint32_t ARM_MS = 3000, SLOT_MS = 40, AUDIO_MS = 120, CLOCK_MS = 200;
-constexpr uint32_t LOOKAHEAD_MS = 1200, LIVE_LEAD_MS = 1000, MIN_LEAD_MS = 800;
+constexpr uint32_t LOOKAHEAD_MS = 5000, LIVE_LEAD_MS = 1000, MIN_LEAD_MS = 800;
+constexpr uint32_t SHOW_START_LEAD_MS = 5000;
 constexpr uint32_t RETRY_MS = 80, LAST_SEND_LEAD_MS = 40;
-constexpr uint8_t REPEATS = 3, QUEUE_SIZE = 32, RECEIVER_BUDGET = 6;
+constexpr uint8_t REPEATS = 3, QUEUE_SIZE = 32, RECEIVER_BUDGET = 8;
+constexpr uint8_t SHOW_TX_COST = REPEATS;
+constexpr uint32_t CAPACITY_WINDOW_MS = 5000;
+constexpr uint16_t CAPACITY_TX_AUDIO = 51, CAPACITY_TX_NO_AUDIO = 69;
+constexpr uint32_t RECEIVER_LATE_MS = 250;
+constexpr uint8_t CAPACITY_RECENT_SIZE = CAPACITY_TX_NO_AUDIO / SHOW_TX_COST;
 constexpr uint32_t MAX_TIMELINE_MS = 24UL * 60 * 60 * 1000;
 constexpr size_t LINE_SIZE = 224;
 
@@ -23,7 +29,26 @@ struct Event {
   uint32_t executeAt = 0;
 };
 struct Packet { Event event; uint16_t id = 0; uint32_t senderMs = 0; };
+struct CapacityEvent {
+  uint32_t executeAt = 0;
+  uint8_t remainingTx = SHOW_TX_COST;
+  bool receiver = true;
+  bool started = false;
+  uint32_t lastTx = 0;
+};
 int32_t delta(uint32_t a, uint32_t b);
+uint16_t capacityTx(bool audio);
+const char* capacityFeasible(const CapacityEvent* events, size_t count, uint32_t now, bool audio);
+class TimelineCapacity {
+public:
+  void reset(bool audio, uint32_t startLeadMs);
+  const char* admit(uint32_t executeAt);
+private:
+  uint32_t recent[CAPACITY_RECENT_SIZE] = {};
+  uint32_t totalTx = 0, startLead = SHOW_START_LEAD_MS;
+  uint8_t count = 0;
+  bool audioActive = false;
+};
 const char* validate(const Event& event);
 bool encode(const Packet& packet, uint8_t* bytes, size_t capacity);
 bool decode(const uint8_t* bytes, size_t size, Packet& packet);
@@ -36,7 +61,7 @@ struct Transmission {
   Packet packet;
 };
 struct Counters {
-  uint32_t audio = 0, clock = 0, events = 0, rejected = 0, missed = 0, radioErrors = 0;
+  uint32_t audio = 0, clock = 0, events = 0, rejected = 0, capacityRejects = 0, missed = 0, radioErrors = 0;
   uint32_t maxAudioGap = 0, maxClockGap = 0, lastSentMs = 0, lastExecuteAt = 0;
   uint16_t lastId = 0;
 };
@@ -47,6 +72,9 @@ public:
   const char* enqueue(const Event& event, uint32_t now, uint16_t& id);
   Transmission next(uint32_t now, bool audio);
   void sent(const Transmission& tx, uint32_t now, bool ok);
+  void setAudioActive(bool value) { capacityAudio = value; }
+  bool audioActive() const { return capacityAudio; }
+  uint16_t capacityBudget() const { return capacityTx(capacityAudio); }
   void setPlaying(bool value) { if (ready()) mode = value ? State::Playing : State::Ready; }
   State state() const { return mode; }
   bool active() const { return mode != State::Off && mode != State::Error; }
@@ -58,12 +86,17 @@ public:
 private:
   struct Entry { Packet packet; uint8_t repeats = 0; uint32_t lastTx = 0; };
   Entry queue[QUEUE_SIZE];
+  uint32_t recent[CAPACITY_RECENT_SIZE] = {};
   uint8_t count = 0;
+  uint8_t recentCount = 0;
   uint16_t nextId = 0;
   State mode = State::Off;
   uint32_t armAt = 0, lastSlot = 0, lastAudio = 0, lastClock = 0, lastRemoteDue = 0, stopAt = 0;
   uint16_t warmupClocks = 0;
   bool haveSlot = false, haveAudio = false, haveClock = false, haveRemote = false, disarmAfterStop = false;
+  bool capacityAudio = false;
+  void remember(uint32_t executeAt);
+  void pruneRecent(uint32_t now);
   void retire(uint32_t now);
 };
 } // namespace NightKiteShow

@@ -67,6 +67,11 @@ Controller Host remains the default; unplug the PC before rebooting into Host.
 See the [sender/file/API reference](docs/SHOW_CONTROL.md),
 [example show](examples/demo.nks) and [Python bridge demo](tools/show_bridge_example.py).
 Tab5 uses the same engine/API via USB-C, without a new touch show editor.
+Admission uses a 5-second Show-TX budget: 51 transmissions with Audio V2 active
+(17 events), or 69 with audio off (23 events). Each event costs three
+transmissions. Link prefetches up to 5 seconds and may fill all eight receiver
+slots, so short preloaded bursts are supported without claiming that their
+instantaneous rate is sustainable.
 
 Show Control V1 ergänzt eine **Show**-Karte, SD-Wiedergabe (`/shows/*.nks`) und
 eine USB-Gateway-API. Empfangsfreigaben am Controller vorher speichern; PC Bridge
@@ -74,6 +79,10 @@ in der Show-Karte nach Disarm wählen und speichern. USB vor dem Cardputer-Start
 mit dem PC verbinden; späteres Anstecken wird derzeit nicht zuverlässig erkannt. Controller Host
 bleibt Standard; vor dem Neustart in Host den PC abziehen. STOP lässt bereits gesendete
 Termine auslaufen und sendet anschließend RELEASE; es gibt kein Pause/Resume.
+Die Admission nutzt ein 5-s-Funkbudget: 51 Show-TX mit Audio V2 (17 Events),
+69 ohne Audio (23 Events), bei drei Sendungen pro Event. Link puffert bis zu 5 s
+vor und darf alle acht Empfängerplätze nutzen; kurze vorgeladene Bursts sind
+damit möglich, ohne diese Momentanrate als dauerhaften Durchsatz auszugeben.
 
 ## Build
 

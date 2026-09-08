@@ -3,6 +3,10 @@
 #include <string.h>
 using namespace NightKiteShow;
 void ShowRuntime::begin(fs::FS& storage, Hardware hardware) { sd = &storage; hw = hardware; }
+bool ShowRuntime::audioActive(NightKiteSync::BeaconInput* input) const {
+  NightKiteSync::BeaconInput ignored;
+  return hw.audio && hw.audio(input ? *input : ignored);
+}
 bool ShowRuntime::validFilename(const char* name) {
   const size_t n = strlen(name);
   if (n < 5 || n > 40 || strcmp(name + n - 4, ".nks")) return false;
@@ -27,8 +31,9 @@ const char* ShowRuntime::arm() {
 }
 void ShowRuntime::stop(bool disarm) { player.stop(engine, millis()); if (disarm) engine.stop(millis(), true); }
 const char* ShowRuntime::live(Event event, uint16_t& id) {
-  if (player.state() == PlayerState::Playing) return "player_busy";
+  if (player.state() == PlayerState::Playing || (player.state() == PlayerState::Validating && engine.active())) return "player_busy";
   if (!event.executeAt) event.executeAt = millis() + LIVE_LEAD_MS;
+  engine.setAudioActive(audioActive());
   return engine.enqueue(event, millis(), id);
 }
 const char* ShowRuntime::load(const char* name) {
@@ -40,9 +45,9 @@ const char* ShowRuntime::load(const char* name) {
   if (!candidate || candidate.isDirectory()) return "file";
   file.close(); file = candidate;
   Reader reader; reader.context = &file; reader.read = readFile; reader.rewind = rewindFile;
-  player.load(reader); return nullptr;
+  player.load(reader, audioActive()); return nullptr;
 }
-const char* ShowRuntime::play() { return player.play(engine, millis()); }
+const char* ShowRuntime::play() { engine.setAudioActive(audioActive()); return player.play(engine, millis()); }
 void ShowRuntime::list(char* result, size_t size) {
   result[0] = 0;
   if (engine.active()) { snprintf(result, size, "busy"); return; }
@@ -76,20 +81,25 @@ void ShowRuntime::request(const char* text) {
       case Operation::Disarm: stop(true); break;
       case Operation::Stop: stop(); break;
       case Operation::Status:
-        snprintf(fields, sizeof(fields), "queue=%u next=%lu player=%s show_ms=%lu file_events=%lu file_error=%s line=%lu audio_tx=%lu clock_tx=%lu event_tx=%lu audio_gap_ms=%lu clock_gap_ms=%lu rejected=%lu missed=%lu radio_errors=%lu last_id=%u last_sent=%lu last_due=%lu",
+        snprintf(fields, sizeof(fields), "queue=%u next=%lu player=%s show_ms=%lu file_events=%lu file_error=%s line=%lu audio_tx=%lu clock_tx=%lu event_tx=%lu audio_gap_ms=%lu clock_gap_ms=%lu rejected=%lu capacity_rejects=%lu capacity_profile=%s capacity_tx=%u capacity_window_ms=%lu missed=%lu radio_errors=%lu last_id=%u last_sent=%lu last_due=%lu",
           engine.depth(), (unsigned long)engine.nextTime(), player.stateName(), (unsigned long)player.time(now),
           (unsigned long)player.eventCount(), player.error(), (unsigned long)player.errorLine(),
           (unsigned long)engine.counters.audio, (unsigned long)engine.counters.clock, (unsigned long)engine.counters.events,
           (unsigned long)engine.counters.maxAudioGap, (unsigned long)engine.counters.maxClockGap,
-          (unsigned long)engine.counters.rejected, (unsigned long)engine.counters.missed, (unsigned long)engine.counters.radioErrors,
+          (unsigned long)engine.counters.rejected, (unsigned long)engine.counters.capacityRejects,
+          engine.audioActive() ? "audio" : "no_audio", engine.capacityBudget(), (unsigned long)CAPACITY_WINDOW_MS,
+          (unsigned long)engine.counters.missed, (unsigned long)engine.counters.radioErrors,
           engine.counters.lastId, (unsigned long)engine.counters.lastSentMs, (unsigned long)engine.counters.lastExecuteAt); break;
       case Operation::Time: break;
       case Operation::Event:
         if (player.state() == PlayerState::Playing) error = "player_busy";
-        else error = engine.enqueue(r.event, now, id);
+        else error = live(r.event, id);
         if (!error) snprintf(fields, sizeof(fields), "accepted=1 event_id=%u execute_at=%lu", id, (unsigned long)r.event.executeAt);
         break;
-      case Operation::Audio: error = hw.audioMode ? hw.audioMode(r.argument) : "unsupported"; break;
+      case Operation::Audio:
+        error = hw.audioMode ? hw.audioMode(r.argument) : "unsupported";
+        if (!error) engine.setAudioActive(audioActive());
+        break;
       case Operation::Load: error = load(r.argument); break;
       case Operation::Play: error = play(); break;
       case Operation::List:
@@ -105,6 +115,7 @@ void ShowRuntime::request(const char* text) {
         sd->mkdir("/shows");
         if (sd->exists(finalPath)) { error = "exists"; break; }
         sd->remove(uploadPath); upload = sd->open(uploadPath, FILE_WRITE); uploadParser = FileParser{};
+        uploadParser.setCapacity(audioActive());
         if (!upload) error = "io";
         break;
       case Operation::PutLine: {
@@ -133,9 +144,11 @@ void ShowRuntime::request(const char* text) {
 }
 void ShowRuntime::tick(Stream* bridge) {
   const uint32_t now = millis();
-  player.tick(engine, now);
   NightKiteSync::BeaconInput audio;
-  const bool useAudio = engine.active() && hw.audio && hw.audio(audio);
+  const bool audioEnabled = audioActive(&audio);
+  const bool useAudio = engine.active() && audioEnabled;
+  engine.setAudioActive(audioEnabled);
+  player.tick(engine, now);
   const Transmission tx = engine.next(now, useAudio);
   if (tx.kind != TxKind::None) {
     uint8_t bytes[ADV_SIZE]; size_t n = 0;

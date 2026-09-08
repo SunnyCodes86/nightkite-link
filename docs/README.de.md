@@ -15,6 +15,10 @@ auslaufen und sendet ALL RELEASE; angeboten wird Stop/Restart ohne Pause/Resume.
 Patterns 23–27 benötigen frisches Audio V2. Controller brauchen die aktuelle
 Show-V1-Firmware sowie gespeichertes `wireless_enabled=1` und
 `show_control enabled=1`. Audiogruppen müssen passen; GATT-Verbindungen trennen.
+Link rechnet drei Sendungen je Event gegen ein 5-s-Budget: 51 Show-TX mit Audio
+V2, 69 ohne Audio. Der 5-s-Prefetch darf für kurze Bursts alle acht Empfängerplätze
+füllen; dauerhafte Timelines müssen im Budget bleiben. `.nks` PLAY validiert das
+aktuelle Audioprofil erneut, bevor der 5-s-Startvorlauf beginnt.
 
 PC-Software nutzt die `NKSHOW 1`-USB-API und muss kein BLE implementieren. Im USB-Rollenfeld der Show-Karte nach Disarm PC Bridge wählen. USB zuerst mit
 dem PC verbinden, dann den Cardputer starten; späteres Anstecken wird derzeit

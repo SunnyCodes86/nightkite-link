@@ -14,6 +14,10 @@ streamed playback. STOP drains already sent events before ALL RELEASE; use
 Stop/Restart, with no pause/resume. Patterns 23–27 require fresh Audio V2.
 Receivers need current Show V1 firmware and saved `wireless_enabled=1` plus
 `show_control enabled=1`. Keep matching audio groups and no GATT connection.
+Link admits three transmissions per event against a 5-second budget: 51 Show-TX
+with Audio V2 active, 69 with audio off. Five-second prefetch can fill the eight
+receiver slots for short bursts; sustained timelines must stay within the budget.
+`.nks` PLAY revalidates the selected audio profile before its 5-second start lead.
 
 PC software uses the `NKSHOW 1` USB API, not the BLE contract. Select PC Bridge in Show's USB role field while disarmed, then restart with USB
 already connected to the PC. Late USB attachment is currently unsupported. The mode

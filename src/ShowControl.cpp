@@ -7,6 +7,73 @@ int32_t delta(uint32_t a, uint32_t b) {
   const uint32_t d = a - b;
   return d <= INT32_MAX ? int32_t(d) : -1 - int32_t(UINT32_MAX - d);
 }
+uint16_t capacityTx(bool audio) { return audio ? CAPACITY_TX_AUDIO : CAPACITY_TX_NO_AUDIO; }
+const char* capacityFeasible(const CapacityEvent* events, size_t count, uint32_t now, bool audio) {
+  if (!events && count) return "capacity";
+  struct Ordered { int32_t at, lastTx; uint8_t remaining; bool receiver, started; };
+  Ordered ordered[QUEUE_SIZE + CAPACITY_RECENT_SIZE + 1];
+  if (count > sizeof(ordered) / sizeof(ordered[0])) return "capacity";
+  for (size_t i = 0; i < count; ++i) {
+    Ordered value = {delta(events[i].executeAt, now), delta(events[i].lastTx, now),
+                     events[i].remainingTx, events[i].receiver, events[i].started};
+    size_t j = i;
+    while (j && value.at < ordered[j - 1].at) { ordered[j] = ordered[j - 1]; --j; }
+    ordered[j] = value;
+  }
+  const uint16_t budget = capacityTx(audio);
+  size_t first = 0;
+  for (size_t i = 0; i < count; ++i) {
+    while (first < i && int64_t(ordered[i].at) - ordered[first].at >= CAPACITY_WINDOW_MS) ++first;
+    if ((i - first + 1) * SHOW_TX_COST > budget) return "capacity";
+  }
+  const int32_t spacing = (CAPACITY_WINDOW_MS + budget - 1) / budget;
+  unsigned pending = 0;
+  for (size_t i = 0; i < count; ++i) pending += ordered[i].remaining;
+  int64_t nextTx = spacing;
+  while (pending) {
+    size_t chosen = count;
+    int64_t nextReady = INT64_MAX;
+    for (size_t i = 0; i < count; ++i) {
+      Ordered& e = ordered[i]; if (!e.remaining) continue;
+      int64_t ready = int64_t(e.at) - LOOKAHEAD_MS;
+      if (e.started && ready < int64_t(e.lastTx) + RETRY_MS) ready = int64_t(e.lastTx) + RETRY_MS;
+      if (ready < nextTx) ready = nextTx;
+      if (!e.started && e.receiver) {
+        unsigned resident = 0; int64_t release = INT64_MAX;
+        for (size_t j = 0; j < count; ++j) if (ordered[j].receiver && ordered[j].started &&
+            int64_t(ordered[j].at) + RECEIVER_LATE_MS >= ready) {
+          ++resident;
+          const int64_t at = int64_t(ordered[j].at) + RECEIVER_LATE_MS + 1;
+          if (at < release) release = at;
+        }
+        if (resident >= RECEIVER_BUDGET) ready = release;
+      }
+      if (ready <= int64_t(e.at) - LAST_SEND_LEAD_MS && ready < nextReady) {
+        nextReady = ready; chosen = i;
+      }
+    }
+    if (chosen == count) return "capacity";
+    Ordered& e = ordered[chosen]; e.started = true; e.lastTx = int32_t(nextReady);
+    --e.remaining; --pending; nextTx = nextReady + spacing;
+  }
+  return nullptr;
+}
+void TimelineCapacity::reset(bool audio, uint32_t startLeadMs) {
+  count = 0; totalTx = 0; startLead = startLeadMs; audioActive = audio;
+}
+const char* TimelineCapacity::admit(uint32_t executeAt) {
+  uint8_t first = 0;
+  while (first < count && executeAt - recent[first] >= CAPACITY_WINDOW_MS) ++first;
+  if (first) { memmove(recent, recent + first, (count - first) * sizeof(recent[0])); count -= first; }
+  CapacityEvent events[CAPACITY_RECENT_SIZE + 1];
+  for (uint8_t i = 0; i < count; ++i) events[i].executeAt = recent[i];
+  events[count].executeAt = executeAt;
+  if (const char* error = capacityFeasible(events, count + 1, uint32_t(0 - startLead), audioActive)) return error;
+  const uint32_t nextTotal = totalTx + SHOW_TX_COST;
+  const uint64_t deadline = uint64_t(startLead) + executeAt - LAST_SEND_LEAD_MS;
+  if (nextTotal > deadline * capacityTx(audioActive) / CAPACITY_WINDOW_MS) return "capacity";
+  recent[count++] = executeAt; totalTx = nextTotal; return nullptr;
+}
 const char* validate(const Event& e) {
   if ((e.target.kind == TargetKind::All && e.target.value) ||
       (e.target.kind == TargetKind::Group && (!e.target.value || e.target.value > 255)) ||
@@ -69,12 +136,13 @@ const char* commandName(Command c) {
 }
 void Engine::arm(uint32_t now, uint16_t randomId) {
   if (active()) return;
-  count = 0; nextId = randomId; armAt = now; warmupClocks = 0;
+  count = recentCount = 0; nextId = randomId; armAt = now; warmupClocks = 0;
   haveSlot = haveAudio = haveClock = haveRemote = false; mode = State::Arming;
 }
 void Engine::stop(uint32_t now, bool disarm) {
   if (mode == State::Stopping) { disarmAfterStop = disarmAfterStop || disarm; return; }
   if (!active()) return;
+  for (uint8_t i = 0; i < count; ++i) if (queue[i].repeats) remember(queue[i].packet.event.executeAt);
   count = 1; queue[0] = Entry{}; queue[0].packet.id = nextId++;
   queue[0].packet.event.command = Command::Release;
   stopAt = now + LIVE_LEAD_MS;
@@ -88,24 +156,43 @@ const char* Engine::enqueue(const Event& e, uint32_t now, uint16_t& id) {
   if (!error && !ready()) error = "not_ready";
   if (!error && (delta(e.executeAt, now) < int32_t(MIN_LEAD_MS) || delta(e.executeAt, now) > int32_t(MAX_TIMELINE_MS))) error = "lead";
   if (!error && count == QUEUE_SIZE) error = "queue_full";
-  // Conservative shared-radio budget, regardless of target. Three events in any
-  // 1200 ms window leave airtime for three copies, audio and CLOCK. No eviction.
-  unsigned nearby = 0;
-  for (uint8_t i = 0; i < count; ++i) {
-    const int32_t d = delta(e.executeAt, queue[i].packet.event.executeAt);
-    if (d > -int32_t(LOOKAHEAD_MS) && d < int32_t(LOOKAHEAD_MS)) ++nearby;
+  pruneRecent(now);
+  if (!error) {
+    CapacityEvent events[QUEUE_SIZE + CAPACITY_RECENT_SIZE + 1]; size_t n = 0;
+    for (uint8_t i = 0; i < recentCount; ++i) {
+      events[n].executeAt = recent[i]; events[n].remainingTx = 0; events[n].receiver = false; ++n;
+    }
+    for (uint8_t i = 0; i < count; ++i) {
+      events[n].executeAt = queue[i].packet.event.executeAt;
+      events[n].remainingTx = REPEATS - queue[i].repeats;
+      events[n].started = queue[i].repeats != 0; events[n].lastTx = queue[i].lastTx; ++n;
+    }
+    events[n].executeAt = e.executeAt; ++n;
+    error = capacityFeasible(events, n, now, capacityAudio);
   }
-  if (!error && nearby >= 3) error = "density";
-  if (error) { ++counters.rejected; return error; }
+  if (error) { ++counters.rejected; if (!strcmp(error, "capacity")) ++counters.capacityRejects; return error; }
   Entry entry; entry.packet.event = e; entry.packet.id = nextId++;
   uint8_t i = count;
   while (i && delta(e.executeAt, queue[i - 1].packet.event.executeAt) < 0) { queue[i] = queue[i - 1]; --i; }
   queue[i] = entry; ++count; id = entry.packet.id; return nullptr;
 }
+void Engine::remember(uint32_t executeAt) {
+  if (recentCount == CAPACITY_RECENT_SIZE) {
+    memmove(recent, recent + 1, (CAPACITY_RECENT_SIZE - 1) * sizeof(recent[0])); --recentCount;
+  }
+  recent[recentCount++] = executeAt;
+}
+void Engine::pruneRecent(uint32_t now) {
+  uint8_t write = 0;
+  for (uint8_t i = 0; i < recentCount; ++i)
+    if (delta(now, recent[i]) < int32_t(CAPACITY_WINDOW_MS)) recent[write++] = recent[i];
+  recentCount = write;
+}
 void Engine::retire(uint32_t now) {
   while (count && delta(now, queue[0].packet.event.executeAt) > 250) {
     if (queue[0].repeats < REPEATS) ++counters.missed;
     if (mode == State::Stopping && !queue[0].repeats) mode = State::Error;
+    remember(queue[0].packet.event.executeAt);
     for (uint8_t i = 1; i < count; ++i) queue[i - 1] = queue[i];
     --count;
   }

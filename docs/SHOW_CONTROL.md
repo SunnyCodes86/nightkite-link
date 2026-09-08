@@ -91,7 +91,7 @@ prove reception. Re-ARM while active is idempotent. CLOCK continues throughout
 READY/PLAYING/STOPPING; receiver clock adjustment does not move frozen events.
 
 The receiver reconstructs `sender + signed16(executeLow16 - low16(sender))`.
-Wire range is -250…30000 ms. Link publishes only inside **1200 ms lookahead**,
+Wire range is -250…30000 ms. Link publishes only inside **5000 ms lookahead**,
 well below the ambiguous half-range. All internal comparisons are wrap-safe.
 Local accepted deadlines are 800 ms…24 hours ahead. Live/NOW defaults to **1000 ms**
 lead; IN explicitly selects a lead within those bounds. AT accepts the absolute
@@ -99,13 +99,23 @@ lead; IN explicitly selects a lead within those bounds. AT accepts the absolute
 one AT value and different colors. Use ALL/GROUP where possible.
 
 The local queue has 32 entries, never evicts, and holds a host's short timeline.
-SD retains one pending event while streaming. A conservative admission limit
-allows at most three nearby events within 1200 ms, regardless of target; dense
-or out-of-order host bursts may be rejected conservatively. Files require at
-most three events in each half-open 1200-ms interval. At most six transmitted
-unexpired events are counted against the receiver's eight slots (two reserved
-for drain/release margin). Large fleet fan-outs need groups or more time; this
-version deliberately rejects excessive density rather than silently losing events.
+SD retains one pending event while streaming. Admission uses Show-TX cost rather
+than visible event density: every event currently costs three identical radio
+publications. Each half-open 5000-ms timeline window permits 51 Show-TX with
+Audio V2 active (17 events) or 69 with Audio OFF (23 events). MANUAL,
+MIC_ENERGY and MIC_FULL all use the audio profile. A bounded recent-admission
+history prevents a live stream from bypassing the window as old queue entries
+retire. Capacity is global and target-independent: ALL and GROUP each cost one
+event, while each separate SINGLE command costs another event.
+
+Deadline feasibility is checked against the same integer TX budget before an
+event is accepted. The receiver occupancy check permits eight resident events,
+matching its eight-slot queue, and rejects a ninth overlapping event. Thus a
+fully prefetched burst of eight events at 20–50-ms cue spacing is valid when the
+surrounding five seconds have enough budget; the same burst submitted only about
+one second before its deadlines is rejected with `capacity`. The measured
+50-events/s result applies only to one fully preloaded eight-event receiver burst,
+not to sustained BLE throughput. Long timelines remain on Link or the host.
 
 The central arbiter chooses one fresh payload every ≥40 ms. Audio V2 has first
 priority when ≥120 ms old; CLOCK follows at ≥200 ms; remaining slots carry events.
@@ -123,7 +133,8 @@ IDs, not a global numeric high-water mark. Link never restarts retries of retire
 events. Random start minimizes, but cannot eliminate, a replacement sender's ID
 collision with that cache. Counters measure successful payload installation,
 **not acknowledged packets on air**. STATUS exposes counts, max gaps, last ID,
-last publication time, last deadline, queue depth, rejected/missed/radio errors.
+last publication time, last deadline, queue depth, rejected/missed/radio errors
+and the active capacity profile, window, TX budget and capacity-reject count.
 
 ### STOP, DISARM and EOF
 
@@ -167,11 +178,12 @@ NAME Demo Show
 First non-comment line must be `NKSHOW 1`. Optional `NAME` appears once before
 events, 1–40 printable characters. Each event line is `milliseconds TARGET COMMAND
 parameters`, using the table above. Time must not decrease (equal times allowed)
-and the radio density limit applies. At least one event is required. LOAD opens
-only while OFF and validates the entire file incrementally (≤512 input bytes per
-loop) before LOADED. PLAY requires READY and an empty local queue, rewinds, starts
-at current clock + 1000 ms, and streams only the next lookahead events. PLAY after
-END or STOP restarts from the beginning. Unexpected I/O/parser errors during play
+and the active radio-capacity profile applies. At least one event is required.
+LOAD opens only while OFF and validates the entire file incrementally (≤512 input
+bytes per loop) before LOADED. PLAY requires READY and an empty local queue, then
+incrementally revalidates the complete file with the current audio profile before
+starting at current clock + 5000 ms. It streams only the next lookahead events.
+PLAY after END or STOP restarts from the beginning. Unexpected I/O/parser errors during play
 stop admission and initiate the same controlled RELEASE drain; error/line remain
 visible. Do not edit/remove a file during playback; no immutable file snapshot is
 held in RAM. SD scanning/upload/loading is done before ARM.
@@ -185,7 +197,9 @@ count. All expected indices must arrive for APPLY to switch atomically. Zero
 expected segments is a valid all-black image. Missing segments leave visible
 output unchanged. RGB overlaps between different indices are allowed: later
 scheduled segment wins. Use distinct increasing preparation times for dependent
-CLEAR/SEGMENT/APPLY operations. Example:
+CLEAR/SEGMENT/APPLY operations. CLEAR, every SEGMENT and APPLY each consume one
+event (three Show-TX), so prepare complex images early and place APPLY at the
+intended visible cue. Example:
 
 ```text
 NKSHOW 1
@@ -241,7 +255,7 @@ large libraries should use an already known basename with LOAD.
 
 ```text
 NKSHOW 1 100 HELLO
-NKSHOW 1 100 OK state=OFF time=5040 api=1 wire=1 lead_ms=1000 lookahead_ms=1200
+NKSHOW 1 100 OK state=OFF time=5040 api=1 wire=1 lead_ms=1000 lookahead_ms=5000
 NKSHOW 1 101 ARM
 NKSHOW 1 101 OK state=ARMING time=5100
 # Poll with NEW request IDs, until state=READY (at least 3 s).
@@ -257,7 +271,7 @@ NKSHOW 1 107 STOP
 Example error: `NKSHOW 1 108 ERROR code=not_ready state=ARMING time=5500`.
 Errors: `version`, `request_id`, `command`, `target`, `parameters`, `pattern`,
 `brightness`, `segments`, `segment`, `time`, `line_length`, `request_conflict`,
-`reserved`, `not_ready`, `lead`, `queue_full`, `density`, `player_busy`, `busy`,
+`reserved`, `not_ready`, `lead`, `queue_full`, `capacity`, `player_busy`, `busy`,
 `radio_busy`, `audio_mode`, `audio_busy`, `mic`, `unsupported`, `filename`, `sd`,
 `file`, `io`, `exists`, `no_upload`, `not_loaded`, `queue_busy`. File errors also
 include `header`, `empty`, `name`, `time_order`, `image`, `segment_index`,
