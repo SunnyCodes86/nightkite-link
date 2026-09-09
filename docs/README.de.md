@@ -152,19 +152,20 @@ V2-Audio-Testmodus benötigt NightKite-Multi-Firmware mit V2-Empfang
 NightKite Multi ab `0f03e9e`. Dieser Modus ist von der BLE-GATT-Konfiguration getrennt
 und hält während des Broadcasts keine dauerhafte GATT-Verbindung offen. Verfügbar
 sind `V1 Manual`, `V2 Manual`, `V2 Mic Energy` und `V2 Mic Full`. Mic Energy
-steuert Energy und Confidence per Mikrofon und behält die manuellen Bandwerte.
+steuert Energy und Confidence per Mikrofon und sendet neutrale Bandwerte.
 Mic Full steuert zusätzlich Bass, Mid und Treble und aktiviert eine einfache
 Beat-/BPM-/Phasenerkennung.
 
 Zum Testen werden NightKite-Multi-Controller als Follower vorbereitet:
 `play_mode=sync`, `sync_enabled=1`, `sync_role=follower`, passende
 `sync_group` 1-4 und `wireless_enabled=1`. Danach auf der Audio-Beacon-Card
-dieselbe Gruppe sowie Pattern, Helligkeit und BPM wählen und mit `Enter` den
+dieselbe Gruppe sowie Pattern und Helligkeit wählen und mit `Enter` den
 Broadcast starten oder stoppen. V1 wählt den etablierten Pfad, V2 Manual die
 manuellen Testwerte und die Mic-Modi die Live-Analyse. In Mic-Modi sind
 Sensitivity, Noise Gate, Smoothing, Beat Detect und Pause einstellbar.
-Tap-Tempo bleibt der Fallback, wenn die Beat-Erkennung deaktiviert oder unsicher
-ist.
+BPM und Tap-Tempo sind nur in den Manual-Modi verfügbar. Bei geschlossenem Gate
+senden Mic-Modi neutrale Audiodaten; BPM und Phase bleiben bis zu einem echten
+Beat-Lock null.
 
 Die Aufnahme läuft asynchron mit 8 kHz, mono und 256 Samples bzw. 32 ms pro
 Frame. Der DSP entfernt DC, verfolgt RMS, Peak und einen langsamen Noise Floor,
@@ -172,7 +173,9 @@ wendet Gate und Attack/Release-Glättung an und normalisiert Energy. Mic Full
 nutzt eine kleine Goertzel-Filterbank für ungefähr 60-250 Hz, 250-2000 Hz und
 2000-3400 Hz. Die obere Grenze folgt dem Nyquist-Limit von 4 kHz. UI-Sounds
 werden während aktiver Mikrofonaufnahme unterdrückt. V2 bleibt bei 22 Byte
-Payload und 29 Byte Legacy Advertising ohne Local Name oder Service Data.
+Payload und 29 Byte Legacy Advertising ohne Local Name oder Service Data. Die
+Flags-Bits 0, 1 und 2 bedeuten `BEAT`, `SIGNAL_VALID` und `BEAT_LOCKED`; das
+CRC-Layout bleibt unverändert.
 
 Der Cardputer-Katalog umfasst jetzt alle 27 Firmware-Patterns. Neu sind
 `audio_pulse_angle_color` (23), `audio_spectrum_ribbon` (24),
@@ -263,8 +266,9 @@ Initial-Refresh stehen diese Arbeitsabläufe bereit:
   getrennten Entwürfen und explizitem `Apply & Save`
 - Sync-Rolle, Gruppe, Master-UID, Verlustverhalten sowie Funkstatus und
   Funkprofil
-- Audio Beacon V1/V2 manuell oder mikrofongeführt mit Tap-Tempo, manuellen
-  V2-Werten für Energy/Bänder/Confidence, Beat-, BPM-, Sequenz- und Advertising-Status
+- Audio Beacon V1/V2 manuell oder mikrofongeführt; Tap-Tempo nur in Manual,
+  mit manuellen V2-Werten für Energy/Bänder/Confidence sowie Beat-, BPM-,
+  Sequenz- und Advertising-Status
 - Profile erstellen, überschreiben, laden, live anwenden, umbenennen und nach
   Bestätigung löschen; ein Profil-Apply speichert bewusst nicht automatisch
 - Controllername, Striplänge, Smoothing, Sensorbereiche, Boot-Kalibrierung,
@@ -467,7 +471,7 @@ Die aktuelle Tastaturbehandlung verarbeitet diese Eingaben:
 | `Backspace` / `DEL` | Zurück oder abbrechen, wo unterstützt |
 | `Tab` | Nächste Card |
 | `R` | Aktuelle Card bzw. Controllerdaten neu lesen, wo implementiert |
-| `T` | Tap-Tempo auf der Audio-Beacon-Card |
+| `T` | Tap-Tempo in den Manual-Audio-Beacon-Modi |
 | `C` | Editierbares Feld wählen, Firmware-Ziel umschalten oder Pattern-Cycle toggeln |
 | `I` | Pattern-Invert toggeln oder ausgewähltes Profil auf der Profiles-Card löschen |
 

@@ -2859,7 +2859,8 @@ void paintScene()
       drawValueTile(1035, 175, 185, "Brightness", String(audioBeaconSettings.brightness));
     }
     if (paintIntersects(275, 265, 955, 102)) {
-      drawValueTile(285, 275, 215, "BPM (tap)", String(audioBeaconSettings.bpm));
+      drawValueTile(285, 275, 215, micMode ? "Signal valid" : "BPM (tap)",
+                    micMode ? (audioBeaconOutput.valid ? "YES" : "NO") : String(audioBeaconSettings.bpm));
       drawValueTile(520, 275, 215, manualV2 ? "Energy (tap)" : micMode ? "Sensitivity" : "Beacon format",
                     manualV2 ? String(audioBeaconSettings.energy) : micMode ? String(audioBeaconSettings.sensitivity) : "NK v1");
       drawValueTile(755, 275, 215, manualV2 ? "Bass (tap)" : micMode ? "Noise gate" : "Beat interval",
@@ -2874,12 +2875,13 @@ void paintScene()
       drawValueTile(595, 385, 290, manualV2 ? "Confidence (tap)" : micMode ?
                     (audioBeaconSettings.beatDetect ? "Beat detect ON" : "Beat detect OFF") : "Compatibility",
                     manualV2 ? String(audioBeaconSettings.confidence) : micMode ?
-                    String(audioBeaconOutput.bpm) + " BPM  " + audioBeaconOutput.confidence : "V1 receivers", micMode && audioBeaconSettings.beatDetect);
+                    (audioBeaconOutput.beatLocked ? String(audioBeaconOutput.bpm) + " BPM locked" : "No beat lock") :
+                    "V1 receivers", micMode && audioBeaconSettings.beatDetect);
       drawValueTile(905, 385, 315, "Sequence / advertisements",
                     String(audioBeaconSequence) + " / " + audioBeaconSent);
     }
     if (paintIntersects(275, 475, 955, 166)) {
-      drawButton(285, 485, 250, 42, "Tap tempo", true);
+      drawButton(285, 485, 250, 42, micMode ? "Mic signal only" : "Tap tempo", !micMode);
       drawButton(420, 535, 670, 96, audioBeaconRunning ? "Stop Audio Beacon" : "Start Audio Beacon",
                  !ble.connected(), audioBeaconRunning);
     }
@@ -3155,7 +3157,6 @@ void tapAudioTempo()
   const bool changed = bpm != audioBeaconSettings.bpm;
   audioBeaconSettings.bpm = bpm;
   audioBeaconLastTapAt = now;
-  if (changed) audioBeaconDsp.tapTempo(bpm, now);
   setStatus(phase == Phase::Ready ? Phase::Ready : Phase::Idle,
             changed ? String("Tap tempo ") + bpm + " BPM" : "Tap again for tempo");
   invalidateRect(275, 265, 955, 265);
@@ -3377,7 +3378,7 @@ void handleTouch()
     } else if (inside(x, y, 595, 175, 200, 82)) audioBeaconSettings.group = audioBeaconSettings.group % 4 + 1;
     else if (inside(x, y, 815, 175, 200, 82)) audioBeaconSettings.pattern = audioBeaconSettings.pattern % PATTERN_COUNT + 1;
     else if (inside(x, y, 1035, 175, 185, 82)) audioBeaconSettings.brightness = nextLevel(audioBeaconSettings.brightness, BRIGHTNESS_LEVELS, 1);
-    else if (inside(x, y, 285, 275, 215, 82)) { audioBeaconSettings.bpm += 5; if (audioBeaconSettings.bpm > 240) audioBeaconSettings.bpm = 40; }
+    else if (inside(x, y, 285, 275, 215, 82) && !micMode) { audioBeaconSettings.bpm += 5; if (audioBeaconSettings.bpm > 240) audioBeaconSettings.bpm = 40; }
     else if (inside(x, y, 520, 275, 215, 82) && manualV2) audioBeaconSettings.energy = audioBeaconSettings.energy == 255 ? 0 : min(255, audioBeaconSettings.energy + 32);
     else if (inside(x, y, 520, 275, 215, 82) && micMode) audioBeaconSettings.sensitivity = audioBeaconSettings.sensitivity >= 250 ? 25 : audioBeaconSettings.sensitivity + 25;
     else if (inside(x, y, 755, 275, 215, 82) && manualV2) audioBeaconSettings.bass = audioBeaconSettings.bass == 255 ? 0 : min(255, audioBeaconSettings.bass + 32);
@@ -3393,7 +3394,7 @@ void handleTouch()
     }
     else if (inside(x, y, 595, 385, 290, 82) && manualV2) audioBeaconSettings.confidence = audioBeaconSettings.confidence == 255 ? 0 : min(255, audioBeaconSettings.confidence + 32);
     else if (inside(x, y, 595, 385, 290, 82) && micMode) audioBeaconSettings.beatDetect = !audioBeaconSettings.beatDetect;
-    else if (inside(x, y, 285, 485, 250, 42)) tapAudioTempo();
+    else if (inside(x, y, 285, 485, 250, 42) && !micMode) tapAudioTempo();
     else if (inside(x, y, 420, 535, 670, 96)) {
       if (audioBeaconRunning) stopAudioBeacon(); else startAudioBeacon();
     }
@@ -3673,7 +3674,6 @@ AudioSyncDspConfig audioBeaconConfig()
   config.smoothing = constrain(audioBeaconSettings.smoothing, 0, 100);
   config.fullBands = audioBeaconSettings.mode == AudioBeaconMode::MicFullV2;
   config.beatDetect = config.fullBands && audioBeaconSettings.beatDetect;
-  config.fallbackBpm = constrain(audioBeaconSettings.bpm, 40, 240);
   return config;
 }
 
@@ -3684,6 +3684,7 @@ void stopAudioBeacon()
       audioBeaconSettings.mode == AudioBeaconMode::MicFullV2) M5.Mic.end();
   audioBeaconRecording = false;
   audioBeaconRunning = false;
+  audioBeaconOutput = AudioSyncDspOutput{};
   audioBeaconLastAdvAt = 0;
   audioBeaconLastRenderAt = 0;
   invalidateRect(275, 375, 955, 102);
@@ -3705,24 +3706,31 @@ NightKiteSync::BeaconInput currentAudioBeacon()
   const bool micMode = audioBeaconSettings.mode == AudioBeaconMode::MicEnergyV2 ||
                        audioBeaconSettings.mode == AudioBeaconMode::MicFullV2;
   if (audioBeaconSettings.mode == AudioBeaconMode::ManualV2) {
+    input.flags = NightKiteSync::FLAG_AUDIO_SIGNAL_VALID | NightKiteSync::FLAG_AUDIO_BEAT_LOCKED;
     input.energy = audioBeaconSettings.energy;
     input.bass = audioBeaconSettings.bass;
     input.mid = audioBeaconSettings.mid;
     input.treble = audioBeaconSettings.treble;
     input.confidence = audioBeaconSettings.confidence;
   }
-  if (micMode && !audioBeaconSettings.micPaused) {
-    audioBeaconOutput = audioBeaconDsp.output(millis(), audioBeaconConfig());
-    input.flags = audioBeaconOutput.beat ? NightKiteSync::FLAG_AUDIO_BEAT : 0;
-    input.phaseMs = audioBeaconOutput.phaseMs;
-    input.beatMs = audioBeaconOutput.beatMs;
-    input.energy = audioBeaconOutput.energy;
-    if (audioBeaconSettings.mode == AudioBeaconMode::MicFullV2) {
-      input.bass = audioBeaconOutput.bass;
-      input.mid = audioBeaconOutput.mid;
-      input.treble = audioBeaconOutput.treble;
+  if (micMode) {
+    input.phaseMs = 0;
+    input.beatMs = 0;
+    if (!audioBeaconSettings.micPaused) {
+      audioBeaconOutput = audioBeaconDsp.output(millis(), audioBeaconConfig());
+      input.flags = (audioBeaconOutput.beat ? NightKiteSync::FLAG_AUDIO_BEAT : 0) |
+                    (audioBeaconOutput.valid ? NightKiteSync::FLAG_AUDIO_SIGNAL_VALID : 0) |
+                    (audioBeaconOutput.beatLocked ? NightKiteSync::FLAG_AUDIO_BEAT_LOCKED : 0);
+      input.phaseMs = audioBeaconOutput.phaseMs;
+      input.beatMs = audioBeaconOutput.beatMs;
+      input.energy = audioBeaconOutput.energy;
+      if (audioBeaconSettings.mode == AudioBeaconMode::MicFullV2) {
+        input.bass = audioBeaconOutput.bass;
+        input.mid = audioBeaconOutput.mid;
+        input.treble = audioBeaconOutput.treble;
+      }
+      input.confidence = audioBeaconOutput.confidence;
     }
-    input.confidence = audioBeaconOutput.confidence;
   }
   return input;
 }
@@ -3766,7 +3774,8 @@ void startAudioBeacon()
   if (beaconStartedAt && bleAdvertising != nullptr) bleAdvertising->stop();
   beaconStartedAt = 0;
   bleAdvertising = BLEDevice::getAdvertising();
-  audioBeaconDsp.reset(millis(), audioBeaconSettings.bpm);
+  audioBeaconDsp.reset(millis());
+  audioBeaconOutput = AudioSyncDspOutput{};
   audioBeaconSent = 0;
   audioBeaconSequence = 0;
   const bool useMic = (audioBeaconSettings.mode == AudioBeaconMode::MicEnergyV2 ||

@@ -30,6 +30,8 @@ int main()
   assert(NightKiteSync::validateAdvertising(data, encoded.size));
 
   input.version = NightKiteSync::VERSION_V2;
+  input.flags = NightKiteSync::FLAG_AUDIO_BEAT | NightKiteSync::FLAG_AUDIO_SIGNAL_VALID |
+                NightKiteSync::FLAG_AUDIO_BEAT_LOCKED;
   input.energy = 11;
   input.bass = 22;
   input.mid = 33;
@@ -37,7 +39,10 @@ int main()
   input.confidence = 55;
   encoded = NightKiteSync::encodeAdvertising(input, data, sizeof(data));
   assert(encoded.size == NightKiteSync::V2_ADVERTISING_SIZE);
+  assert(NightKiteSync::V2_PACKET_SIZE == 22 && NightKiteSync::V2_ADVERTISING_SIZE == 29);
   assert(data[3] == 25 && data[9] == NightKiteSync::VERSION_V2);
+  assert(data[11] == (NightKiteSync::FLAG_AUDIO_BEAT | NightKiteSync::FLAG_AUDIO_SIGNAL_VALID |
+                      NightKiteSync::FLAG_AUDIO_BEAT_LOCKED));
   assert(data[22] == 11 && data[23] == 22 && data[24] == 33 && data[25] == 44 && data[26] == 55);
   assert(NightKiteSync::validateAdvertising(data, encoded.size));
   data[24] ^= 1;

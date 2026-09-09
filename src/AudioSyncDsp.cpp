@@ -33,9 +33,10 @@ float averageMagnitudes(const float* samples, size_t count, uint32_t sampleRate,
 
 }  // namespace
 
-void AudioSyncDsp::reset(uint32_t nowMs, uint16_t fallbackBpm)
+void AudioSyncDsp::reset(uint32_t nowMs)
 {
   hasFrames = false;
+  signalValid = false;
   phaseEpochMs = nowMs;
   lastBeatMs = 0;
   beatPulseUntilMs = 0;
@@ -49,7 +50,7 @@ void AudioSyncDsp::reset(uint32_t nowMs, uint16_t fallbackBpm)
   trebleValue = 0.0f;
   signalQuality = 0.0f;
   beatStability = 0.0f;
-  detectedBeatMs = 60000.0f / static_cast<float>(clampBpm(fallbackBpm));
+  detectedBeatMs = 0.0f;
   previousOnset = 0.0f;
   onsetHistoryCount = 0;
   onsetHistoryIndex = 0;
@@ -101,6 +102,7 @@ void AudioSyncDsp::processFrame(const int16_t* samples, size_t count, uint32_t n
   float gateMultiplier = 1.05f + (static_cast<float>(config.noiseGate) / 100.0f) * 1.45f;
   float gateThreshold = noiseFloorValue * gateMultiplier;
   float signal = rms > gateThreshold ? rms - gateThreshold : 0.0f;
+  signalValid = signal > 0.0f;
   float desiredReference = signal > noiseFloorValue * 1.5f ? signal : noiseFloorValue * 1.5f;
   float referenceAlpha = desiredReference > levelReference ? 0.15f : 0.003f;
   levelReference += (desiredReference - levelReference) * referenceAlpha;
@@ -143,32 +145,29 @@ void AudioSyncDsp::processFrame(const int16_t* samples, size_t count, uint32_t n
   }
 }
 
-void AudioSyncDsp::tapTempo(uint16_t bpm, uint32_t nowMs)
-{
-  detectedBeatMs = 60000.0f / static_cast<float>(clampBpm(bpm));
-  phaseEpochMs = nowMs;
-}
-
 AudioSyncDspOutput AudioSyncDsp::output(uint32_t nowMs, const AudioSyncDspConfig& config) const
 {
   AudioSyncDspOutput result;
-  result.valid = hasFrames;
+  result.valid = hasFrames && signalValid;
+  result.rms = rmsValue;
+  result.peak = peakValue;
+  result.noiseFloor = noiseFloorValue;
+  if (!result.valid) {
+    return result;
+  }
   result.energy = toByte(energyValue);
   result.bass = toByte(bassValue);
   result.mid = toByte(midValue);
   result.treble = toByte(trebleValue);
-  result.rms = rmsValue;
-  result.peak = peakValue;
-  result.noiseFloor = noiseFloorValue;
 
-  bool detected = config.beatDetect && lastBeatMs > 0 && beatStability > 0.25f &&
+  bool detected = config.beatDetect && detectedBeatMs > 0.0f && lastBeatMs > 0 && beatStability > 0.25f &&
                   nowMs - lastBeatMs <= static_cast<uint32_t>(detectedBeatMs * 2.5f);
-  uint16_t fallbackBpm = clampBpm(config.fallbackBpm);
   result.beatLocked = detected;
-  result.beatMs = detected ? static_cast<uint16_t>(clampFloat(detectedBeatMs, 333.0f, 1000.0f))
-                           : static_cast<uint16_t>(60000UL / fallbackBpm);
-  result.bpm = static_cast<uint16_t>(60000UL / result.beatMs);
-  result.phaseMs = result.beatMs > 0 ? (nowMs - phaseEpochMs) % result.beatMs : 0;
+  if (detected) {
+    result.beatMs = static_cast<uint16_t>(clampFloat(detectedBeatMs, 333.0f, 1000.0f));
+    result.bpm = static_cast<uint16_t>(60000UL / result.beatMs);
+    result.phaseMs = (nowMs - phaseEpochMs) % result.beatMs;
+  }
   result.beat = config.beatDetect && static_cast<int32_t>(beatPulseUntilMs - nowMs) > 0;
 
   float confidence = signalQuality;
@@ -196,11 +195,6 @@ float AudioSyncDsp::smoothValue(float current, float target, uint8_t smoothing)
   float smooth = clampFloat(static_cast<float>(smoothing) / 100.0f, 0.0f, 1.0f);
   float alpha = target > current ? 0.70f - smooth * 0.35f : 0.18f - smooth * 0.14f;
   return current + (target - current) * alpha;
-}
-
-uint16_t AudioSyncDsp::clampBpm(uint16_t bpm)
-{
-  return bpm < 40 ? 40 : (bpm > 240 ? 240 : bpm);
 }
 
 void AudioSyncDsp::updateBeat(float onset, float energyTarget, uint32_t nowMs, const AudioSyncDspConfig& config)

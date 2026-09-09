@@ -8,6 +8,8 @@ namespace NightKiteSync {
 constexpr uint8_t VERSION_V1 = 1;
 constexpr uint8_t VERSION_V2 = 2;
 constexpr uint8_t FLAG_AUDIO_BEAT = 0x01;
+constexpr uint8_t FLAG_AUDIO_SIGNAL_VALID = 0x02;
+constexpr uint8_t FLAG_AUDIO_BEAT_LOCKED = 0x04;
 constexpr size_t V1_PACKET_SIZE = 17;
 constexpr size_t V2_PACKET_SIZE = 22;
 constexpr size_t V1_ADVERTISING_SIZE = 24;

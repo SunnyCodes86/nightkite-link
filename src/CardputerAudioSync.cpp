@@ -3,7 +3,7 @@
 #include "M5Cardputer.h"
 #include "SoundManager.h"
 
-bool CardputerAudioSync::begin(SoundManager& sound, uint16_t fallbackBpm)
+bool CardputerAudioSync::begin(SoundManager& sound)
 {
   if (running) {
     return true;
@@ -16,7 +16,7 @@ bool CardputerAudioSync::begin(SoundManager& sound, uint16_t fallbackBpm)
   framesProcessed = 0;
   previousBeat = false;
   lastDebugMs = 0;
-  dsp.reset(millis(), fallbackBpm);
+  dsp.reset(millis());
 
   auto config = M5Cardputer.Mic.config();
   config.sample_rate = SAMPLE_RATE;
@@ -83,11 +83,6 @@ void CardputerAudioSync::tick(const AudioSyncDspConfig& config)
   dsp.processFrame(frames[completedFrame], FRAME_SAMPLES, nowMs, config);
   ++framesProcessed;
   printPeriodicDebug(config, nowMs);
-}
-
-void CardputerAudioSync::tapTempo(uint16_t bpm, uint32_t nowMs)
-{
-  dsp.tapTempo(bpm, nowMs);
 }
 
 bool CardputerAudioSync::active() const
@@ -161,6 +156,12 @@ void CardputerAudioSync::printPeriodicDebug(const AudioSyncDspConfig& config, ui
   Serial.print(current.treble);
   Serial.print(" confidence=");
   Serial.print(current.confidence);
+  Serial.print(" signal_valid=");
+  Serial.print(current.valid ? 1 : 0);
+  Serial.print(" beat_locked=");
+  Serial.print(current.beatLocked ? 1 : 0);
+  Serial.print(" beat=");
+  Serial.print(current.beat ? 1 : 0);
   Serial.print(" bpm=");
   Serial.print(current.bpm);
   Serial.print(" beat_ms=");

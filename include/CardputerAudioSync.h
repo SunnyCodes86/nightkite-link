@@ -11,10 +11,9 @@ public:
   static constexpr uint32_t SAMPLE_RATE = 8000;
   static constexpr size_t FRAME_SAMPLES = 256;
 
-  bool begin(SoundManager& sound, uint16_t fallbackBpm);
+  bool begin(SoundManager& sound);
   void end();
   void tick(const AudioSyncDspConfig& config);
-  void tapTempo(uint16_t bpm, uint32_t nowMs);
 
   bool active() const;
   bool failed() const;

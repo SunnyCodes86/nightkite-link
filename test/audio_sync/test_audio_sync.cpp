@@ -34,7 +34,6 @@ AudioSyncDspConfig fullConfig()
   config.smoothing = 20;
   config.fullBands = true;
   config.beatDetect = true;
-  config.fallbackBpm = 120;
   return config;
 }
 
@@ -55,12 +54,29 @@ void testDcRemovalAndSilence()
   AudioSyncDspConfig config = fullConfig();
   uint32_t nowMs = 0;
   uint32_t sampleIndex = 0;
-  dsp.reset(nowMs, 120);
+  dsp.reset(nowMs);
   primeSilence(dsp, config, nowMs, sampleIndex);
   AudioSyncDspOutput output = dsp.output(nowMs, config);
-  assert(output.valid);
+  assert(!output.valid && !output.beatLocked && !output.beat);
   assert(output.rms < 0.1f);
-  assert(output.energy == 0);
+  assert(output.energy == 0 && output.bass == 0 && output.mid == 0 && output.treble == 0);
+  assert(output.confidence == 0 && output.bpm == 0 && output.beatMs == 0 && output.phaseMs == 0);
+}
+
+void testSignalWithoutBeatLock()
+{
+  AudioSyncDsp dsp;
+  AudioSyncDspConfig config = fullConfig();
+  int16_t samples[FRAME_SAMPLES];
+  uint32_t nowMs = 0;
+  uint32_t sampleIndex = 0;
+  dsp.reset(nowMs);
+  primeSilence(dsp, config, nowMs, sampleIndex);
+  fillSine(samples, 120.0f, 12000.0f, sampleIndex);
+  dsp.processFrame(samples, FRAME_SAMPLES, nowMs, config);
+  AudioSyncDspOutput output = dsp.output(nowMs, config);
+  assert(output.valid && output.energy > 0 && output.bass > 0);
+  assert(!output.beatLocked && output.bpm == 0 && output.beatMs == 0 && output.phaseMs == 0);
 }
 
 void testBandSeparation()
@@ -71,7 +87,7 @@ void testBandSeparation()
   AudioSyncDsp bassDsp;
   uint32_t bassNow = 0;
   uint32_t bassSample = 0;
-  bassDsp.reset(bassNow, 120);
+  bassDsp.reset(bassNow);
   primeSilence(bassDsp, config, bassNow, bassSample);
   for (int frame = 0; frame < 8; ++frame) {
     fillSine(samples, 120.0f, 12000.0f, bassSample);
@@ -87,7 +103,7 @@ void testBandSeparation()
   AudioSyncDsp trebleDsp;
   uint32_t trebleNow = 0;
   uint32_t trebleSample = 0;
-  trebleDsp.reset(trebleNow, 120);
+  trebleDsp.reset(trebleNow);
   primeSilence(trebleDsp, config, trebleNow, trebleSample);
   for (int frame = 0; frame < 8; ++frame) {
     fillSine(samples, 2800.0f, 12000.0f, trebleSample);
@@ -108,7 +124,7 @@ void testBeatTracking()
   int16_t samples[FRAME_SAMPLES];
   uint32_t nowMs = 0;
   uint32_t sampleIndex = 0;
-  dsp.reset(nowMs, 120);
+  dsp.reset(nowMs);
   primeSilence(dsp, config, nowMs, sampleIndex);
 
   for (int frame = 0; frame < 110; ++frame) {
@@ -120,7 +136,7 @@ void testBeatTracking()
   }
 
   AudioSyncDspOutput output = dsp.output(nowMs, config);
-  assert(output.beatLocked);
+  assert(output.valid && output.beatLocked);
   assert(output.bpm >= 112 && output.bpm <= 128);
   assert(output.beatMs >= 468 && output.beatMs <= 536);
   assert(output.confidence > 20);
@@ -131,6 +147,7 @@ void testBeatTracking()
 int main()
 {
   testDcRemovalAndSilence();
+  testSignalWithoutBeatLock();
   testBandSeparation();
   testBeatTracking();
   return 0;

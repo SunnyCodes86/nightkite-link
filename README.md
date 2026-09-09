@@ -114,7 +114,9 @@ V2 audio-test mode requires controller firmware with V2 receive support
 connection open. The modes are `V1 Manual`, `V2 Manual`, `V2 Mic Energy` and
 `V2 Mic Full`. Mic Energy derives energy and confidence from the Cardputer
 microphone. Mic Full additionally analyzes bass, mid and treble and performs
-simple beat/BPM/phase tracking. The manual BPM or tap tempo remains the fallback.
+simple beat/BPM/phase tracking. Mic modes transmit zero audio values while the
+existing noise gate is closed, and transmit BPM/phase only with a detected beat
+lock. Manual BPM and tap tempo apply only to the Manual modes.
 The UF2
 Mass Storage flasher is present as an experimental service/recovery workflow
 and expects the controller to be manually placed into BOOTSEL/Mass Storage mode.
@@ -129,7 +131,8 @@ sync and wireless, choose group 1-4 and select `long_range`, `balanced` or
 USB inspection only. To test the Cardputer Beacon Master, configure existing
 controllers as followers with `play_mode=sync`, `sync_enabled=1`,
 `sync_role=follower`, matching `sync_group` 1-4, and `wireless_enabled=1`; then
-start the Audio Beacon card with the same group, pattern, brightness and BPM.
+start the Audio Beacon card with the same group, pattern and brightness; BPM is
+configured only for Manual modes.
 Choose V1 for the established compatible path, V2 Manual to edit the five test
 values, or one of the Mic modes for live analysis. The Mic controls expose
 sensitivity, noise gate, smoothing, beat detect and pause. Capture uses
@@ -139,7 +142,9 @@ treble. Speaker UI sounds are suspended while the microphone is active because
 the Cardputer cannot use both paths simultaneously. The serial monitor prints
 periodic RMS, peak, noise floor, bands, confidence, beat timing and payload
 diagnostics. V2 uses 29 of the 31 legacy advertising bytes and adds no local
-name or service data.
+name or service data. Its existing flags byte uses bit 0 for `BEAT`, bit 1 for
+`SIGNAL_VALID`, and bit 2 for `BEAT_LOCKED`; the 22-byte payload and CRC layout
+are unchanged.
 
 The Cardputer catalog now covers all 27 controller patterns. The five new
 entries are `audio_pulse_angle_color` (23), `audio_spectrum_ribbon` (24),
@@ -162,8 +167,9 @@ Hardware check:
    and 27 in sequence while providing music or a stable pulse.
 3. Run both diagnostic commands above over USB for each pattern.
 4. Expect `sync_locked=1`, `local_pattern` or `sync_pattern` matching 23-27,
-   `audio_valid=1`, `last_beacon_version=2`, rising `scan_decode_v2`, reactive
-   energy/bands, plausible confidence and beat timing, and `scan_crc_fail=0`.
+   `signal_valid=1`, `last_beacon_version=2`, rising `scan_decode_v2`, reactive
+   energy/bands and `scan_crc_fail=0`. `beat_locked=1` is required before BPM
+   and phase become active.
 
 Firmware 4.0 diagnostics now include PatternClock and pattern classification
 fields. The pattern list marks patterns as `S` sync-ready, `P` partial-sync, `L`

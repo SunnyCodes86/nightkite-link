@@ -9,7 +9,7 @@ const char* showAudioMode(const char* mode) {
   if (audioState != AudioState::Idle) return "audio_busy";
   M5.Mic.end(); audioBeaconRecording = false;
   audioBeaconSettings.mode = value; audioBeaconSettings.micPaused = false;
-  audioBeaconDsp.reset(millis(), audioBeaconSettings.bpm);
+  audioBeaconDsp.reset(millis());
   if (value == AudioBeaconMode::MicEnergyV2 || value == AudioBeaconMode::MicFullV2) {
     M5.Speaker.end(); uiToneActive = false;
     if (!M5.Mic.begin()) return "mic";

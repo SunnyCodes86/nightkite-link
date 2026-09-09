@@ -35,7 +35,7 @@ bool showAudio(NightKiteSync::BeaconInput& input) {
   input.version = NightKiteSync::VERSION_V2; input.group = beaconMasterSettings.group;
   input.pattern = beaconMasterSettings.pattern; input.brightness = beaconMasterSettings.brightness;
   input.phaseMs = beaconBroadcaster.phaseMs(beaconMasterSettings); input.beatMs = beaconBroadcaster.beatMs(beaconMasterSettings);
-  input.flags = audio.beat ? NightKiteSync::FLAG_AUDIO_BEAT : 0;
+  input.flags = beaconAudioFlags(audio);
   input.energy = audio.energy; input.bass = audio.bass; input.mid = audio.mid; input.treble = audio.treble; input.confidence = audio.confidence;
   return true;
 }
