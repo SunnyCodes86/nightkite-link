@@ -14,6 +14,7 @@ public:
     bool (*audio)(NightKiteSync::BeaconInput&);
     const char* (*audioMode)(const char*);
     bool (*storage)();
+    void (*audioStatus)(char*, size_t);
   };
   void begin(fs::FS& storage, Hardware hardware);
   void tick(Stream* bridge);

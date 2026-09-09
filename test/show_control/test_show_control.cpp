@@ -147,7 +147,7 @@ static void requests() {
   Request r; assert(!parseRequest("NKSHOW 1 123 EVENT AT 42 GROUP 2 PATTERN 27",0xfffffff0,r)); assert(r.id==123 && r.event.executeAt==42 && r.event.params[0]==27);
   assert(!parseRequest("NKSHOW 1 124 EVENT IN 1000 ALL BLACKOUT",0xfffffff0,r)); assert(r.event.executeAt==984);
   assert(!parseRequest("NKSHOW 1 125 EVENT NOW ALL RELEASE",50,r)); assert(r.event.executeAt==1050);
-  const char* ops[]={"HELLO","VERSION","ARM","DISARM","STATUS","TIME","STOP","PLAY","LIST","AUDIO MIC_FULL","LOAD demo.nks","PUT_BEGIN demo.nks","PUT_LINE NKSHOW 1","PUT_END", "EVENT IN 1000 ALL CLEAR 2 1", "EVENT IN 1000 ALL SEGMENT 2 0 0 8 255 0 0", "EVENT IN 1000 ALL APPLY 2", "EVENT IN 1000 ALL BRIGHTNESS 255", "EVENT IN 1000 ALL SOLID 1 2 3 0"};
+  const char* ops[]={"HELLO","VERSION","ARM","DISARM","STATUS","TIME","STOP","PLAY","LIST","AUDIO MIC_FULL","AUDIO_STATUS","LOAD demo.nks","PUT_BEGIN demo.nks","PUT_LINE NKSHOW 1","PUT_END", "EVENT IN 1000 ALL CLEAR 2 1", "EVENT IN 1000 ALL SEGMENT 2 0 0 8 255 0 0", "EVENT IN 1000 ALL APPLY 2", "EVENT IN 1000 ALL BRIGHTNESS 255", "EVENT IN 1000 ALL SOLID 1 2 3 0"};
   for(auto op:ops) { auto s=std::string("NKSHOW 1 7 ")+op; assert(!parseRequest(s.c_str(),0,r)); }
   const char* bad[]={"NKSHOW 2 1 HELLO","NKSHOW 1 4294967296 HELLO","NKSHOW 1 1 ARM extra","NKSHOW 1 1 EVENT AT -1 ALL BLACKOUT","NKSHOW 1 1 EVENT IN 9999999999 ALL BLACKOUT","NKSHOW 1 1 EVENT NOW SINGLE 00000Z BLACKOUT","NKSHOW 1 1 EVENT NOW ALL BLAC", "NKSHOW 1 1 AUDIO", "NKSHOW 1 1 LOAD a b"};
   for(auto s:bad) assert(parseRequest(s,0,r)); assert(parseRequest(std::string(224,'x').c_str(),0,r)); assert(!parseRequest("NKSHOW 1 2 HELLO",0,r));

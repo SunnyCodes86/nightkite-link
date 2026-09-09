@@ -114,9 +114,11 @@ V2 audio-test mode requires controller firmware with V2 receive support
 connection open. The modes are `V1 Manual`, `V2 Manual`, `V2 Mic Energy` and
 `V2 Mic Full`. Mic Energy derives energy and confidence from the Cardputer
 microphone. Mic Full additionally analyzes bass, mid and treble and performs
-simple beat/BPM/phase tracking. Mic modes transmit zero audio values while the
-existing noise gate is closed, and transmit BPM/phase only with a detected beat
-lock. Manual BPM and tap tempo apply only to the Manual modes.
+spectral-flux onset detection, tempo voting and PLL-style phase tracking. Mic
+modes distinguish the instantaneous raw gate from a held audio-active state, so
+short musical dips decay smoothly while confirmed silence still transmits zero
+audio. BPM/phase are sent only with a real beat lock. Manual BPM and tap tempo
+apply only to the Manual modes.
 The UF2
 Mass Storage flasher is present as an experimental service/recovery workflow
 and expects the controller to be manually placed into BOOTSEL/Mass Storage mode.
@@ -136,15 +138,27 @@ configured only for Manual modes.
 Choose V1 for the established compatible path, V2 Manual to edit the five test
 values, or one of the Mic modes for live analysis. The Mic controls expose
 sensitivity, noise gate, smoothing, beat detect and pause. Capture uses
-8 kHz mono frames with 256 samples (32 ms); Mic Full uses a small Goertzel
-filter bank for roughly 60-250 Hz bass, 250-2000 Hz mids and 2000-3400 Hz
-treble. Speaker UI sounds are suspended while the microphone is active because
-the Cardputer cannot use both paths simultaneously. The serial monitor prints
-periodic RMS, peak, noise floor, bands, confidence, beat timing and payload
-diagnostics. V2 uses 29 of the 31 legacy advertising bytes and adds no local
-name or service data. Its existing flags byte uses bit 0 for `BEAT`, bit 1 for
-`SIGNAL_VALID`, and bit 2 for `BEAT_LOCKED`; the 22-byte payload and CRC layout
-are unchanged.
+16 kHz mono hops of 256 samples (16 ms) into a 512-sample rolling Hann window
+(32 ms, 50% overlap). ESP targets use the framework-provided ESP-DSP 512-point
+float FFT. Sixteen internal logarithmic bands cover 62.5 Hz to about 7.5 kHz;
+bass (62.5-250 Hz), mids (250-2000 Hz), treble (2-7.5 kHz), and broadband energy
+are derived independently before one common software AGC and time-based
+attack/release. The beat path uses un-smoothed whitened spectral flux, an
+adaptive median/MAD threshold, IOI tempo votes and bounded phase correction.
+Speaker UI sounds are suspended while the microphone is active because the
+Cardputer cannot use both paths simultaneously. `AUDIO_STATUS` exposes an
+explicit DSP snapshot, and `tools/capture_audio_trace.py` records V2/controller
+traces without extra Python packages. V2 keeps the same 22-byte payload and
+29-byte legacy advertisement. Its existing flags byte uses bit 0 for `BEAT`,
+bit 1 for audio-active `SIGNAL_VALID`, and bit 2 for `BEAT_LOCKED`; CRC and radio
+cadence are unchanged.
+
+Cardputer ADV hardware validation (2026-09-09, acoustic playback) measured a
+4.29-s first lock and 120.97-BPM median over 90 s of Daft Punk's “Around the
+World” (`SIGNAL_VALID` 97.93%, `BEAT_LOCKED` 95.20%). Billie Jean locked after
+2.57 s at a 116.96-BPM median (`SIGNAL_VALID` 99.05%, `BEAT_LOCKED` 97.25%).
+Observed ESP-DSP p99 runtime was about 1.61 ms per 16-ms hop; the existing
+120-ms Audio V2 scheduling and Show Control capacity contract were unchanged.
 
 The Cardputer catalog now covers all 27 controller patterns. The five new
 entries are `audio_pulse_angle_color` (23), `audio_spectrum_ribbon` (24),

@@ -146,7 +146,8 @@ The mode is separate from BLE GATT configuration and does not keep a controller
 GATT connection open while broadcasting. Available modes are `V1 Manual`,
 `V2 Manual`, `V2 Mic Energy` and `V2 Mic Full`. Mic Energy controls energy and
 confidence from the microphone and sends neutral band values. Mic Full also
-controls bass, mid and treble and enables simple beat/BPM/phase tracking.
+controls bass, mid and treble and enables spectral-flux onset detection, tempo
+voting, and PLL-style phase tracking.
 
 To test it, configure one or more NightKite Multi controllers as followers:
 `play_mode=sync`, `sync_enabled=1`, `sync_role=follower`, matching
@@ -155,17 +156,31 @@ choose the same group plus pattern and brightness, and press `Enter` to
 start or stop broadcasting. Select V1 for the established path, V2 Manual for
 manual test values, or a Mic mode for live analysis. Mic fields provide
 sensitivity, noise gate, smoothing, beat detect and pause. BPM and tap tempo are
-available only in Manual modes. In Mic modes a closed gate sends neutral audio;
-BPM and phase remain zero until the DSP has a real beat lock.
+available only in Manual modes. Mic modes separate the instantaneous raw gate
+from the held audio-active state: short musical dips decay smoothly, while
+confirmed silence sends neutral audio. BPM and phase remain zero until the DSP
+has a real beat lock.
 
-Capture runs asynchronously at 8 kHz with 256-sample/32-ms mono frames. The DSP
-removes DC, tracks RMS, peak and a slow noise floor, applies a gate and
-attack/release smoothing, then normalizes energy. Mic Full uses a small Goertzel
-filter bank covering approximately 60-250 Hz, 250-2000 Hz and 2000-3400 Hz.
-The upper treble limit follows the 4-kHz Nyquist limit. Speaker UI sounds are
-suspended while capture is active. V2 remains a 22-byte payload in a 29-byte
-legacy advertisement without local name or service data. Flags bits 0, 1 and 2
-mean `BEAT`, `SIGNAL_VALID` and `BEAT_LOCKED`; the CRC layout is unchanged.
+Capture runs asynchronously at 16 kHz mono. 256-sample hops (16 ms) feed a
+512-sample rolling Hann window (32 ms, 50% overlap); ESP targets use the
+framework-provided ESP-DSP float32 FFT. Sixteen internal logarithmic bands cover
+62.5 Hz to about 7.5 kHz. Bass (62.5-250 Hz), mids (250-2000 Hz), treble
+(2-7.5 kHz), and broadband energy are calculated independently, then scaled by
+one common software AGC and time-based attack/release. The beat path consumes
+un-smoothed locally whitened spectral flux with an adaptive median/MAD threshold,
+IOI tempo voting, and bounded PLL phase correction. Speaker UI sounds are
+suspended while capture is active. `AUDIO_STATUS` returns an explicit DSP
+snapshot; `tools/capture_audio_trace.py` records V2/controller traces using only
+the Python standard library. V2 remains a 22-byte payload in a 29-byte legacy
+advertisement. Flag bits 0, 1 and 2 mean `BEAT`, audio-active `SIGNAL_VALID`, and
+`BEAT_LOCKED`; CRC, packet format, and transmit cadence are unchanged.
+
+Cardputer ADV acoustic hardware validation on 2026-09-09 measured a 4.29-s
+first lock and 120.97-BPM median over 90 seconds of Daft Punk's “Around the
+World” (`SIGNAL_VALID` 97.93%, `BEAT_LOCKED` 95.20%). Billie Jean locked after
+2.57 seconds at a 116.96-BPM median (99.05% / 97.25%). Observed ESP-DSP p99
+runtime was about 1.61 ms per 16-ms hop; the existing 120-ms Audio V2 schedule
+and Show Control capacity contract were unchanged.
 
 The Cardputer catalog now covers all 27 firmware patterns. The new entries are
 `audio_pulse_angle_color` (23), `audio_spectrum_ribbon` (24),

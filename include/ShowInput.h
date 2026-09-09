@@ -53,7 +53,7 @@ private:
   void fail(const char* error, Engine& engine, uint32_t now);
 };
 
-enum class Operation : uint8_t { Hello, Arm, Disarm, Status, Time, Event, Stop, Audio, Load, Play, List, PutBegin, PutLine, PutEnd };
+enum class Operation : uint8_t { Hello, Arm, Disarm, Status, Time, Event, Stop, Audio, AudioStatus, Load, Play, List, PutBegin, PutLine, PutEnd };
 struct Request {
   uint32_t id = 0;
   Operation operation = Operation::Hello;

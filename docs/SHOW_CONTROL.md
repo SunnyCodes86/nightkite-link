@@ -238,6 +238,7 @@ with a new request ID. This is bounded idempotence, not permanent replay protect
 | EVENT IN delay TARGET COMMAND parameters | Relative deadline in ms |
 | EVENT AT milliseconds TARGET COMMAND parameters | Absolute 32-bit Link clock deadline |
 | AUDIO OFF / MANUAL / MIC_ENERGY / MIC_FULL | Select existing V2 source; OFF disables V2, not CLOCK/show |
+| AUDIO_STATUS | Cardputer-only on-demand FFT/gate/tempo/runtime snapshot; no streaming output |
 | LIST | `files=` comma-separated `.nks` basenames, bounded directory scan, OFF only |
 | LOAD filename.nks | Start full preflight; poll STATUS until LOADED or ERROR, OFF only |
 | PLAY / STOP | Start loaded file / stop admission and drain to RELEASE |

@@ -372,7 +372,9 @@ String terminalLog = "No terminal response";
 AudioBeaconSettings audioBeaconSettings;
 AudioSyncDsp audioBeaconDsp;
 AudioSyncDspOutput audioBeaconOutput;
-int16_t audioBeaconSamples[256] = {};
+constexpr uint32_t AUDIO_BEACON_SAMPLE_RATE = 16000;
+constexpr size_t AUDIO_BEACON_HOP_SAMPLES = AudioSyncDsp::HOP_SAMPLES;
+int16_t audioBeaconSamples[AUDIO_BEACON_HOP_SAMPLES] = {};
 bool audioBeaconRunning = false;
 bool audioBeaconRecording = false;
 uint32_t audioBeaconLastFrameAt = 0;
@@ -3668,7 +3670,7 @@ void startBeaconTest()
 AudioSyncDspConfig audioBeaconConfig()
 {
   AudioSyncDspConfig config;
-  config.sampleRate = 8000;
+  config.sampleRate = AUDIO_BEACON_SAMPLE_RATE;
   config.sensitivity = constrain(audioBeaconSettings.sensitivity, 1, 255);
   config.noiseGate = constrain(audioBeaconSettings.noiseGate, 0, 100);
   config.smoothing = constrain(audioBeaconSettings.smoothing, 0, 100);
@@ -3780,9 +3782,16 @@ void startAudioBeacon()
   audioBeaconSequence = 0;
   const bool useMic = (audioBeaconSettings.mode == AudioBeaconMode::MicEnergyV2 ||
                        audioBeaconSettings.mode == AudioBeaconMode::MicFullV2) && !audioBeaconSettings.micPaused;
-  if (useMic && !M5.Mic.begin()) {
-    setStatus(Phase::Error, "Microphone init failed");
-    return;
+  if (useMic) {
+    auto micConfig = M5.Mic.config();
+    micConfig.sample_rate = AUDIO_BEACON_SAMPLE_RATE;
+    micConfig.dma_buf_len = AUDIO_BEACON_HOP_SAMPLES;
+    micConfig.dma_buf_count = 4;
+    M5.Mic.config(micConfig);
+    if (!M5.Mic.begin()) {
+      setStatus(Phase::Error, "Microphone init failed");
+      return;
+    }
   }
   audioBeaconRunning = true;
   audioBeaconLastAdvAt = 0;
@@ -3797,12 +3806,13 @@ void updateAudioBeacon()
                        audioBeaconSettings.mode == AudioBeaconMode::MicFullV2) && !audioBeaconSettings.micPaused;
   if (useMic) {
     if (audioBeaconRecording && !M5.Mic.isRecording()) {
-      audioBeaconDsp.processFrame(audioBeaconSamples, 256, millis(), audioBeaconConfig());
+      audioBeaconDsp.processFrame(audioBeaconSamples, AUDIO_BEACON_HOP_SAMPLES, millis(), audioBeaconConfig());
       audioBeaconRecording = false;
       audioBeaconLastFrameAt = millis();
     }
     if (!audioBeaconRecording) {
-      audioBeaconRecording = M5.Mic.record(audioBeaconSamples, 256, 8000, false);
+      audioBeaconRecording = M5.Mic.record(audioBeaconSamples, AUDIO_BEACON_HOP_SAMPLES,
+                                           AUDIO_BEACON_SAMPLE_RATE, false);
       if (!audioBeaconRecording) {
         stopAudioBeacon();
         setStatus(Phase::Error, "Microphone capture failed");

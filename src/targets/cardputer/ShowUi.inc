@@ -47,8 +47,29 @@ const char* showAudioMode(const char* modeName) {
   else return "audio_mode";
   return startBeaconMicIfNeeded() ? nullptr : "mic";
 }
+void showAudioStatus(char* fields, size_t size) {
+  const auto audio = cardputerAudioSync.output(millis(), audioDspConfig(beaconMasterSettings));
+  const uint32_t clipPpm = audio.processedSamples
+                               ? uint32_t((uint64_t(audio.clippingSamples) * 1000000ULL) / audio.processedSamples)
+                               : 0;
+  size_t used = snprintf(fields, size,
+      "sr=16000 hop=256 fft=512 rms=%.1f peak=%.1f noise=%.1f raw_gate=%u audio_active=%u energy_raw=%.1f energy=%u bass=%u mid=%u treble=%u flux=%.4f onset_thr=%.4f onset=%u accepted=%u tempo=%.1f conf=%u beat_locked=%u beat_ms=%u phase=%lu phase_err=%.1f clip_count=%lu clip_ppm=%lu drops=%lu dsp_p50=%lu dsp_p95=%lu dsp_p99=%lu heap=%lu min_heap=%lu bands=",
+      audio.rms, audio.peak, audio.noiseFloor, audio.rawGate, audio.valid, audio.energyRaw, audio.energy,
+      audio.bass, audio.mid, audio.treble, audio.spectralFlux, audio.onsetThreshold, audio.onsetCandidate,
+      audio.acceptedBeat, audio.bestTempoBpm, audio.confidence, audio.beatLocked, audio.beatMs,
+      (unsigned long)audio.phaseMs, audio.phaseErrorMs, (unsigned long)audio.clippingSamples,
+      (unsigned long)clipPpm, cardputerAudioSync.captureDropCount(), (unsigned long)audio.dspRuntimeP50Us,
+      (unsigned long)audio.dspRuntimeP95Us, (unsigned long)audio.dspRuntimeP99Us,
+      (unsigned long)ESP.getFreeHeap(), (unsigned long)ESP.getMinFreeHeap());
+  for (size_t band = 0; band < AudioSyncDspOutput::BAND_COUNT && used < size; ++band) {
+    int written = snprintf(fields + used, size - used, "%s%u", band ? "," : "", unsigned(audio.bands[band] + 0.5f));
+    if (written < 0 || size_t(written) >= size - used) break;
+    used += size_t(written);
+  }
+}
 void setupShow() {
-  ShowRuntime::Hardware hardware = {showArmHardware, showOffHardware, showAdvertise, showAudio, showAudioMode, ensureSdReady};
+  ShowRuntime::Hardware hardware = {
+      showArmHardware, showOffHardware, showAdvertise, showAudio, showAudioMode, ensureSdReady, showAudioStatus};
   showRuntime.begin(SD, hardware);
 }
 void scanShowFiles() {

@@ -196,6 +196,7 @@ const char* parseRequest(const char* input, uint32_t now, Request& r) {
   else if (!strcmp(cmd, "STOP")) r.operation = Operation::Stop;
   else if (!strcmp(cmd, "PLAY")) r.operation = Operation::Play;
   else if (!strcmp(cmd, "LIST")) r.operation = Operation::List;
+  else if (!strcmp(cmd, "AUDIO_STATUS")) r.operation = Operation::AudioStatus;
   else if (!strcmp(cmd, "PUT_END")) r.operation = Operation::PutEnd;
   else if (!strcmp(cmd, "AUDIO") || !strcmp(cmd, "LOAD") || !strcmp(cmd, "PUT_BEGIN")) {
     r.operation = !strcmp(cmd, "AUDIO") ? Operation::Audio : !strcmp(cmd, "LOAD") ? Operation::Load : Operation::PutBegin;

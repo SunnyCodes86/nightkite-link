@@ -14,8 +14,10 @@ bool CardputerAudioSync::begin(SoundManager& sound)
   currentFrame = 0;
   frameQueued = false;
   framesProcessed = 0;
-  previousBeat = false;
-  lastDebugMs = 0;
+  captureDrops = 0;
+  captureStartedMs = 0;
+  nextCaptureCheckMs = 0;
+  lastFrameCompletedMs = 0;
   dsp.reset(millis());
 
   auto config = M5Cardputer.Mic.config();
@@ -38,10 +40,14 @@ bool CardputerAudioSync::begin(SoundManager& sound)
   }
 
   running = true;
-  if (!queueCurrentFrame()) {
+  captureStartedMs = millis();
+  constexpr uint32_t frameMs = (FRAME_SAMPLES * 1000UL) / SAMPLE_RATE;
+  nextCaptureCheckMs = captureStartedMs + frameMs;
+  if (!queueFrame(0) || !queueFrame(1)) {
     fail("mic queue failed");
     return false;
   }
+  frameQueued = true;
 
   Serial.print("audio: mic init ok sample_rate=");
   Serial.print(SAMPLE_RATE);
@@ -59,7 +65,6 @@ void CardputerAudioSync::end()
   }
   running = false;
   frameQueued = false;
-  previousBeat = false;
   if (soundManager != nullptr) {
     soundManager->setCaptureActive(false);
   }
@@ -67,22 +72,35 @@ void CardputerAudioSync::end()
 
 void CardputerAudioSync::tick(const AudioSyncDspConfig& config)
 {
-  if (!running || !frameQueued || M5Cardputer.Mic.isRecording() != 0) {
-    return;
-  }
-
-  uint8_t completedFrame = currentFrame;
-  currentFrame ^= 1;
-  frameQueued = false;
-  if (!queueCurrentFrame()) {
-    fail("mic queue failed");
-    return;
-  }
-
   uint32_t nowMs = millis();
-  dsp.processFrame(frames[completedFrame], FRAME_SAMPLES, nowMs, config);
-  ++framesProcessed;
-  printPeriodicDebug(config, nowMs);
+  constexpr uint32_t frameMs = (FRAME_SAMPLES * 1000UL) / SAMPLE_RATE;
+  if (!running || !frameQueued || static_cast<int32_t>(nowMs - nextCaptureCheckMs) < 0) return;
+  size_t pending = M5Cardputer.Mic.isRecording();
+  if (pending >= 2) return;
+  size_t completed = 2 - pending;
+  if (completed == 2 && lastFrameCompletedMs != 0) {
+    uint32_t elapsed = nowMs - lastFrameCompletedMs;
+    uint32_t bufferedMs = 2 * frameMs;
+    if (elapsed > bufferedMs + frameMs / 2) {
+      captureDrops += (elapsed - bufferedMs + frameMs / 2) / frameMs;
+    }
+  }
+  uint8_t completedFrames[2] = {};
+  for (size_t frame = 0; frame < completed; ++frame) {
+    completedFrames[frame] = (currentFrame + frame) & 1;
+    uint32_t frameAt = nowMs - static_cast<uint32_t>((completed - frame - 1) * frameMs);
+    lastFrameCompletedMs = frameAt;
+    dsp.processFrame(frames[completedFrames[frame]], FRAME_SAMPLES, frameAt, config);
+    ++framesProcessed;
+  }
+  currentFrame = (currentFrame + completed) & 1;
+  for (size_t frame = 0; frame < completed; ++frame) {
+    if (!queueFrame(completedFrames[frame])) {
+      fail("mic queue failed");
+      return;
+    }
+  }
+  nextCaptureCheckMs = nowMs + (completed == 2 ? frameMs : 1);
 }
 
 bool CardputerAudioSync::active() const
@@ -105,10 +123,14 @@ unsigned long CardputerAudioSync::frameCount() const
   return framesProcessed;
 }
 
-bool CardputerAudioSync::queueCurrentFrame()
+unsigned long CardputerAudioSync::captureDropCount() const
 {
-  frameQueued = M5Cardputer.Mic.record(frames[currentFrame], FRAME_SAMPLES, SAMPLE_RATE, false);
-  return frameQueued;
+  return captureDrops;
+}
+
+bool CardputerAudioSync::queueFrame(uint8_t frame)
+{
+  return M5Cardputer.Mic.record(frames[frame], FRAME_SAMPLES, SAMPLE_RATE, false);
 }
 
 void CardputerAudioSync::fail(const char* reason)
@@ -117,55 +139,4 @@ void CardputerAudioSync::fail(const char* reason)
   Serial.print("audio: mic error=");
   Serial.println(reason);
   end();
-}
-
-void CardputerAudioSync::printPeriodicDebug(const AudioSyncDspConfig& config, uint32_t nowMs)
-{
-  AudioSyncDspOutput current = dsp.output(nowMs, config);
-  if (current.beat && !previousBeat) {
-    Serial.print("audio: beat bpm=");
-    Serial.print(current.bpm);
-    Serial.print(" beat_ms=");
-    Serial.print(current.beatMs);
-    Serial.print(" phase=");
-    Serial.print(current.phaseMs);
-    Serial.print(" confidence=");
-    Serial.println(current.confidence);
-  }
-  previousBeat = current.beat;
-
-  if (lastDebugMs != 0 && nowMs - lastDebugMs < 1000) {
-    return;
-  }
-  lastDebugMs = nowMs;
-  Serial.print("audio: frame=");
-  Serial.print(framesProcessed);
-  Serial.print(" rms=");
-  Serial.print(current.rms, 1);
-  Serial.print(" peak=");
-  Serial.print(current.peak, 1);
-  Serial.print(" noise=");
-  Serial.print(current.noiseFloor, 1);
-  Serial.print(" energy=");
-  Serial.print(current.energy);
-  Serial.print(" bass=");
-  Serial.print(current.bass);
-  Serial.print(" mid=");
-  Serial.print(current.mid);
-  Serial.print(" treble=");
-  Serial.print(current.treble);
-  Serial.print(" confidence=");
-  Serial.print(current.confidence);
-  Serial.print(" signal_valid=");
-  Serial.print(current.valid ? 1 : 0);
-  Serial.print(" beat_locked=");
-  Serial.print(current.beatLocked ? 1 : 0);
-  Serial.print(" beat=");
-  Serial.print(current.beat ? 1 : 0);
-  Serial.print(" bpm=");
-  Serial.print(current.bpm);
-  Serial.print(" beat_ms=");
-  Serial.print(current.beatMs);
-  Serial.print(" phase=");
-  Serial.println(current.phaseMs);
 }

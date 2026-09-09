@@ -8,8 +8,8 @@ class SoundManager;
 
 class CardputerAudioSync {
 public:
-  static constexpr uint32_t SAMPLE_RATE = 8000;
-  static constexpr size_t FRAME_SAMPLES = 256;
+  static constexpr uint32_t SAMPLE_RATE = 16000;
+  static constexpr size_t FRAME_SAMPLES = AudioSyncDsp::HOP_SAMPLES;
 
   bool begin(SoundManager& sound);
   void end();
@@ -19,11 +19,11 @@ public:
   bool failed() const;
   AudioSyncDspOutput output(uint32_t nowMs, const AudioSyncDspConfig& config) const;
   unsigned long frameCount() const;
+  unsigned long captureDropCount() const;
 
 private:
-  bool queueCurrentFrame();
+  bool queueFrame(uint8_t frame);
   void fail(const char* reason);
-  void printPeriodicDebug(const AudioSyncDspConfig& config, uint32_t nowMs);
 
   SoundManager* soundManager = nullptr;
   AudioSyncDsp dsp;
@@ -32,7 +32,9 @@ private:
   bool frameQueued = false;
   bool running = false;
   bool error = false;
-  bool previousBeat = false;
   unsigned long framesProcessed = 0;
-  uint32_t lastDebugMs = 0;
+  unsigned long captureDrops = 0;
+  uint32_t captureStartedMs = 0;
+  uint32_t nextCaptureCheckMs = 0;
+  uint32_t lastFrameCompletedMs = 0;
 };

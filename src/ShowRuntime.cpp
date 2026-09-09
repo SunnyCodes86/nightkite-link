@@ -73,7 +73,7 @@ void ShowRuntime::request(const char* text) {
   const char* cached = nullptr; const int found = cache.find(r.id, text, cached);
   if (!error && found == 1) { snprintf(reply, sizeof(reply), "%s", cached); return; }
   if (!error && found < 0) error = "request_conflict";
-  char fields[384] = {}; uint16_t id = 0;
+  char fields[456] = {}; uint16_t id = 0;
   if (!error) {
     switch (r.operation) {
       case Operation::Hello: snprintf(fields, sizeof(fields), "api=1 wire=1 lead_ms=%lu lookahead_ms=%lu", (unsigned long)LIVE_LEAD_MS, (unsigned long)LOOKAHEAD_MS); break;
@@ -99,6 +99,10 @@ void ShowRuntime::request(const char* text) {
       case Operation::Audio:
         error = hw.audioMode ? hw.audioMode(r.argument) : "unsupported";
         if (!error) engine.setAudioActive(audioActive());
+        break;
+      case Operation::AudioStatus:
+        if (hw.audioStatus) hw.audioStatus(fields, sizeof(fields));
+        else error = "unsupported";
         break;
       case Operation::Load: error = load(r.argument); break;
       case Operation::Play: error = play(); break;
